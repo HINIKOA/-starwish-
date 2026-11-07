@@ -127,6 +127,29 @@ DEFAULT_CONFIG = {
         "stt_model": "whisper-1",
         "tts": True,                # 用浏览器朗读 AI 的话
     },
+    "voice": {                      # 宇宙之声：宇宙之眼的声纹插件（分辨男1 / 女1…，看片时拿到名字）
+        "enabled": False,           # 观看页「🌌 宇宙之声」开关；默认关，不下载就不占空间
+        "backend": "sherpa",        # sherpa = sherpa-onnx + CAM++ + pyannote 分割（纯 CPU）
+        "chunk_sec": 8,             # 浏览器每隔几秒送一段声音
+        "match_threshold": 0.5,     # 和已知说话人声纹相似度达到多少算同一个人
+        "merge_threshold": 0.65,    # 重新聚类时，两个人相似度达到多少就合并
+        "local_cluster_threshold": 0.5,  # 一段音频内部的聚类阈值（越小分得越细）
+        "min_learn_sec": 1.5,       # 只用这么长以上的句子更新声纹（短句、抢话不学）
+        "gender_split_hz": 165,     # 音高低于此值记为「男」，高于记为「女」
+        "recluster_every": 4,       # 每处理几段做一次全场重新聚类
+        "recluster_on_end": True,
+        "transcribe": True,         # 有转写服务时逐句转写并标上说话人
+        "auto_identify_every": 20,  # 每新增多少句带说话人的台词，让 LLM 读台词认一次名字（0 = 只手动）
+        "auto_accept_votes": 2,     # 同一个名字被两路线索（或两次）提到就自动确认（0 = 全部等主人确认）
+        "allow_override": False,    # 已确认的名字是否允许被自动线索改掉
+        "visual_naming": True,      # 提问时让视觉模型顺便认人（回答末尾的【认人】标记，不朗读）
+        "use_library": True,        # 按片名 / 系列记住认识的人，下次直接认出
+        "owner_detect": True,       # 录过主人声音后，能分清哪句是主人说的
+        "owner_threshold": 0.55,
+        "download_mirror": "",      # 模型下载加速前缀（国内可填 https://ghfast.top/ 之类）
+        "pip_index": "",            # pip 镜像（如 https://pypi.tuna.tsinghua.edu.cn/simple）
+        "model_base_url": "",       # 自建模型镜像（留空 = sherpa-onnx 官方发布页）
+    },
     "server": {"host": "127.0.0.1", "port": 7860, "open_browser": True},
     "secrets_encrypted": False,
     "secrets_salt": "",

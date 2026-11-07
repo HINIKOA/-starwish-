@@ -126,11 +126,25 @@ def history_messages(sid: str, turns: int = 12) -> list[dict]:
     return msgs[-max(0, turns) * 2:] if turns else []
 
 
+def _speaker_namer(sid: str, entries: list[dict]):
+    """有宇宙之声时，把台词前面的说话人编号换成现在的称呼（男1 / 名字）。"""
+    if not any(e.get("speaker") for e in entries):
+        return lambda spk: ""
+    try:
+        from ..voice.registry import Registry
+        reg = Registry.load(sid)
+        return lambda spk: reg.display(spk) if spk else ""
+    except Exception:
+        return lambda spk: spk or ""
+
+
 def recent_context(sid: str, seconds: float = 90, max_chars: int = 600) -> str:
-    """最近的台词与场景备注，按时间顺序拼成一段。"""
+    """最近的台词与场景备注，按时间顺序拼成一段（台词带说话人）。"""
     _, entries = _read(sid)
     now = time.time()
-    lines = [f"[{e['kind'] == 'subtitle' and '台词' or '场景'}] {e['text']}" for e in entries
+    who = _speaker_namer(sid, entries)
+    lines = [(f"[台词·{who(e.get('speaker'))}] " if e["kind"] == "subtitle" and e.get("speaker") else
+              f"[{e['kind'] == 'subtitle' and '台词' or '场景'}] ") + e["text"] for e in entries
              if e["kind"] in ("subtitle", "scene") and now - e["t"] <= seconds]
     s = "\n".join(lines)
     return s[-max_chars:]
@@ -214,18 +228,22 @@ def system_prompt(cfg: dict, sid: str, query: str, mode: str) -> str:
 # ---------------- 结束：沉淀成星星 ----------------
 def _diary_text(meta: dict, entries: list[dict], max_chars: int = 5000) -> str:
     who = {"user": "主人", "ai": "我", "subtitle": "台词", "scene": "场景", "note": "备注"}
-    rows = [f"{who[e['kind']]}：{e['text']}" for e in entries if e["text"].strip("…. ")]
+    spk = _speaker_namer(meta.get("id", ""), entries)
+    rows = [f"{who[e['kind']]}{('·' + spk(e.get('speaker'))) if e.get('speaker') else ''}：{e['text']}"
+            for e in entries if e["text"].strip("…. ")]
     s = "\n".join(rows)
     return s[-max_chars:]
 
 
-def end(sid: str, make_star: bool = True, llm_summary: str | None = None) -> dict:
+def end(sid: str, make_star: bool = True, llm_summary: str | None = None, cast: str = "") -> dict:
     meta, entries = _read(sid)
     if meta.get("ended_at"):
         return get(sid, with_entries=False)
     now = time.time()
     star = None
     talk = [e for e in entries if e["kind"] in ("user", "ai") and e["text"].strip("…. ")]
+    if not talk and cast:  # 只开了宇宙之声没聊天，也值得记一颗星
+        talk = [e for e in entries if e["kind"] == "subtitle"][:1]
     if make_star and talk:
         mins = round((now - meta["started_at"]) / 60)
         day = datetime.fromtimestamp(meta["started_at"]).strftime("%Y-%m-%d")
@@ -235,9 +253,11 @@ def end(sid: str, make_star: bool = True, llm_summary: str | None = None) -> dic
             owner_lines = [e["text"] for e in talk if e["kind"] == "user"][:3]
             content = (f"{day} 和主人通过宇宙之眼一起看了「{meta['title']}」，约 {mins} 分钟，聊了 {len(talk)} 句。"
                        + (f"主人说过：{'；'.join(owner_lines)}" if owner_lines else ""))
+        if cast and cast not in content:
+            content += f"\n片中认识的人：{cast}。"
         star = stars.add_star(content, summary=f"一起看「{meta['title']}」"[:30], tags=["宇宙之眼", meta["title"][:20]],
                               importance=3, source=f"eye:{sid}", session=sid, actor="eye")
-    _patch(sid, ended_at=now, star_id=star and star.get("id"))
+    _patch(sid, ended_at=now, star_id=star and star.get("id"), cast=cast or None)
     log_event("eye_end", id=sid, title=meta["title"], star_id=star and star.get("id"), entries=len(entries))
     d = get(sid, with_entries=False)
     d["star"] = star

@@ -60,6 +60,8 @@ soulstar/
 │   │   ├── proposals.py      提案队列（自动渠道只能走这里）
 │   │   └── commands.py       主人指令解析（/核心 … 与「记住，以后叫我X」）
 │   ├── evolve/               技能自进化（skills / fuzzy / guard / review / commands）
+│   ├── eye/                  宇宙之眼（engine 引擎 / session 会话与画面日记）
+│   ├── voice/                宇宙之声（audio / backend / registry / naming / pipeline / models）
 │   ├── stars.py              星星、亮度、分层召回
 │   ├── semantic.py           可选语义检索（bge-small-zh）
 │   ├── archive.py            原始对话归档（只追加）
@@ -72,7 +74,8 @@ soulstar/
 │   ├── core.html / core.js / core.css   核心记忆模块页面（/core）
 │   ├── skills.html / skills.js           技能进化模块页面（/skills）
 │   └── vendor/three.module.min.js   three.js 0.160（本地离线可用，缺失时自动走 CDN）
-├── tests/smoke_test.py       冒烟测试
+├── tests/                    smoke_test.py 冒烟 / eye_test.py 宇宙之眼 / voice_test.py 宇宙之声
+├── models/voice/             宇宙之声插件模型（打开开关时才下载，不进备份）
 └── soul/                     ← 灵魂包（首次运行自动创建）
     ├── core.json             核心记忆（唯一真源，带版本号 rev 与锁定状态）
     ├── core.md               核心记忆的只读镜像，方便人看
@@ -203,6 +206,11 @@ POST /api/skills/{name}/rollback    {"rev":3,"mode":"to|undo","confirm":true}；
 GET  /api/skills/pending            待批准；POST /api/skills/pending/{id}/approve | reject
 GET  /api/evolve/status             巡检计数 / 上次巡检；POST /api/evolve/review {"background":true}
 GET  /api/eye/status                宇宙之眼状态（引擎、预检、今日用量；仅主人）
+GET  /api/voice/status              宇宙之声插件状态（依赖、模型、声纹库）
+POST /api/voice/install             一键下载插件（后台）
+POST /api/voice/session/{id}/audio  送一段 16kHz PCM / WAV，返回每句的说话人（和台词）
+GET  /api/voice/session/{id}/speakers   片中的人；POST …/speakers/{spk} 改名/确认/否决；POST …/merge、…/recluster、…/identify
+POST /api/voice/owner/enroll        录入主人声音；GET/DELETE /api/voice/library 声纹库
 POST /api/eye/preflight             能力预检 {"engine":"frame|qwen_omni"}
 POST /api/eye/session/start         开始观看 {"title":"星际穿越","source":"screen|tab|camera"}
 POST /api/eye/ask                   流式问答（SSE）{"session":"…","text":"…","frames":["data:image/jpeg;base64,…"],"mode":"user|auto"}
@@ -374,6 +382,39 @@ tags: [博客, 部署]
 
 ---
 
+## 五·附四、宇宙之声（分辨片中每个人，看着看着就知道他们叫什么）
+
+宇宙之眼观看页的「🌌 宇宙之声」开关。打开后，AI 能分清片子里谁在说话（男1、女1、男2…），台词按说话人记进日记，并在看片过程中把每个人的名字认出来。
+
+**体积：默认不装。** 主程序包不变（约 3.5MB）。第一次打开开关时，面板一键下载约 60MB 到程序目录 `models/voice/`：
+
+| 组件 | 大小 | 许可 |
+|---|---|---|
+| sherpa-onnx 运行库 + numpy | 约 32MB（Windows） | Apache-2.0 / BSD |
+| CAM++ 中英声纹模型（3D-Speaker） | 28.3MB | Apache-2.0 |
+| pyannote 分割模型 3.0（int8） | 1.5MB（下载包 7MB） | MIT |
+
+纯 CPU 运行，不需要 PyTorch、显卡或 ffmpeg。`models/` 不进灵魂包、不进 WebDAV 备份；换电脑重新下载一次即可，设置里也能一键卸载。国内网络可以填「模型下载加速前缀」（如 `https://ghfast.top/`）和 pip 镜像（如清华源）。
+
+**怎么分人：** 浏览器把标签页声音（摄像头模式用麦克风）直接转成 16kHz PCM，每 8 秒送一段 → pyannote 切出「谁在什么时候说话」→ CAM++ 给每个人算 192 维声纹 → 和本场已知的人比对（相似度 ≥ 0.5 算同一人），对不上就是新人；音高判断男女，编号成男1 / 女1。只用 1.5 秒以上的句子更新声纹（短句、抢话不学）；每 4 段做一次**全场重新聚类**，把被拆开的同一个人自动合并。
+
+**怎么认名字（三路线索，思路参考 CineSRD 2026 / 3D-Speaker 多模态分离，独立实现）：**
+1. **台词**：配了转写服务就逐句转写并标上说话人。「我叫库珀」直接提名；每攒 20 句，LLM 读带说话人的台词，从称呼推断名字（A 对 B 说「库珀，你得走了」→ B 可能叫库珀）。
+2. **画面**：你提问时，星魂把说话人表和「最近几秒谁在说话」一起交给视觉模型。它能从字幕、胸牌、别人喊名字或说话人的样子看出是谁，就在回答末尾写一行【认人】标记；这一行**不显示、不朗读**，只用来提名。**不加人脸模型，零体积。**
+3. **声纹库**：确认过名字的人按片名 / 系列存起来（「第2集」「S01E03」不影响），下次看同一部或同系列，一开口就认出来。
+
+同一个名字被**两路线索（或两次）**提到就自动确认，否则显示「男1（可能是库珀）」。已确认的名字不会被自动线索改掉；名字已被别人确认时只记一票，不抢。主人可以在「片中的人」面板里**改名、✓ 确认、✗ 否决、⇄ 合并、重新聚类、让 AI 认人**。
+
+**主人的声音：** 在「声纹库」页录 8 秒自己的声音，用摄像头 + 麦克风一起看时，AI 能分清哪句是你说的。
+
+**隐私：** 只存声纹向量（192 个数字）和名字，**不存任何录音**。登记簿在 `soul/eye/voice/`，声纹库在 `soul/eye/voices/library.json`，都可以在面板里删除。
+
+**实测（沙箱 ARM CPU）：** 一段 57 秒的中文四人对话按 8 秒一段实时处理，分出 4 个人，处理用时 2.8 秒（实时率 0.05）。电影里的配乐、音效、几个人抢话和不到 1 秒的短句会降低准确率，所以要有合并和改名。
+
+**还没实测：** 真实电影音轨上的准确率、各浏览器标签页音频采集、Windows 下一键安装依赖。
+
+---
+
 ## 六、LLM 自动整理（可选）
 
 在设置里填好上游 API Key 后：
@@ -446,10 +487,12 @@ pip install -r requirements.txt
 pip install wsgidav cheroot      # 可选：用于测试 WebDAV
 python tests/smoke_test.py
 python tests/eye_test.py         # 宇宙之眼
+python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-onnx 和真实模型时会多跑一项真实录音分人）
 ```
 
 冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、核心记忆模块（主人指令 / 令牌 / 代理 /核心 / 版本历史 / 回滚撤销 / 上锁转提案）、技能自进化（模糊补丁 / 安全扫描 / 待批准 / 后台巡检阈值 / 自修复 / 注入 / MCP skill_manage）、
 星汐/zip/markdown/ChatGPT 导入、代理注入（非流式 + 流式）、LLM 整理、MCP（官方 SDK 与内置实现）、快照恢复、WebDAV 加密备份与版本保留、机密加密、1 万颗星性能。
+`voice_test.py` 验证宇宙之声：音高与男女、【认人】标记解析与流式隐藏、登记簿匹配 / 短句不学 / 重新聚类、三路线索投票确认、声纹库按系列认人、主人声音、一键下载模型（模拟发布页）、逐句转写带说话人、画面认人、LLM 读台词认人、改名 / 否决 / 合并、只存向量不存录音、仅主人；可选的真实模型测试用 sherpa-onnx + CAM++ 跑四人录音。
 `eye_test.py` 验证宇宙之眼：页面与按键、引擎解析与千问预留接口、能力预检、流式问答、图片不进历史、主动吐槽限速、预算、视频格式自动退回多图、直接出语音、Anthropic 协议、转写、密钥不外泄、仅主人、结束沉淀成星星。
 
 ---
@@ -466,6 +509,8 @@ python tests/eye_test.py         # 宇宙之眼
 - [ ] 导出回星汐格式（记忆卡.md + 日记），与 DSH 互通
 - [ ] 便携版 Python 一键包（免安装 Python）
 - [ ] 宇宙之眼实时直连模式（Gemini Live / OpenAI Realtime / Qwen-Omni Realtime 的 WebSocket / WebRTC 双向流）
+- [ ] 宇宙之声「高精度档」：NVIDIA Nemotron 3 Diarization（2026-09，最多 8 人、实时、OpenMDW 许可、q4 ONNX 约 83MB），等它进入 sherpa-onnx 正式版并实测 CPU 速度后作为可选下载
+- [ ] 宇宙之声更小的声纹模型：ReDimNet / ReDimNet2（MIT，1–3.6M 参数），等有中文训练版和 ONNX
 
 ---
 
@@ -473,4 +518,5 @@ python tests/eye_test.py         # 宇宙之眼
 
 - 星图理念、档案格式与导入兼容对象：**星汐 dsh-xingxi**，作者 **Yuuyuko-uu**，<https://github.com/Yuuyuko-uu/dsh-xingxi>。原许可全文见 `LICENSE-XINGXI.txt`，说明见 `LICENSE-NOTICE.md`。
 - 宇宙之眼参考了 **mcai**（<https://github.com/MFHRY/mcai>，CC0 1.0）的按需提问、框选区域、读图能力预检与预算，以及 **dsh-see-now**（<https://github.com/SAOS-3624/dsh-see-now>，Apache-2.0）的变化分选帧、分镜拼图与节奏思路；代码均为独立实现，未复制源代码。
+- 宇宙之声（可选插件，运行时下载，不随包分发）：**sherpa-onnx**（k2-fsa，Apache-2.0）、**3D-Speaker CAM++**（阿里通义实验室，Apache-2.0）、**pyannote segmentation 3.0**（CNRS，MIT）；三路线索认人的思路参考 CineSRD（arXiv 2603.16966）与 3D-Speaker 多模态分离，代码为独立实现。评估过的 AI-YinMei（开源版不含声纹代码）与 Speaker-Recognition（无许可证、闭集分类）未使用。
 - 3D 渲染：three.js（MIT）。中文分词：jieba（MIT）。

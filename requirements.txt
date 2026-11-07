@@ -10,3 +10,6 @@ mcp>=1.2
 pyyaml>=6
 # 可选：语义检索（体积较大，按需安装）
 # sentence-transformers>=2.7
+# 可选：宇宙之声（面板里一键安装，也可手动装）
+# sherpa-onnx>=1.12
+# numpy>=1.24

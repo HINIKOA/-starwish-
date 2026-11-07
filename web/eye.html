@@ -21,6 +21,7 @@
   <nav class="ctabs">
     <button data-tab="watch" class="on">观看</button>
     <button data-tab="diary">画面日记</button>
+    <button data-tab="voices">声纹库</button>
     <button data-tab="settings">设置</button>
   </nav>
 
@@ -42,6 +43,7 @@
         <div class="tools">
           <button id="regionBtn" title="拖动框出只想让 AI 看的区域，省 token">⬚ 框选区域</button>
           <button id="fullBtn" class="hidden">全画面</button>
+          <button id="voiceBtn" class="voicebtn" title="宇宙之声：分辨片中每个说话人，看着看着就知道他们叫什么">🌌 宇宙之声 <b id="voiceState">关</b></button>
           <label class="sw"><input type="checkbox" id="micChk"> 🎙 语音对话</label>
           <label class="sw"><input type="checkbox" id="ttsChk"> 🔊 朗读</label>
           <select id="paceSel" title="主动吐槽的节奏">
@@ -51,6 +53,7 @@
           <span class="meter" title="画面变化分（切场景时会跳高）"><i id="meterBar"></i></span>
         </div>
         <div class="filmstrip" id="strip"></div>
+        <div id="cast" class="cast hidden"></div>
       </div>
       <div class="chatcol">
         <div id="log" class="elog"><div class="empty">开始观看后，直接说话或打字就能问它。按 <b>H</b> 问「现在这个画面怎么样」。</div></div>
@@ -64,6 +67,7 @@
   </section>
 
   <section id="tab-diary" class="tab hidden"></section>
+  <section id="tab-voices" class="tab hidden"></section>
   <section id="tab-settings" class="tab hidden"></section>
 </main>
 <div id="toast" class="hidden"></div>

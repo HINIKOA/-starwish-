@@ -142,12 +142,12 @@ async function startCapture(src) {
   const t0 = Date.now();
   liveTimer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("#liveTime").textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`; renderStrip(); }, 1000);
   sys(`开始一起看「${S.title}」。画面只在本机处理，${CFG().save_frames ? "已按设置保存画面" : "不保存画面"}，只记文字日记。`);
-  startSubtitles();
+  if (voiceOn()) startVoice(src); else startSubtitles();
   if ($("#micChk").checked) startMic();
 }
 async function stopCapture(makeStar = true) {
   clearInterval(sampleTimer); clearInterval(liveTimer); sampleTimer = liveTimer = null;
-  stopSubtitles();
+  stopSubtitles(); stopVoice();
   if (ctrl) ctrl.abort();
   speechSynthesis.cancel();
   if (media) media.getTracks().forEach((t) => t.stop());
@@ -157,6 +157,7 @@ async function stopCapture(makeStar = true) {
     const sid = S.id; S = null;
     const r = await safe(() => api(`/api/eye/session/${sid}/end`, { method: "POST", body: makeStar ? {} : { make_star: false } }));
     if (r) sys(r.star ? `已停止。这次观看沉淀成了一颗星 #${r.star.id}：${r.star.summary}` : "已停止，画面已全部丢弃。");
+    if (r && r.voice && r.voice.cast) sys(`🌌 这次认识了：${r.voice.cast}${r.voice.saved ? `（已存进声纹库，下次看这部或同系列会直接认出）` : ""}`);
     loadStatus();
   }
 }
@@ -199,6 +200,7 @@ async function ask(text, mode = "user") {
         else if (p.type === "audio") audio.push(p.data);
         else if (p.type === "error") addMsg("sys", "⚠ " + p.message);
         else if (p.type === "info") $("#stat").textContent = p.message;
+        else if (p.type === "names") onNames(p.changes);
         else if (p.type === "done") {
           const fm = p.first_ms ?? Math.round(performance.now() - t0);
           if (el) el.insertAdjacentHTML("beforeend", `<div class="m">${mode === "auto" ? "主动 · " : ""}首字 ${fm} ms · ${p.tokens} tok</div>`);
@@ -298,6 +300,7 @@ function setupRegion() {
 // ---------------- 状态、日记、设置 ----------------
 async function loadStatus() {
   ST = await api("/api/eye/status");
+  await loadVoice();
   const e = ST.engines[ST.engine]; const c = CFG();
   $("#emeta").innerHTML = `<span class="chip">引擎 <b>${esc(e.title)}</b></span><span class="chip">模型 <b>${esc(e.model || "未设置")}</b></span>
     <span class="chip">今天 <b>${ST.usage.tokens}</b> tok · <b>${ST.usage.requests}</b> 次</span>${e.ready ? "" : '<span class="chip warn">未配置</span>'}`;
@@ -316,7 +319,7 @@ async function renderDiary() {
     const box = el.querySelector(".diary"); if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
     const d = await api(`/api/eye/session/${el.dataset.id}`);
     const K = { user: "主人", ai: "我", subtitle: "台词", scene: "场景", note: "备注" };
-    box.innerHTML = d.entries.filter((x) => x.text.replace(/[….\s]/g, "")).map((x) => `<div><span class="k">${K[x.kind]}</span>${esc(x.text)}</div>`).join("") || "（只看没聊）";
+    box.innerHTML = d.entries.filter((x) => x.text.replace(/[….\s]/g, "")).map((x) => `<div><span class="k">${K[x.kind]}${x.who ? "·" + esc(x.who) : ""}</span>${esc(x.text)}</div>`).join("") || "（只看没聊）";
     box.classList.remove("hidden");
   });
 }
@@ -352,6 +355,7 @@ function renderSettings() {
     <h4>声音</h4>
     <div class="row">${F("tts", "朗读 AI 的话（浏览器）", "checkbox")}${SEL("stt_mode", "转写", [["browser", "只听主人说话（浏览器识别）"], ["api", "也转写电影声音（转写服务）"]])}
       ${F("stt_base_url", "转写服务地址（留空沿用 LLM 地址）")}${F("stt_api_key", "转写 Key（留空沿用）", "password")}${F("stt_model", "转写模型")}</div>
+    ${voiceSettingsHtml()}
     <div class="toolbar"><button id="saveEye" class="primary">保存设置</button></div>
   </div>`;
   $$("[data-pre]").forEach((b) => b.onclick = () => safe(async () => {
@@ -363,9 +367,13 @@ function renderSettings() {
     const patch = {};
     $$("#tab-settings [data-k]").forEach((el) => { const k = el.dataset.k;
       patch[k] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value || 0) : el.value; });
-    await api("/api/settings", { method: "PUT", body: { eye: patch } });
+    const vpatch = {};
+    $$("#tab-settings [data-v]").forEach((el) => { const k = el.dataset.v;
+      vpatch[k] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value || 0) : el.value; });
+    await api("/api/settings", { method: "PUT", body: { eye: patch, voice: vpatch } });
     toast("已保存"); await loadStatus(); renderSettings();
   });
+  bindVoiceSettings();
 }
 
 // ---------------- 绑定 ----------------
@@ -374,9 +382,11 @@ $$(".ctabs button").forEach((b) => b.onclick = () => {
   $$(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== "tab-" + b.dataset.tab));
   if (b.dataset.tab === "diary") safe(renderDiary);
   if (b.dataset.tab === "settings") renderSettings();
+  if (b.dataset.tab === "voices") safe(renderVoices);
 });
 $$("[data-src]").forEach((b) => b.onclick = () => startCapture(b.dataset.src));
 $("#stopBtn").onclick = () => stopCapture(true);
+$("#voiceBtn").onclick = () => safe(toggleVoice);
 $("#liveBadge").onclick = () => stopCapture(true);
 const send = () => { const t = $("#ask").value.trim(); if (!t) return; $("#ask").value = ""; ask(t, "user"); };
 $("#askBtn").onclick = send;
@@ -391,3 +401,184 @@ document.addEventListener("keydown", (e) => {
 window.addEventListener("beforeunload", () => { if (S) navigator.sendBeacon(`/api/eye/session/${S.id}/end`, new Blob(["{}"], { type: "application/json" })); });
 setupRegion();
 loadStatus().catch((e) => { $("#intro").innerHTML = `<b style="color:var(--danger)">${esc(e.message)}</b>`; $$("[data-src]").forEach((b) => (b.disabled = true)); });
+
+
+// ================= 宇宙之声：声纹分人 + 三路线索认名字 =================
+let VS = null;                       // /api/voice/status
+let vCap = null, vMic = null, vQueue = 0, vRoster = null, vPoll = null;
+const VC = () => (VS && VS.settings) || {};
+const voiceOn = () => !!(VS && VS.enabled && VS.ready);
+async function loadVoice() {
+  try { VS = await api("/api/voice/status"); } catch { VS = null; }
+  const on = VS && VS.enabled;
+  $("#voiceBtn").classList.toggle("on", !!on);
+  $("#voiceState").textContent = !VS ? "不可用" : on ? (VS.ready ? "开" : "待安装") : "关";
+  if (on && !VS.ready) renderInstall(); else if (!S || !on) { if (!vCap) $("#cast").classList.add("hidden"); }
+}
+async function toggleVoice() {
+  const want = !(VS && VS.enabled);
+  await api("/api/settings", { method: "PUT", body: { voice: { enabled: want } } });
+  await loadVoice();
+  if (!want) { stopVoice(); $("#cast").classList.add("hidden"); if (S) startSubtitles(); toast("宇宙之声已关闭"); return; }
+  if (!VS.ready) { renderInstall(); return; }
+  toast("宇宙之声已打开：会分辨每个说话人");
+  if (S && media) { stopSubtitles(); startVoice(S.source); }
+}
+function renderInstall() {
+  const c = $("#cast"); c.classList.remove("hidden");
+  const j = VS.jobs || {}; const running = Object.values(j).some((x) => x.state === "running");
+  const depsOk = Object.values(VS.deps).every((d) => d.ok);
+  const rows = Object.entries(VS.models).map(([k, m]) => { const jb = j["model:" + k] || {};
+    const pct = m.installed ? 100 : jb.total ? Math.round((jb.done || 0) / jb.total * 100) : 0;
+    return `<div>${m.installed ? "✔" : jb.state === "error" ? "✘" : "○"} ${esc(m.title)} <small>${(m.download_bytes / 1e6).toFixed(1)} MB</small>${jb.error ? ` <span class="bad">${esc(jb.error)}</span>` : ""}</div><div class="bar"><i style="width:${pct}%"></i></div>`; }).join("");
+  const dj = j.deps || {};
+  c.innerHTML = `<div class="install"><div class="chead">🌌 <b>宇宙之声需要先装声纹插件</b><span class="grow"></span></div>
+    还需下载约 <b>${VS.need_mb} MB</b>：放在程序目录 <code>models/voice/</code>，不进灵魂包、不进备份。只存声纹向量，不存录音。
+    <div>${depsOk ? "✔" : dj.state === "error" ? "✘" : "○"} 运行库 sherpa-onnx + numpy ${depsOk ? "" : "<small>约 32 MB</small>"}${dj.error ? ` <span class="bad">${esc(dj.error)}</span>` : ""}</div>
+    ${rows}
+    <div class="toolbar"><button id="vInstall" class="primary" ${running ? "disabled" : ""}>${running ? "下载中…" : "一键下载"}</button>
+    <small class="note">国内网络慢可以在「设置 → 宇宙之声」填下载加速前缀和 pip 镜像。</small></div></div>`;
+  $("#vInstall").onclick = () => safe(async () => { await api("/api/voice/install", { method: "POST", body: {} }); pollInstall(); });
+  if (running) pollInstall();
+}
+function pollInstall() {
+  clearInterval(vPoll);
+  vPoll = setInterval(async () => {
+    try { VS = await api("/api/voice/status"); } catch { return; }
+    const running = Object.values(VS.jobs || {}).some((x) => x.state === "running");
+    if (VS.ready) { clearInterval(vPoll); toast("声纹插件装好了"); await loadVoice(); if (S && media) { stopSubtitles(); startVoice(S.source); } else $("#cast").classList.add("hidden"); return; }
+    renderInstall(); if (!running) clearInterval(vPoll);
+  }, 1200);
+}
+
+// ---- 采集 16kHz PCM（ScriptProcessor 降采样；兼容所有主流浏览器） ----
+function pcmCapture(stream, chunkSec, onChunk) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const mute = ctx.createGain(); mute.gain.value = 0;
+  const ratio = ctx.sampleRate / 16000, need = Math.round(16000 * chunkSec);
+  let buf = new Int16Array(need), n = 0, pos = 0, t0 = Date.now() / 1000;
+  proc.onaudioprocess = (ev) => {
+    const ch = ev.inputBuffer.getChannelData(0);
+    for (; pos < ch.length; pos += ratio) {
+      const v = Math.max(-1, Math.min(1, ch[Math.floor(pos)]));
+      buf[n++] = v * 32767;
+      if (n >= need) { const out = buf; buf = new Int16Array(need); n = 0; const t = t0; t0 = Date.now() / 1000; onChunk(out, t); }
+    }
+    pos -= ch.length;
+  };
+  src.connect(proc); proc.connect(mute); mute.connect(ctx.destination);
+  return { stop: () => { try { proc.disconnect(); src.disconnect(); ctx.close(); } catch {} }, flush: () => { if (n > 16000) { const out = buf.slice(0, n); n = 0; onChunk(out, t0); } } };
+}
+const pcmRms = (a) => { let s = 0; for (let i = 0; i < a.length; i += 4) s += (a[i] / 32768) ** 2; return Math.sqrt(s / (a.length / 4)); };
+async function startVoice(src) {
+  if (!S || vCap) return;
+  let tracks = media ? media.getAudioTracks() : [];
+  if (src === "camera") {
+    try { vMic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); tracks = vMic.getAudioTracks(); }
+    catch (e) { sys("宇宙之声没拿到麦克风：" + (e.message || e.name)); return; }
+  }
+  if (!tracks.length) { sys("🌌 这次共享没有带声音，宇宙之声听不到。请选「标签页」并勾选「共享音频」。"); return; }
+  const sec = Math.max(3, Math.min(20, +VC().chunk_sec || 8));
+  vCap = pcmCapture(new MediaStream(tracks), sec, sendVoice);
+  $("#cast").classList.remove("hidden");
+  renderCast(await api(`/api/voice/session/${S.id}/speakers`).catch(() => null));
+  sys(`🌌 宇宙之声开始听：每 ${sec} 秒分一次人。${VS.stt_ready ? "台词会逐句转写并标上说话人。" : "还没配置转写服务，只分人不转写（设置 → 声音 → 也转写电影声音）。"}`);
+}
+function stopVoice() { if (vCap) { vCap.flush(); vCap.stop(); } vCap = null; if (vMic) vMic.getTracks().forEach((t) => t.stop()); vMic = null; }
+async function sendVoice(pcm, t0) {
+  if (!S || pcmRms(pcm) < 0.004) return;            // 静音段不送，省 CPU
+  if (vQueue >= 2) return;                           // 后端处理不过来就丢一段，保证实时
+  vQueue++;
+  const sid = S.id;
+  try {
+    const r = await fetch(`/api/voice/session/${sid}/audio?sr=16000&t0=${t0.toFixed(2)}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: pcm.buffer });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { $("#stat").textContent = "🌌 " + (d.detail || `HTTP ${r.status}`); return; }
+    for (const l of d.lines) if (l.text) { const el = addMsg("sub", ""); el.querySelector(".b").innerHTML = `<span class="who" style="color:${l.color}">${esc(l.display)}</span>${esc(l.text)}`; }
+    if (d.new_speakers.length) $("#stat").textContent = `🌌 新面孔：${d.new_speakers.join("、")}`;
+    if (d.merges.length) sys(`🌌 重新聚类：${d.merges.map((m) => `${m.drop_label} 其实就是 ${m.keep_label}`).join("；")}`);
+    onNames(d.names, false);
+    const last = d.lines[d.lines.length - 1];
+    renderCast(d.roster, last && last.speaker, d);
+  } catch (e) { $("#stat").textContent = "🌌 " + e.message; } finally { vQueue--; }
+}
+function onNames(changes, refresh = true) {
+  const SRC = { visual: "画面", dialogue: "台词", self_intro: "自我介绍", owner: "主人" };
+  for (const c of changes || []) {
+    if (c.status === "confirmed") sys(`🌌 认出来了：${c.label} = ${c.name}（${SRC[c.source] || c.source}）`);
+    else if (c.status === "proposed") $("#stat").textContent = `🌌 ${c.label} 可能叫 ${c.name}（${SRC[c.source] || c.source}）`;
+  }
+  if (refresh && changes && changes.length && S) api(`/api/voice/session/${S.id}/speakers`).then((r) => renderCast(r)).catch(() => {});
+}
+function renderCast(roster, talking, info) {
+  if (!roster) return; vRoster = roster;
+  const c = $("#cast"); c.classList.remove("hidden");
+  const fmtS = (x) => (x >= 60 ? `${Math.round(x / 60)} 分` : `${Math.round(x)} 秒`);
+  c.innerHTML = `<div class="chead">🌌 <b>片中的人</b><span class="note">${roster.speakers.length} 位</span><span class="grow"></span>
+      <button id="vIdentify" title="让 AI 读带说话人的台词，从称呼里推断名字">让 AI 认人</button><button id="vRecluster" title="把被拆开的同一个人合并">重新聚类</button></div>
+    <div class="now" id="vNow">${talking ? `正在说话：${esc((roster.speakers.find((s) => s.id === talking) || {}).display || "")}` : ""}${info ? ` · 分人耗时 ${info.proc_ms} ms / ${info.audio_sec} 秒音频` : ""}</div>
+    ${roster.speakers.map((s) => { const p = (s.proposals || []).filter((x) => !x.rejected).sort((a, b) => b.votes - a.votes)[0];
+      return `<div class="spk ${s.id === talking ? "talking" : ""}" data-id="${s.id}"><span class="dot" style="background:${s.color};color:${s.color}"></span>
+        <span class="nm">${esc(s.name_status === "confirmed" ? s.name : s.label)}</span>
+        ${s.name_status === "confirmed" && !s.owner ? `<span class="lb">${esc(s.label)}</span><span class="st-confirmed">✔</span>` : ""}
+        ${s.name_status !== "confirmed" && p ? `<span class="pp">可能是 ${esc(p.name)}（${p.votes} 票）</span><button data-act="confirm">✓</button><button data-act="reject" data-name="${esc(p.name)}">✗</button>` : ""}
+        <span class="meta">${s.gender || ""}${s.f0 ? ` ${Math.round(s.f0)}Hz` : ""} · ${fmtS(s.seconds)}</span>
+        ${s.owner ? "" : `<button data-act="rename" title="改名">✏</button><button data-act="merge" title="和另一个人合并">⇄</button>`}</div>`; }).join("") || '<div class="note">还没听到人说话。</div>'}`;
+  $("#vIdentify").onclick = () => safe(async () => { const r = await api(`/api/voice/session/${S.id}/identify`, { method: "POST" }); onNames(r.changes, false); renderCast(r); if (!r.changes.length) toast("台词里还看不出名字"); });
+  $("#vRecluster").onclick = () => safe(async () => { const r = await api(`/api/voice/session/${S.id}/recluster`, { method: "POST" }); toast(r.merges.length ? `合并了 ${r.merges.length} 对` : "没有需要合并的"); renderCast(r); });
+  $$("#cast .spk button").forEach((b) => b.onclick = () => safe(async () => {
+    const id = b.closest(".spk").dataset.id, act = b.dataset.act, base = `/api/voice/session/${S.id}`;
+    let r;
+    if (act === "rename") { const n = prompt("这个人叫什么？（留空 = 清除名字）"); if (n === null) return; r = await api(`${base}/speakers/${id}`, { method: "POST", body: { action: "set", name: n } }); }
+    else if (act === "confirm") r = await api(`${base}/speakers/${id}`, { method: "POST", body: { action: "confirm" } });
+    else if (act === "reject") r = await api(`${base}/speakers/${id}`, { method: "POST", body: { action: "reject", name: b.dataset.name } });
+    else if (act === "merge") { const t = prompt("和谁是同一个人？输入对方的编号或名字（例如 男2）"); if (!t) return;
+      const other = vRoster.speakers.find((s) => s.label === t.trim() || s.name === t.trim()); if (!other) throw new Error("找不到 " + t);
+      r = await api(`${base}/merge`, { method: "POST", body: { keep: other.id, drop: id } }); }
+    renderCast(r);
+  }));
+}
+
+// ---- 声纹库 & 设置 ----
+async function renderVoices() {
+  const lib = await api("/api/voice/library");
+  $("#tab-voices").innerHTML = `<div class="form vlib"><h4>主人的声音</h4>
+    <div>${lib.owner.enrolled ? `✔ 已录入（${lib.owner.seconds} 秒，${fmtDate(lib.owner.enrolled_at)}）。用摄像头 + 麦克风一起看时，能分清哪句是你说的。` : "还没录入。录一段你的声音（念 8 秒左右），用麦克风一起看时就能分清哪句是你说的。"}</div>
+    <div class="toolbar"><button id="vEnroll" class="primary">🎙 ${lib.owner.enrolled ? "重新录" : "录入"}我的声音（8 秒）</button>${lib.owner.enrolled ? '<button id="vOwnerDel" class="danger">删除</button>' : ""}</div>
+    <h4>认识的人（按片名 / 系列）</h4>
+    ${lib.titles.length ? lib.titles.map((t) => `<div class="sess"><div class="hhead"><b>「${esc(t.title)}」</b><span class="t">${t.speakers.map((s) => `${esc(s.name)}${s.gender ? `（${s.gender}）` : ""}`).join("、")}</span>
+      <span class="acts"><button data-del="${esc(t.key)}" class="danger">删除</button></span></div></div>`).join("") : '<div class="empty">还没有。看片时确认过名字的人，结束后会存在这里；下次看同一部或同系列（第几集不同也算）会直接认出。</div>'}
+    <div class="note">只存声纹向量（192 个数字）和名字，不存任何录音。</div></div>`;
+  $$("[data-del]").forEach((b) => b.onclick = () => safe(async () => { if (!confirm("删除这部片的声纹？")) return; await api(`/api/voice/library/${encodeURIComponent(b.dataset.del)}`, { method: "DELETE" }); renderVoices(); }));
+  if ($("#vOwnerDel")) $("#vOwnerDel").onclick = () => safe(async () => { await api("/api/voice/owner", { method: "DELETE" }); renderVoices(); });
+  $("#vEnroll").onclick = () => safe(async () => {
+    if (!voiceOn()) throw new Error("先打开宇宙之声并装好插件");
+    const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const b = $("#vEnroll"); b.disabled = true; let left = 8; b.textContent = `请随便说点什么… ${left}`;
+    const tick = setInterval(() => { left--; b.textContent = `请随便说点什么… ${left}`; }, 1000);
+    await new Promise((ok) => { const cap = pcmCapture(mic, 8, async (pcm) => { cap.stop(); mic.getTracks().forEach((t) => t.stop()); clearInterval(tick);
+      try { await api("/api/voice/owner/enroll?sr=16000", { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: pcm.buffer }); toast("录好了"); } catch (e) { toast(e.message, true); }
+      ok(); }); });
+    renderVoices();
+  });
+}
+const VF = (k, label, type = "text", extra = "") => { const v = VC()[k]; return type === "checkbox"
+  ? `<label class="chk"><input type="checkbox" data-v="${k}" ${v ? "checked" : ""}> ${label}</label>`
+  : `<div><label>${label}</label><input data-v="${k}" type="${type}" value="${esc(v ?? "")}" ${extra}></div>`; };
+function voiceSettingsHtml() {
+  if (!VS) return "";
+  return `<h4>宇宙之声（声纹插件） <small class="note">${VS.ready ? `已安装 · ${esc(VS.models_dir)}` : `未安装，打开开关时一键下载约 ${VS.need_mb} MB`}</small></h4>
+    <div class="row">${VF("enabled", "打开宇宙之声", "checkbox")}${VF("chunk_sec", "每隔几秒分一次人", "number", 'min="3" max="20"')}
+      ${VF("match_threshold", "同一人的声纹相似度", "number", 'step="0.01" min="0.2" max="0.9"')}${VF("merge_threshold", "重新聚类时合并的相似度", "number", 'step="0.01" min="0.3" max="0.95"')}
+      ${VF("min_learn_sec", "只用多长以上的句子学声纹（秒）", "number", 'step="0.1"')}${VF("gender_split_hz", "男女分界音高（Hz）", "number")}
+      ${VF("auto_identify_every", "每多少句台词让 AI 认一次名字（0 = 手动）", "number")}${VF("auto_accept_votes", "几票自动确认名字（0 = 都等我确认）", "number")}
+      ${VF("visual_naming", "提问时让视觉模型顺便认人", "checkbox")}${VF("transcribe", "逐句转写并标上说话人", "checkbox")}
+      ${VF("use_library", "按片名 / 系列记住认识的人", "checkbox")}${VF("allow_override", "允许自动线索改掉已确认的名字", "checkbox")}
+      ${VF("download_mirror", "模型下载加速前缀（可空）")}${VF("pip_index", "pip 镜像（可空）")}</div>
+    ${VS.ready ? '<div class="toolbar"><button id="vRemove" class="danger">卸载声纹模型（释放空间）</button></div>' : ""}`;
+}
+function bindVoiceSettings() {
+  if ($("#vRemove")) $("#vRemove").onclick = () => safe(async () => { if (!confirm("删除已下载的声纹模型？声纹库不受影响。")) return; await api("/api/voice/models", { method: "DELETE" }); await loadVoice(); renderSettings(); });
+}

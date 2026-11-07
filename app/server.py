@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, archive, config, core, evolve, eye, importers, maintenance, stars, sync
+from . import __version__, archive, config, core, evolve, eye, importers, maintenance, stars, sync, voice
 from .db import init_db, log_event, read_events
 from .proxy import router as proxy_router
 
@@ -713,7 +713,16 @@ def eye_sessions(request: Request, limit: int = 30):
 def eye_session_get(sid: str, request: Request):
     _eye_owner(request)
     _eye_session(sid)
-    return eye.session.get(sid)
+    d = eye.session.get(sid)
+    if any(e.get("speaker") for e in d["entries"]):  # 宇宙之声：台词标上现在的称呼
+        try:
+            reg = voice.registry.Registry.load(sid)
+            for e in d["entries"]:
+                if e.get("speaker"):
+                    e["who"] = reg.display(e["speaker"])
+        except Exception:  # noqa: BLE001
+            pass
+    return d
 
 
 @app.post("/api/eye/session/{sid}/note")
@@ -738,7 +747,15 @@ async def eye_end(sid: str, req: EyeEnd, request: Request):
                 summary = await run_in_threadpool(maintenance.chat, msgs, cfg)
             except Exception as ex:  # 总结失败就用朴素版
                 log.warning("宇宙之眼总结失败：%s", ex)
-    return eye.session.end(sid, make_star=make, llm_summary=summary)
+    vend = {"saved": 0, "cast": ""}
+    if not meta.get("ended_at"):
+        try:
+            vend = await run_in_threadpool(voice.pipeline.end_session, cfg, sid)
+        except Exception as ex:  # noqa: BLE001
+            log.warning("宇宙之声收尾失败：%s", ex)
+    d = eye.session.end(sid, make_star=make, llm_summary=summary, cast=vend.get("cast", ""))
+    d["voice"] = vend
+    return d
 
 
 @app.post("/api/eye/transcribe")
@@ -801,6 +818,9 @@ async def eye_ask(req: EyeAsk, request: Request):
     if req.mode == "user":
         eye.session.add(req.session, "user", text)
     system = eye.session.system_prompt(cfg, req.session, text, req.mode)
+    vrule = voice.pipeline.prompt_rule(req.session) if cfg.get("voice", {}).get("visual_naming", True) else ""
+    if vrule:
+        system += "\n\n" + vrule
     prompt = (f"最近的台词 / 场景：\n{ctx}\n\n" if ctx else "") + (text or "（画面刚切换。）")
     if e.get("save_frames") and frames:
         d = config.soul_path("eye", "frames", req.session)
@@ -815,14 +835,31 @@ async def eye_ask(req: EyeAsk, request: Request):
     async def gen():
         yield _sse({"type": "start", "engine": r["engine"], "model": r["model"], "frames": len(frames), "mode": req.mode})
         out, usage, fin = "", {}, {}
+        tf = voice.naming.TagFilter()
         async for p in eye.engine.stream(r, system, history, prompt, frames):
             if p["type"] == "delta":
                 out += p["text"]
+                shown = tf.feed(p["text"])
+                if shown:
+                    yield _sse({**p, "text": shown})
+                continue
             elif p["type"] == "done":
                 fin = p
                 usage = p.get("usage") or {}
                 continue
             yield _sse(p)
+        rest = tf.flush()
+        if rest:
+            yield _sse({"type": "delta", "text": rest})
+        out, tags = voice.naming.parse_tags(out)
+        named = []
+        if tags:
+            try:
+                named = await run_in_threadpool(voice.pipeline.apply_visual_tags, cfg, req.session, tags)
+            except Exception as ex:  # noqa: BLE001
+                log.warning("宇宙之声认人失败：%s", ex)
+            if named:
+                yield _sse({"type": "names", "changes": named})
         reply = out.strip() or "…"
         try:
             eye.session.add(req.session, "ai", reply, mode=req.mode, first_ms=fin.get("first_ms"))
@@ -836,6 +873,182 @@ async def eye_ask(req: EyeAsk, request: Request):
                     "tokens": tokens, "today": u, "first_ms": fin.get("first_ms"), "total_ms": fin.get("total_ms")})
 
     return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ---------------- 宇宙之声（声纹插件） ----------------
+class VoiceInstall(BaseModel):
+    deps: bool = True
+    models: bool = True
+
+
+class VoiceName(BaseModel):
+    name: str = ""
+    action: str = "set"             # set = 主人指定 / confirm = 确认当前提名 / reject = 否决
+
+
+class VoiceMerge(BaseModel):
+    keep: str
+    drop: str
+
+
+def _voice_cfg(request: Request) -> dict:
+    return _eye_owner(request)
+
+
+def _voice_err(ex: Exception):
+    if isinstance(ex, (voice.VoiceError, eye.SessionNotFound)):
+        raise HTTPException(404 if isinstance(ex, eye.SessionNotFound) else 400, str(ex) or "找不到这次观看")
+    if isinstance(ex, voice.backend.BackendError):
+        raise HTTPException(409, str(ex))
+    raise ex
+
+
+@app.get("/api/voice/status")
+def voice_status(request: Request):
+    cfg = _voice_cfg(request)
+    v = config.masked_config().get("voice", {})
+    st = voice.models.status(voice.backend.name(cfg.get("voice") or {}))
+    return {**st, "settings": v, "enabled": bool(v.get("enabled")), "library": voice.registry.library_public(),
+            "stt_ready": voice.pipeline.stt_ready(cfg) and (cfg.get("eye") or {}).get("stt_mode") == "api",
+            "llm_ready": maintenance.llm_ready(cfg)}
+
+
+@app.post("/api/voice/install")
+def voice_install(req: VoiceInstall, request: Request):
+    cfg = _voice_cfg(request)
+    jobs = voice.models.install(cfg.get("voice") or {}, deps=req.deps, models=req.models)
+    log_event("voice_install", deps=req.deps, models=req.models)
+    return {"jobs": jobs}
+
+
+@app.delete("/api/voice/models")
+def voice_models_remove(request: Request):
+    _voice_cfg(request)
+    return {"removed": voice.models.uninstall_models()}
+
+
+@app.post("/api/voice/session/{sid}/audio")
+async def voice_audio(sid: str, request: Request, sr: int = 16000, t0: float = 0):
+    """浏览器送来一段 16 位单声道 PCM（或 WAV）。"""
+    cfg = _voice_cfg(request)
+    _eye_session(sid)
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "没有收到声音")
+    if voice.audio.wav_header_ok(data):
+        try:
+            x, sr = await run_in_threadpool(voice.audio.wav_to_float, data)
+            import numpy as _n
+            data = (_n.clip(x, -1, 1) * 32767).astype(_n.int16).tobytes()
+        except Exception as ex:  # noqa: BLE001
+            raise HTTPException(400, f"WAV 读不了：{ex}")
+    try:
+        return await run_in_threadpool(voice.pipeline.process_chunk, cfg, sid, data, sr, t0 or None)
+    except Exception as ex:  # noqa: BLE001
+        _voice_err(ex)
+
+
+@app.get("/api/voice/session/{sid}/speakers")
+def voice_speakers(sid: str, request: Request):
+    cfg = _voice_cfg(request)
+    _eye_session(sid)
+    return voice.pipeline.registry(sid, cfg).public()
+
+
+@app.post("/api/voice/session/{sid}/speakers/{spk}")
+def voice_speaker_name(sid: str, spk: str, req: VoiceName, request: Request):
+    cfg = _voice_cfg(request)
+    _eye_session(sid)
+    try:
+        with voice.pipeline._slock(sid):
+            reg = voice.pipeline.registry(sid, cfg)
+            s = reg.resolve(spk)
+            if not s:
+                raise voice.VoiceError("找不到这个人")
+            if req.action == "reject":
+                reg.reject(spk, req.name or None)
+            elif req.action == "confirm":
+                best = req.name or (reg.best_proposal(s) or {}).get("name") or s.get("name")
+                if not best:
+                    raise voice.VoiceError("还没有可以确认的名字")
+                reg.set_name(spk, best)
+            elif req.action == "set":
+                reg.set_name(spk, req.name)
+            else:
+                raise voice.VoiceError("action 只能是 set / confirm / reject")
+            reg.save()
+            return reg.public()
+    except Exception as ex:  # noqa: BLE001
+        _voice_err(ex)
+
+
+@app.post("/api/voice/session/{sid}/merge")
+def voice_merge(sid: str, req: VoiceMerge, request: Request):
+    cfg = _voice_cfg(request)
+    _eye_session(sid)
+    try:
+        with voice.pipeline._slock(sid):
+            reg = voice.pipeline.registry(sid, cfg)
+            reg.merge(req.keep, req.drop)
+            reg.save()
+            return reg.public()
+    except Exception as ex:  # noqa: BLE001
+        _voice_err(ex)
+
+
+@app.post("/api/voice/session/{sid}/recluster")
+def voice_recluster(sid: str, request: Request):
+    cfg = _voice_cfg(request)
+    _eye_session(sid)
+    with voice.pipeline._slock(sid):
+        reg = voice.pipeline.registry(sid, cfg)
+        merges = reg.recluster(cfg.get("voice") or {})
+        reg.save()
+        return {**reg.public(), "merges": merges}
+
+
+@app.post("/api/voice/session/{sid}/identify")
+async def voice_identify(sid: str, request: Request):
+    cfg = _voice_cfg(request)
+    _eye_session(sid)
+    if not maintenance.llm_ready(cfg):
+        raise HTTPException(400, "认名字需要先在「设置 → LLM 维护」里配好模型")
+    try:
+        changes = await run_in_threadpool(voice.pipeline.identify, cfg, sid)
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(502, f"认名字失败：{ex}")
+    return {"changes": changes, **voice.pipeline.registry(sid, cfg).public()}
+
+
+@app.post("/api/voice/owner/enroll")
+async def voice_owner_enroll(request: Request, sr: int = 16000):
+    cfg = _voice_cfg(request)
+    data = await request.body()
+    try:
+        return await run_in_threadpool(voice.pipeline.enroll_owner, cfg, data, sr)
+    except Exception as ex:  # noqa: BLE001
+        _voice_err(ex)
+
+
+@app.delete("/api/voice/owner")
+def voice_owner_clear(request: Request):
+    _voice_cfg(request)
+    voice.registry.clear_owner()
+    return voice.registry.library_public()
+
+
+@app.get("/api/voice/library")
+def voice_library(request: Request):
+    _voice_cfg(request)
+    return voice.registry.library_public()
+
+
+@app.delete("/api/voice/library/{key}")
+def voice_library_delete(key: str, request: Request):
+    _voice_cfg(request)
+    if not voice.registry.library_delete(key):
+        raise HTTPException(404, "声纹库里没有这一部")
+    return voice.registry.library_public()
 
 
 # ---------------- 静态面板 ----------------

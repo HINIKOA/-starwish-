@@ -4,3 +4,4 @@ soul/
 build/
 dist/
 *.spec
+models/
