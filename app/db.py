@@ -57,9 +57,10 @@ CREATE TABLE IF NOT EXISTS proposals (
     decided_at REAL
 );
 CREATE TABLE IF NOT EXISTS embeddings (
-    star_id INTEGER PRIMARY KEY,
+    star_id INTEGER NOT NULL,
     model TEXT NOT NULL,
-    vec BLOB NOT NULL
+    vec BLOB NOT NULL,
+    PRIMARY KEY (star_id, model)
 );
 """
 
@@ -88,6 +89,14 @@ def init_db() -> None:
                 if col not in cols:  # v0.6.0：星辰融合（旧灵魂包自动升级）
                     conn.execute(f"ALTER TABLE stars ADD COLUMN {col} {ddl}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_fused ON stars(fused_into)")
+            pk = [r[1] for r in conn.execute("PRAGMA table_info(embeddings)").fetchall() if r[5]]
+            if pk == ["star_id"]:  # v0.7.0：每颗星可以同时存多种向量模型（切换档位不丢旧向量）
+                conn.executescript(
+                    "ALTER TABLE embeddings RENAME TO embeddings_old;"
+                    "CREATE TABLE embeddings (star_id INTEGER NOT NULL, model TEXT NOT NULL, vec BLOB NOT NULL, PRIMARY KEY (star_id, model));"
+                    "INSERT OR IGNORE INTO embeddings SELECT star_id, model, vec FROM embeddings_old;"
+                    "DROP TABLE embeddings_old;")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_emb_model ON embeddings(model)")
             try:
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS stars_fts USING fts5(tok, tokenize='unicode61')"

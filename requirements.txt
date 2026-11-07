@@ -8,8 +8,9 @@ jieba>=0.42
 cryptography>=42
 mcp>=1.2
 pyyaml>=6
-# 可选：语义检索（体积较大，按需安装）
-# sentence-transformers>=2.7
+# 语义检索（向量模型常驻默认：bge-small-zh int8 ONNX；Windows 上三者合计约 31MB）
+numpy>=1.24
+onnxruntime>=1.17
+tokenizers>=0.15
 # 可选：宇宙之声（面板里一键安装，也可手动装）
 # sherpa-onnx>=1.12
-# numpy>=1.24

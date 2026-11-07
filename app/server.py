@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -15,7 +16,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, archive, config, core, evolve, eye, fusion, importers, maintenance, stars, sync, voice
+from . import __version__, archive, config, core, evolve, eye, fusion, importers, maintenance, semantic, stars, sync, voice
+from .embed import models as embed_models
 from .db import init_db, log_event, read_events
 from .proxy import router as proxy_router
 
@@ -57,12 +59,27 @@ async def scheduler_loop():
             log.warning("scheduler error: %s", e)
 
 
+def _embed_boot() -> None:
+    """内置向量模型常驻：不在就后台下载；然后把还没有向量的星补齐。"""
+    try:
+        cfg = config.load_config()
+        e = cfg.get("embed") or {}
+        if os.environ.get("SOULSTAR_NO_EMBED_BOOT"):
+            return
+        if not embed_models.installed("small") and e.get("auto_download", True) and embed_models.deps_ok():
+            embed_models.install("small", e, deps=False)
+        semantic.start_backfill()
+    except Exception as ex:  # noqa: BLE001
+        log.warning("向量模型启动检查失败：%s", ex)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     config.ensure_dirs()
     init_db()
     core.load_core()
     log_event("server_start", version=__version__)
+    _embed_boot()
     task = asyncio.create_task(scheduler_loop())
     yield
     task.cancel()
@@ -589,8 +606,15 @@ def put_settings(patch: dict):
             v = patch[sec].get(key)
             if v is None or (isinstance(v, str) and v.startswith("****")):
                 patch[sec].pop(key, None)
+    before = semantic.active(config.load_config())
     config.update_config(patch)
     log_event("settings_update", keys=sorted(patch.keys()))
+    if "embed" in patch or "memory" in patch:   # 换了向量档位 / 接口：重新加载并在后台补齐
+        semantic.reset()
+        after = semantic.active(config.load_config())
+        if after != before:
+            log_event("embed_switch", before=before[1] if before else None, after=after[1] if after else None)
+        semantic.start_backfill()
     return config.masked_config()
 
 
@@ -947,6 +971,53 @@ def _voice_err(ex: Exception):
     if isinstance(ex, voice.backend.BackendError):
         raise HTTPException(409, str(ex))
     raise ex
+
+
+# ---------------- 向量模型 ----------------
+class EmbedInstall(BaseModel):
+    kind: str = "small"
+    deps: bool = True
+
+
+@app.get("/api/embed/status")
+def embed_status():
+    return semantic.status()
+
+
+@app.post("/api/embed/install")
+def embed_install(req: EmbedInstall):
+    if req.kind not in embed_models.LOCAL:
+        raise HTTPException(400, "只有 small / m3 需要下载")
+    jobs = embed_models.install(req.kind, (config.load_config().get("embed") or {}), deps=req.deps)
+    log_event("embed_install", kind=req.kind)
+    return {"jobs": jobs}
+
+
+@app.delete("/api/embed/models/{kind}")
+def embed_remove(kind: str):
+    if kind not in embed_models.LOCAL:
+        raise HTTPException(404, "没有这个模型")
+    try:
+        return {"removed": embed_models.uninstall(kind)}
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
+@app.post("/api/embed/test")
+def embed_test():
+    try:
+        return semantic.test_api(config.load_config())
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(502, str(ex)[:300])
+
+
+@app.post("/api/embed/backfill")
+def embed_backfill():
+    semantic.reset()
+    semantic.start_backfill()
+    return semantic.status()
 
 
 @app.get("/api/voice/status")

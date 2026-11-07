@@ -56,8 +56,7 @@ DEFAULT_CONFIG = {
         "brightness_floor": 0.08,
         "brightness_weight": 0.5,
         "recall_budget_default": 600,
-        "semantic": True,
-        "semantic_model": "BAAI/bge-small-zh-v1.5",
+        "semantic": True,           # 语义检索总开关（向量模型在 embed 段里选）
         # —— 星辰融合：相似的记忆融合、归纳、进化成一颗新星（成员不删除，可拆开还原）——
         "fuse_auto": True,          # 自动融合
         "fuse_every_new": 8,        # 每新增多少颗星检查一次
@@ -66,6 +65,25 @@ DEFAULT_CONFIG = {
         "fuse_max_per_run": 5,      # 每次最多融合几组
         "fuse_scan": 400,           # 每次只看最近多少颗星（老星早已融合过）
         "fuse_use_llm": True,       # 配好 LLM 时让它归纳；否则朴素拼接
+    },
+    "embed": {                      # 向量模型：和 jieba + FTS5 混合检索，「保暖外套」也能找到「羽绒服」
+        "provider": "small",        # small = 内置 bge-small-zh int8（常驻默认）；m3 = BGE-M3 int8（一键部署）；api = Qwen3-Embedding 等接口
+        "auto_download": True,      # 内置模型不在时自动下载（完整包自带，一般用不上）
+        "hf_base": "https://huggingface.co",
+        "hf_mirror": "https://hf-mirror.com",  # 国内镜像：主站下不动时自动换它
+        "prefer_mirror": False,     # 先走镜像
+        "pip_index": "",
+        "threads": 2,
+        # —— Qwen3-Embedding（阿里云百炼 text-embedding-v4，OpenAI 兼容；也可填硅基流动等）——
+        "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key": "",
+        "api_model": "text-embedding-v4",
+        "api_dimensions": 1024,     # 0 = 用服务默认
+        "api_batch": 10,            # text-embedding-v4 一次最多 10 条
+        "api_timeout": 30,
+        # —— 混合检索 ——
+        "min_sim": 0,               # 相似度门槛；0 = 按模型默认（small 0.44 / M3 0.45 / 接口 0.35）
+        "weight": 0.9,              # 语义命中的最高相关度（字面完全命中是 1.0）
     },
     "webdav": {
         "url": "",
@@ -172,6 +190,7 @@ SECRET_FIELDS = [
     ("eye", "frame_api_key"),
     ("eye", "qwen_api_key"),
     ("eye", "stt_api_key"),
+    ("embed", "api_key"),
 ]
 
 _lock = threading.RLock()

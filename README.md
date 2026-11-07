@@ -65,7 +65,8 @@ soulstar/
 │   ├── eye/                  宇宙之眼（engine 引擎 / session 会话与画面日记）
 │   ├── voice/                宇宙之声（audio / backend / registry / naming / pipeline / models）
 │   ├── stars.py              星星、亮度、分层召回
-│   ├── semantic.py           可选语义检索（bge-small-zh）
+│   ├── semantic.py           语义检索（三档向量模型，和 FTS5 混合）
+│   ├── embed/                向量模型下载与依赖安装
 │   ├── archive.py            原始对话归档（只追加）
 │   ├── maintenance.py        LLM 整理
 │   ├── proxy.py              OpenAI 兼容代理
@@ -244,7 +245,7 @@ POST /api/import/path | /api/import/upload
 | `recall(query, budget_tokens=600)` | 与问题最相关的星星**摘要**，严格不超过预算 | ≤ 600 token |
 | `recall_detail(id)` | 某一颗星的全文和原始对话 | 按需 |
 
-- 排序 = **相关度 × (1 + 0.5 × 亮度)**。相关度来自 SQLite FTS5 的 bm25（jieba 分词 + 中文二元组 + 单字兜底），装了 sentence-transformers 时再并入语义相似度。
+- 排序 = **相关度 × (1 + 0.5 × 亮度)**。相关度来自两路：SQLite FTS5 的 bm25（jieba 分词 + 中文二元组 + 单字兜底）和向量语义相似度（默认内置 bge-small-zh），两路取较大值，字面完全命中仍然排最前。
 - **亮度** = 时间衰减（半衰期默认 30 天，从「创建或上次被想起」算起）× (1 + ln(1+召回次数)) × 重要度系数 × 手动增益，最低不低于 0.08——老星变暗，但永远不会消失。
 - 被召回的星会 `recall_count+1` 并重新变亮，常用的记忆自然浮上来。
 - 无论记忆库有 100 颗还是 10 万颗星，每轮注入的 token 都被预算封顶。面板顶部会显示「每轮注入约 X tok」。
@@ -265,6 +266,27 @@ POST /api/import/path | /api/import/upload
 - **导入**、**备份/整理**、**设置**、**事件日志**。
 
 three.js 已随包放在 `web/vendor/`，完全离线可用；如果删掉了，面板会自动从 CDN 加载。
+
+---
+
+## 五·附〇·一、向量模型（语义检索，三档可选）
+
+jieba + FTS5 只认字面：记忆里写「羽绒服」，搜「保暖外套」就找不到。向量模型按意思找，两路混合排序。在 **设置 → 向量模型** 里选：
+
+| 档位 | 模型 | 大小 | 说明 |
+| --- | --- | --- | --- |
+| ① 内置（默认） | bge-small-zh-v1.5 int8 ONNX | 23.9MB，512 维 | 常驻默认，完整包自带（`models/embed/small/`），缺了启动时自动下载；CPU 上每条约 10 毫秒 |
+| ② 一键部署 | BGE-M3 int8 ONNX | 约 590MB，1024 维 | 中英等 100+ 语言、长文本更强；默认不装，点「一键部署 BGE-M3」下载，占内存约 1GB |
+| ③ 接口 | Qwen3-Embedding（阿里云百炼 `text-embedding-v4`） | 0 | 单独填 Key；默认地址 `https://dashscope.aliyuncs.com/compatible-mode/v1`，维度默认 1024、一次 10 条；也可填任何 OpenAI 兼容 `/embeddings`（如硅基流动 `Qwen/Qwen3-Embedding-8B`）。按量计费，记忆内容会发给接口方 |
+
+- **运行库**：onnxruntime + tokenizers + numpy（Windows 上合计约 31MB），已写进 `requirements.txt`，`start.bat` 会自动装；不用 PyTorch。
+- **自动退回**：选的档位没准备好（M3 没部署、Key 没填、接口出错）时自动用内置模型；内置也不在时只用字面检索，什么都不会坏。
+- **多模型并存**：每颗星的向量按模型分开存，切换档位不丢旧向量，切回来立刻可用；新档位的向量在后台补齐（接口档存星时不联网，不拖慢存星）。改了星的内容会重算向量。
+- **门槛**：语义这一路只留「够像」且「和最像的那颗差不多」的星，毫不相关的查询不会被硬凑结果；门槛可在 `embed.min_sim` 调。
+- **下载**：模型从 Hugging Face 下，主站不通自动换镜像 `hf-mirror.com`（可勾选「先走镜像」）；模型放在程序目录 `models/embed/`，不进灵魂包、不跟 WebDAV 备份走。
+- 接口：`GET /api/embed/status`、`POST /api/embed/install`（`{"kind": "m3"}`）、`DELETE /api/embed/models/m3`、`POST /api/embed/test`、`POST /api/embed/backfill`。
+
+**设置页同时单独留出「视频交互模型（宇宙之眼）」一块**：引擎（通用帧模式 / 千问全模态视频接口）、帧模式的协议 / 地址 / Key / 模型（留空沿用上游大模型）、千问的协议 / Key / 模型 / 帧序列传法，和观看页里的设置是同一份。
 
 ---
 
@@ -501,12 +523,14 @@ pip install -r requirements.txt
 pip install wsgidav cheroot      # 可选：用于测试 WebDAV
 python tests/smoke_test.py
 python tests/eye_test.py         # 宇宙之眼
+python tests/embed_test.py       # 向量模型（语义检索）
 python tests/fusion_test.py      # 星图与星辰融合
 python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-onnx 和真实模型时会多跑一项真实录音分人）
 ```
 
 冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、核心记忆模块（主人指令 / 令牌 / 代理 /核心 / 版本历史 / 回滚撤销 / 上锁转提案）、技能自进化（模糊补丁 / 安全扫描 / 待批准 / 后台巡检阈值 / 自修复 / 注入 / MCP skill_manage）、
 星汐/zip/markdown/ChatGPT 导入、代理注入（非流式 + 流式）、LLM 整理、MCP（官方 SDK 与内置实现）、快照恢复、WebDAV 加密备份与版本保留、机密加密、1 万颗星性能。
+`embed_test.py` 验证向量模型：真实 bge-small 把「保暖外套」连到「羽绒服」、字面命中仍排第一、不相关查询不硬凑、改星重算、BGE-M3 一键部署（模拟下载源 + 镜像兜底）、Qwen3-Embedding 接口（模拟）与出错退回、多模型并存、旧向量表升级、设置页两块。
 `fusion_test.py` 验证星图与融合：旧灵魂包自动升级、一开始只有主核星辰、按时间区分亮度、相似记忆找组（不相关的不硬凑）、朴素 / LLM 归纳、融合星的时间与代数、成员不删除不参与召回、重复内容指向融合星、拆开还原、自动融合触发、接口与前端。
 `voice_test.py` 验证宇宙之声：音高与男女、【认人】标记解析与流式隐藏、登记簿匹配 / 短句不学 / 重新聚类、三路线索投票确认、声纹库按系列认人、主人声音、一键下载模型（模拟发布页）、逐句转写带说话人、画面认人、LLM 读台词认人、改名 / 否决 / 合并、只存向量不存录音、仅主人；可选的真实模型测试用 sherpa-onnx + CAM++ 跑四人录音。
 `eye_test.py` 验证宇宙之眼：页面与按键、引擎解析与千问预留接口、能力预检、流式问答、图片不进历史、主动吐槽限速、预算、视频格式自动退回多图、直接出语音、Anthropic 协议、转写、密钥不外泄、仅主人、结束沉淀成星星。
@@ -518,9 +542,9 @@ python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-o
 - [ ] 面板登录密码 / 局域网访问的身份验证
 - [ ] 星星之间的连线（同章近邻、共享少见词，参考星汐的星座底纹）
 - [ ] MCP 的 Streamable HTTP 传输，便于远程/手机端连接
-- [ ] 语义检索：后台批量补算向量、支持 ONNX 小模型免装 PyTorch
+- [x] 语义检索：后台批量补算向量、ONNX 小模型免装 PyTorch（v0.7.0）
 - [x] 相似的记忆星融合、归纳、进化（v0.6.0）
-- [ ] 轻量语义检索：bge-small-zh int8 ONNX（23.9MB）与 FTS5 混合排序，「保暖外套」也能找到「羽绒服」
+- [x] 三档向量模型与 FTS5 混合检索（v0.7.0）
 - [ ] 多设备双向合并（目前 WebDAV 是整包覆盖式恢复）
 - [ ] Anthropic 原生 Messages API 代理（目前通过 Claude 的 OpenAI 兼容端点）
 - [ ] 导出回星汐格式（记忆卡.md + 日记），与 DSH 互通

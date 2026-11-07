@@ -363,7 +363,7 @@ async function loadStats() {
   const chips = [
     ["星星", s.total], ["今日新增", "+" + s.today], ["核心", s.core_tokens + " tok"], ["技能", (s.skills ? s.skills.total : 0)],
     ["每轮注入约", s.est_tokens_per_turn + " tok"],
-    ["检索", (s.jieba ? "jieba" : "二元组") + (s.fts ? "+FTS5" : "") + (s.semantic ? "+语义" : "")],
+    ["检索", (s.jieba ? "jieba" : "二元组") + (s.fts ? "+FTS5" : "") + (s.semantic ? "+语义·" + ({ small: "bge-small", m3: "BGE-M3", api: "Qwen3" }[s.semantic_model] || "") : "")],
   ];
   if (s.fused) chips.push(["融合星", s.fused]);
   if (s.deleted) chips.push(["已隐藏", s.deleted]);
@@ -592,6 +592,8 @@ async function panelSettings() {
     if (type === "checkbox") return `<label class="tl-check" style="margin-top:10px"><input type="checkbox" data-k="${path}" ${v ? "checked" : ""}> ${label}</label>`;
     return `<label>${label}</label><input data-k="${path}" type="${type}" value="${type === "password" ? "" : esc(v)}" placeholder="${esc(ph)}">`;
   };
+  const sel = (path, label, opts) => { const [a, b] = path.split(".");
+    return `<label>${label}</label><select data-k="${path}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(c[a][b]) === String(v) ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>`; };
   const sec = (path, label) => { const [a, b] = path.split("."); return inp(path, label, "password", c[a][b + "_set"] ? "已设置（留空则不修改）" : "未设置"); };
   const origin = location.origin;
   openDrawer(`
@@ -613,7 +615,22 @@ async function panelSettings() {
       <div>${inp("memory.half_life_days", "半衰期（天）", "number")}</div><div>${inp("memory.brightness_floor", "最低亮度", "number")}</div>
       <div>${inp("memory.brightness_weight", "亮度在排序中的权重", "number")}</div><div>${inp("memory.recall_budget_default", "默认召回预算", "number")}</div>
     </div>
-    ${inp("memory.semantic", "启用语义检索（需另装 sentence-transformers）", "checkbox")}
+    <h3>向量模型（语义检索）</h3>
+    <div class="sub">和 jieba + FTS5 一起找记忆：字面没对上也能按意思找到（搜「保暖外套」能找到「羽绒服」）。选的档位没准备好时自动用内置模型。</div>
+    ${inp("memory.semantic", "启用语义检索", "checkbox")}
+    ${sel("embed.provider", "使用哪个向量模型", [["small", "① 内置 bge-small-zh int8（23.9MB · 常驻默认）"], ["m3", "② BGE-M3 int8（约 590MB · 一键部署）"], ["api", "③ Qwen3-Embedding 接口（填 Key）"]])}
+    <div id="embBox" class="sub">正在读取向量模型状态…</div>
+    <div class="grid2"><div>${inp("embed.api_base_url", "③ 接口地址（OpenAI 兼容）", "text", "https://dashscope.aliyuncs.com/compatible-mode/v1")}</div><div>${sec("embed.api_key", "③ 向量接口 API Key")}</div>
+    <div>${inp("embed.api_model", "③ 模型", "text", "text-embedding-v4")}</div><div>${inp("embed.api_dimensions", "③ 维度（0 = 服务默认）", "number")}</div></div>
+    <div class="grid2"><div>${inp("embed.hf_mirror", "模型下载镜像", "text", "https://hf-mirror.com")}</div><div>${inp("embed.pip_index", "pip 镜像（可空）", "text", "https://pypi.tuna.tsinghua.edu.cn/simple")}</div></div>
+    ${inp("embed.prefer_mirror", "先走镜像（国内网络建议勾选）", "checkbox")}
+    <h3>视频交互模型（宇宙之眼）</h3>
+    <div class="sub">陪你看屏幕 / 摄像头时用的识图模型。帧模式的地址、Key、模型留空则沿用上面的上游大模型。</div>
+    ${sel("eye.engine", "引擎", [["frame", "通用帧模式（任意 OpenAI / Anthropic 兼容识图模型）"], ["qwen_omni", "千问全模态视频接口（Qwen3.8-Omni-Flash）"]])}
+    <div class="grid2"><div>${sel("eye.frame_protocol", "帧模式协议", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]])}</div><div>${inp("eye.frame_model", "帧模式模型", "text", "例如 qwen-vl-max / gpt-4o")}</div>
+    <div>${inp("eye.frame_base_url", "帧模式地址（可空）")}</div><div>${sec("eye.frame_api_key", "帧模式 API Key（可空）")}</div></div>
+    <div class="grid2"><div>${sel("eye.qwen_protocol", "千问协议", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]])}</div><div>${inp("eye.qwen_model", "千问模型")}</div>
+    <div>${sec("eye.qwen_api_key", "千问 API Key")}</div><div>${sel("eye.qwen_video_mode", "帧序列传法", [["video", "按视频传（失败自动退回多图）"], ["images", "每帧一张图"]])}</div></div>
     <h3>WebDAV</h3>
     ${inp("webdav.url", "地址", "text", "https://dav.jianguoyun.com/dav/")}
     <div class="grid2"><div>${inp("webdav.user", "账号")}</div><div>${sec("webdav.password", "密码 / 应用密码")}</div>
@@ -630,6 +647,7 @@ async function panelSettings() {
       ${c.secrets_encrypted ? '<button id="mUnlock">解锁</button><button class="danger" id="mOff">关闭加密</button>' : '<button id="mOn">启用加密</button>'}
     </div>
   `);
+  embedPanel();
   $("#setSave").onclick = () => safe(async () => {
     const patch = {};
     document.querySelectorAll("[data-k]").forEach((el) => {
@@ -646,8 +664,41 @@ async function panelSettings() {
   if ($("#mOff")) $("#mOff").onclick = () => confirm("关闭加密后机密将以明文保存，确认？") && safe(async () => { await api("/api/secrets/decrypt", { method: "POST" }); panelSettings(); });
 }
 
+// —— 向量模型状态卡 ——
+const EMB_NAME = { small: "内置 bge-small-zh", m3: "BGE-M3", api: "Qwen3-Embedding 接口" };
+async function embedPanel() {
+  const box = $("#embBox"); if (!box) return;
+  const st = await safe(() => api("/api/embed/status")); if (!st || !$("#embBox")) return;
+  const mb = (b) => (b / 1e6).toFixed(1) + "MB";
+  const job = (j) => !j ? "" : j.state === "running" ? ` · 下载中 ${Math.round((100 * j.done) / (j.total || 1))}%` : j.state === "error" ? ` · <span class="warn">下载失败：${esc(j.error)}</span>` : "";
+  const L = st.local, cov = st.coverage, busy = Object.values(st.jobs || {}).some((j) => j.state === "running") || st.backfill.state === "running";
+  box.innerHTML = `
+    <div class="card"><div>正在使用：<b>${st.active ? EMB_NAME[st.active] : "无（只用字面检索）"}</b>${st.note ? ` · <span class="warn">${esc(st.note)}</span>` : ""}</div>
+      <div class="meta">已有向量 ${cov.done}/${cov.total} 颗星${st.backfill.state === "running" ? " · 正在后台补齐…" : ""}${st.deps_ok ? "" : ` · <span class="warn">缺少运行库（onnxruntime / tokenizers / numpy，约 ${st.deps_mb}MB）</span>`}</div></div>
+    <div class="card"><b>① 内置 bge-small-zh int8</b> · 512 维 · ${L.small.installed ? `<span class="okc">已就绪 ${mb(L.small.bytes)}</span>` : `<span class="warn">未找到，需下载 ${L.small.need_mb}MB</span>`}${job(L.small.job)}
+      <div class="meta">常驻默认，完整包自带；中文为主，CPU 上每条约 10 毫秒。</div></div>
+    <div class="card"><b>② BGE-M3 int8</b> · 1024 维 · ${L.m3.installed ? `<span class="okc">已部署 ${mb(L.m3.bytes)}</span>` : `未安装（约 ${L.m3.need_mb}MB）`}${job(L.m3.job)}
+      <div class="meta">中英等 100+ 语言、长文本更强；占内存约 1GB，放在程序目录 models/embed/m3，不进灵魂包。</div></div>
+    <div class="card"><b>③ Qwen3-Embedding 接口</b> · ${st.api.configured ? `<span class="okc">已填写（${esc(st.api.model)}${st.api.dimensions ? " · " + st.api.dimensions + " 维" : ""}）</span>` : "未填写 Key"}${st.api.error ? ` · <span class="warn">${esc(st.api.error)}</span>` : ""}
+      <div class="meta">阿里云百炼 text-embedding-v4 就是 Qwen3-Embedding；也可以填硅基流动等任何 OpenAI 兼容 /embeddings 地址。按量计费，记忆内容会发给接口方。</div></div>
+    <div class="row">
+      ${!st.deps_ok ? '<button id="embDeps">一键安装运行库</button>' : ""}
+      ${!L.small.installed ? '<button id="embSmall">下载内置模型</button>' : ""}
+      ${L.m3.installed ? '<button class="danger" id="embM3Del">删除 BGE-M3</button>' : `<button class="primary" id="embM3">一键部署 BGE-M3（约 ${L.m3.need_mb}MB）</button>`}
+      <button id="embTest">测试向量接口</button><button id="embRe">重新补齐向量</button>
+    </div>`;
+  const inst = (kind) => safe(async () => { await api("/api/embed/install", { method: "POST", body: { kind } }); toast("已在后台开始"); embedPanel(); });
+  if ($("#embDeps")) $("#embDeps").onclick = () => inst("small");
+  if ($("#embSmall")) $("#embSmall").onclick = () => inst("small");
+  if ($("#embM3")) $("#embM3").onclick = () => confirm(`下载 BGE-M3（约 ${L.m3.need_mb}MB）到程序目录？下载完在上面选「②」并保存即可切换。`) && inst("m3");
+  if ($("#embM3Del")) $("#embM3Del").onclick = () => confirm("删除 BGE-M3 模型文件？（向量还留在灵魂包里，重新部署后可直接用）") && safe(async () => { await api("/api/embed/models/m3", { method: "DELETE" }); toast("已删除"); embedPanel(); });
+  $("#embTest").onclick = () => safe(async () => { const r = await api("/api/embed/test", { method: "POST" }); toast(`接口可用：${r.dim} 维 · ${r.ms} 毫秒 · 「羽绒服」与「保暖外套」相似度 ${r.sim}`); embedPanel(); });
+  $("#embRe").onclick = () => safe(async () => { await api("/api/embed/backfill", { method: "POST" }); toast("已在后台补齐"); embedPanel(); });
+  if (busy) setTimeout(embedPanel, 2000);
+}
+
 // —— 事件日志 ——
-const EV = { star_add: "新星", star_edit: "编辑星", star_merge: "合并", star_soft_delete: "隐藏", star_restore: "恢复", star_brighten: "变亮", star_dim: "变暗",
+const EV = { star_add: "新星", star_edit: "编辑星", embed_switch: "换向量模型", embed_model_download: "下载向量模型", embed_install: "部署向量模型", star_fuse: "融合", star_unfuse: "拆开", star_merge: "合并", star_soft_delete: "隐藏", star_restore: "恢复", star_brighten: "变亮", star_dim: "变暗",
   core_edit: "改核心(旧)", core_change: "改核心", skill_change: "技能修改", skill_staged: "技能待审", evolve_review: "技能巡检", skill_feedback: "技能反馈", core_lock: "锁定/解锁", proposal_create: "新提案", proposal_approve: "批准提案", proposal_reject: "拒绝提案", recall: "召回",
   recall_detail: "查看全文", archive_append: "归档", consolidate: "整理", snapshot_local: "快照", backup_webdav: "云备份", restore: "恢复快照", server_start: "启动" };
 async function panelEvents() {

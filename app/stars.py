@@ -84,6 +84,15 @@ def _index(conn, sid: int, content: str, summary: str, tags: list[str]) -> None:
         conn.execute("INSERT INTO stars_fts(rowid, tok) VALUES (?,?)", (sid, tok))
 
 
+def _reembed(conn, sid: int, text: str) -> None:
+    """内容变了：旧向量全部作废，按当前档位重算（接口档交给后台）。"""
+    try:
+        semantic.forget(conn, sid)
+        semantic.store(conn, sid, text, config.load_config())
+    except Exception:
+        pass
+
+
 def add_star(content: str, summary: str = "", tags=None, importance: int = 3, source: str = "",
              session: str = "", created_at: float | None = None, merge_near: bool = False,
              actor: str = "api") -> dict:
@@ -160,6 +169,7 @@ def merge_into(conn, row, content, summary, tags, importance, source, cfg) -> di
     conn.execute("UPDATE stars SET content=?, tags=?, importance=?, updated_at=?, hash=? WHERE id=?",
                  (new_content, json.dumps(new_tags, ensure_ascii=False), imp, now, _hash(new_content), row["id"]))
     _index(conn, row["id"], new_content, row["summary"], new_tags)
+    _reembed(conn, row["id"], f"{row['summary']}\n{new_content}")
     r2 = conn.execute("SELECT * FROM stars WHERE id=?", (row["id"],)).fetchone()
     log_event("star_merge", id=row["id"], merged_content=content, source=source)
     return {**to_dict(r2, cfg), "merged": True}
@@ -189,6 +199,7 @@ def update_star(sid: int, **fields) -> dict:
         c.execute("UPDATE stars SET content=?, summary=?, tags=?, importance=?, updated_at=?, hash=? WHERE id=?",
                   (content, summary, json.dumps(tags, ensure_ascii=False), imp, time.time(), _hash(content), sid))
         _index(c, sid, content, summary, tags)
+        _reembed(c, sid, f"{summary}\n{content}")
         new = to_dict(c.execute("SELECT * FROM stars WHERE id=?", (sid,)).fetchone())
     changes = {k: {"old": old.get(k), "new": new.get(k)} for k in ("content", "summary", "tags", "importance")
                if old.get(k) != new.get(k)}
@@ -271,9 +282,9 @@ def _candidates(conn, query: str, cfg: dict, limit: int = 200) -> dict[int, floa
                         v = 0.5 * max(0.05, (r["s"] / ub) if ub < 0 else 0.5)
                         if r["id"] not in rel:
                             rel[r["id"]] = v
-    try:
-        for sid, sim in semantic.search(conn, query, cfg).items():
-            rel[sid] = max(rel.get(sid, 0.0), min(1.0, (sim - 0.35) / 0.45))
+    try:  # 第二路：向量（语义）。和字面命中取较大值，字面完全命中仍然排最前
+        for sid, v in semantic.relevance(semantic.search(conn, query, cfg), cfg).items():
+            rel[sid] = max(rel.get(sid, 0.0), v)
     except Exception:
         pass
     if not rel:
@@ -441,19 +452,17 @@ def stats() -> dict:
         "from": rng[0], "to": rng[1], "fts": _db.FTS_OK, "jieba": _db.HAS_JIEBA,
         "fused": fused, "absorbed": absorbed,
         "semantic": semantic.enabled(cfg),
+        "semantic_model": (semantic.active(cfg) or (None,))[0],
         "archive_files": sum(1 for _ in config.ARCHIVE_DIR.rglob("*") if _.is_file()) if config.ARCHIVE_DIR.exists() else 0,
     }
 
 
 def backfill_embeddings(max_n: int = 500) -> int:
     cfg = config.load_config()
-    if not semantic.enabled(cfg):
-        return 0
     n = 0
-    with get_conn() as c:
-        rows = c.execute("SELECT s.id, s.summary, s.content FROM stars s LEFT JOIN embeddings e ON e.star_id=s.id"
-                         " WHERE e.star_id IS NULL AND s.deleted_at IS NULL AND s.fused_into IS NULL LIMIT ?", (max_n,)).fetchall()
-        for r in rows:
-            semantic.store(c, r["id"], f"{r['summary']}\n{r['content']}", cfg)
-            n += 1
+    while n < max_n:
+        k = semantic.backfill_step(cfg, min(64, max_n - n))
+        if not k:
+            break
+        n += k
     return n
