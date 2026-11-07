@@ -7,7 +7,6 @@
 > MCP 服务器、OpenAI 兼容代理、LLM 自动整理、WebDAV 加密备份、3D 星图面板。
 > 星汐原许可全文见 [`LICENSE-XINGXI.txt`](LICENSE-XINGXI.txt)，说明见 [`LICENSE-NOTICE.md`](LICENSE-NOTICE.md)。
 
-![星图](docs/screenshot-starmap.png)
 
 ![一开始只有主核星辰](docs/screenshot-map-start.png)
 ![使用中长出的记忆星与融合星](docs/screenshot-map-grown.png)
