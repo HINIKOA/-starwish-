@@ -91,6 +91,42 @@ DEFAULT_CONFIG = {
         "inject_budget_tokens": 400,
         "inject_full_threshold": 0.3,
     },
+    "eye": {                        # 宇宙之眼：看屏幕 / 摄像头，陪主人实时互动
+        "enabled": True,
+        "engine": "frame",          # frame = 通用帧模式（任意 OpenAI / Anthropic 兼容识图模型）；qwen_omni = 千问全模态视频接口
+        # —— 通用帧模式（留空则沿用「LLM 维护」里的地址 / Key / 模型）——
+        "frame_protocol": "openai", # openai / anthropic
+        "frame_base_url": "",
+        "frame_api_key": "",
+        "frame_model": "",
+        "frame_compose": "grid",    # grid = 多帧拼成一张分镜图（省钱、单图模型也能用）；multi = 每帧一张图
+        # —— 千问 Qwen3.8-Omni-Flash 视频接口（预留：填 Key 即用）——
+        "qwen_protocol": "openai",  # openai / anthropic
+        "qwen_base_url_openai": "https://maas.qianwenaiapi.com/compatible-mode/v1",
+        "qwen_base_url_anthropic": "https://maas.qianwenaiapi.com/apps/anthropic",
+        "qwen_api_key": "",
+        "qwen_model": "qwen3.8-omni-flash",
+        "qwen_video_mode": "video", # video = 帧序列按「视频」传（失败自动退回多图）；images = 每帧一张图
+        "qwen_audio_out": False,    # 让模型直接出语音（预留，未实测）
+        "qwen_voice": "Cherry",
+        # —— 看与说 ——
+        "max_frames": 6,            # 每次最多带几帧
+        "frame_width": 768,         # 单帧宽度（像素）
+        "pace": "normal",           # 主动吐槽节奏：off / calm / normal / chatty
+        "reply_chars": 60,          # 回答尽量控制在多少字以内（陪看要短）
+        "history_turns": 12,        # 带最近几轮文字对话（图片永不进历史）
+        "recall_budget_tokens": 300,
+        "daily_budget_tokens": 0,   # 每日 token 预算（0 = 不限）
+        "daily_max_requests": 0,    # 每日请求次数上限（0 = 不限）
+        "star_on_end": True,        # 结束时把画面日记沉淀成一颗星
+        "save_frames": False,       # 画面默认不落盘，只存文字日记
+        # —— 声音 ——
+        "stt_mode": "browser",      # browser = 浏览器自带识别；api = OpenAI 兼容转写服务（可转写电影声音）
+        "stt_base_url": "",
+        "stt_api_key": "",
+        "stt_model": "whisper-1",
+        "tts": True,                # 用浏览器朗读 AI 的话
+    },
     "server": {"host": "127.0.0.1", "port": 7860, "open_browser": True},
     "secrets_encrypted": False,
     "secrets_salt": "",
@@ -102,6 +138,9 @@ SECRET_FIELDS = [
     ("webdav", "passphrase"),
     ("proxy", "proxy_key"),
     ("core", "owner_token"),
+    ("eye", "frame_api_key"),
+    ("eye", "qwen_api_key"),
+    ("eye", "stt_api_key"),
 ]
 
 _lock = threading.RLock()

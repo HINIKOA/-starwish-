@@ -1,5 +1,13 @@
 # 更新记录
 
+## v0.4.0（2026-11-07）宇宙之眼：一起看屏幕 / 摄像头
+- 新增 `app/eye/`（engine 引擎 / session 会话）与 `/eye` 页面，星图顶栏「👁 宇宙之眼」按键，仅主人可用。
+- 浏览器采集（getDisplayMedia / getUserMedia）+ 本机变化检测（切场景 + 动作累积选帧）+ 关键帧环形缓冲 + 分镜拼图（对齐 28 像素）。
+- 开口即问（流式 SSE，显示首字耗时）；切场景主动吐槽并按节奏限速；语音识别、朗读、插话打断与回声守卫；框选区域。
+- 引擎：通用帧模式（任意 OpenAI / Anthropic 兼容识图模型，可沿用 LLM 维护配置）；千问 Qwen3.8-Omni-Flash 视频接口预留（两种协议地址已预置，填 Key 即用；视频格式不认时自动退回多图；可选直接出语音）。
+- 能力预检（纯红测试图）、每日 token / 请求预算、图片不进历史（只留文字日记）、画面默认不落盘、结束时沉淀成星星、可选转写电影声音。
+- 新增配置段 `eye`（3 个 Key 加密存储、掩码显示）；新增 `tests/eye_test.py` 59 项；冒烟测试 161 项保持通过。
+
 ## v0.3.0（2026-11-07）技能自进化（参考 Hermes Agent）
 - 新增 `app/evolve/`：技能库（Hermes/agentskills 兼容 SKILL.md，create/patch/edit/write_file/remove_file/archive/restore/rollback）、热补丁模糊匹配、安全扫描 + 信任矩阵、待批准队列。
 - 双引擎：MCP 前台自觉（SKILLS_GUIDANCE + skills_list/skill_view/skill_manage/skill_feedback，调用后计数器归零）；代理后台巡检（跨会话计数阈值 → 守护线程回看对话，联合提取星星与核心提案）。

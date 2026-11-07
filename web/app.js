@@ -371,7 +371,7 @@ $("#drawerClose").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
 document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => openPanel(b.dataset.panel)));
 
-function openPanel(name) { if (name === "skills") { location.href = "/skills"; return; } ({ core: panelCore, proposals: panelProposals, add: panelAdd, import: panelImport, sync: panelSync, settings: panelSettings, events: panelEvents })[name](); }
+function openPanel(name) { if (name === "skills") { location.href = "/skills"; return; } if (name === "eye") { location.href = "/eye"; return; } ({ core: panelCore, proposals: panelProposals, add: panelAdd, import: panelImport, sync: panelSync, settings: panelSettings, events: panelEvents })[name](); }
 
 // —— 星星详情 ——
 async function openStar(id) {

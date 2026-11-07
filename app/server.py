@@ -10,12 +10,12 @@ from typing import Any, Optional
 import hmac
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, archive, config, core, evolve, importers, maintenance, stars, sync
+from . import __version__, archive, config, core, evolve, eye, importers, maintenance, stars, sync
 from .db import init_db, log_event, read_events
 from .proxy import router as proxy_router
 
@@ -627,6 +627,217 @@ async def api_import_upload(file: UploadFile = File(...), kind: str = Form("auto
     return await run_in_threadpool(importers.import_bytes, data, file.filename or "upload.txt", kind)
 
 
+# ---------------- 宇宙之眼（仅主人） ----------------
+class EyeStart(BaseModel):
+    title: str = ""
+    source: str = "screen"          # screen / tab / camera
+    engine: Optional[str] = None
+
+
+class EyeNote(BaseModel):
+    kind: str = "scene"             # subtitle / scene / note
+    text: str
+
+
+class EyeEnd(BaseModel):
+    make_star: Optional[bool] = None
+
+
+class EyeAsk(BaseModel):
+    session: str
+    text: str = ""
+    frames: list[str] = []
+    mode: str = "user"              # user = 主人开口 / 打字；auto = 切场景时主动吐槽
+    engine: Optional[str] = None
+
+
+class EyeEngineReq(BaseModel):
+    engine: Optional[str] = None
+
+
+def _eye_owner(request: Request) -> dict:
+    if not is_owner(request):
+        raise HTTPException(403, "宇宙之眼只对主人开放（本机访问，或带上主人令牌）")
+    cfg = config.load_config()
+    if not (cfg.get("eye") or {}).get("enabled", True):
+        raise HTTPException(403, "宇宙之眼已在设置里关闭")
+    return cfg
+
+
+def _eye_session(sid: str) -> dict:
+    try:
+        return eye.session.get(sid, with_entries=False)
+    except eye.SessionNotFound:
+        raise HTTPException(404, "找不到这次观看")
+
+
+@app.get("/api/eye/status")
+def eye_status(request: Request):
+    cfg = _eye_owner(request)
+    e = config.masked_config().get("eye", {})
+    engines = {}
+    for k, title in eye.ENGINES.items():
+        engines[k] = {**eye.engine.public_view(eye.resolve(cfg, k)), "title": title}
+    pre = config.load_state().get("eye_preflight") or {}
+    return {"enabled": True, "engine": e.get("engine", "frame"), "engines": engines, "settings": e,
+            "usage": eye.session.usage_today(), "preflight": pre, "pace_gap": eye.session.PACE_GAP,
+            "sessions": eye.session.list_sessions(8)}
+
+
+@app.post("/api/eye/preflight")
+async def eye_preflight(req: EyeEngineReq, request: Request):
+    cfg = _eye_owner(request)
+    r = eye.resolve(cfg, req.engine)
+    res = await eye.preflight(r)
+    key = f"{r['engine']}|{r['protocol']}|{r['base_url']}|{r['model']}"
+    pre = config.load_state().get("eye_preflight") or {}
+    pre[key] = res
+    config.update_state(eye_preflight=pre)
+    log_event("eye_preflight", engine=r["engine"], model=r["model"], ok=res["ok"])
+    return {**res, "key": key, "engine": r["engine"], "model": r["model"]}
+
+
+@app.post("/api/eye/session/start")
+def eye_start(req: EyeStart, request: Request):
+    cfg = _eye_owner(request)
+    return eye.session.start(req.title, req.source, req.engine or cfg["eye"].get("engine", "frame"))
+
+
+@app.get("/api/eye/sessions")
+def eye_sessions(request: Request, limit: int = 30):
+    _eye_owner(request)
+    return eye.session.list_sessions(min(200, limit))
+
+
+@app.get("/api/eye/session/{sid}")
+def eye_session_get(sid: str, request: Request):
+    _eye_owner(request)
+    _eye_session(sid)
+    return eye.session.get(sid)
+
+
+@app.post("/api/eye/session/{sid}/note")
+def eye_note(sid: str, req: EyeNote, request: Request):
+    _eye_owner(request)
+    _eye_session(sid)
+    if req.kind not in ("subtitle", "scene", "note"):
+        raise HTTPException(400, "kind 只能是 subtitle / scene / note")
+    return eye.session.add(sid, req.kind, req.text)
+
+
+@app.post("/api/eye/session/{sid}/end")
+async def eye_end(sid: str, req: EyeEnd, request: Request):
+    cfg = _eye_owner(request)
+    meta = _eye_session(sid)
+    make = cfg["eye"].get("star_on_end", True) if req.make_star is None else req.make_star
+    summary = None
+    if make and not meta.get("ended_at") and maintenance.llm_ready(cfg):
+        msgs = eye.session.summary_messages(sid)
+        if msgs:
+            try:
+                summary = await run_in_threadpool(maintenance.chat, msgs, cfg)
+            except Exception as ex:  # 总结失败就用朴素版
+                log.warning("宇宙之眼总结失败：%s", ex)
+    return eye.session.end(sid, make_star=make, llm_summary=summary)
+
+
+@app.post("/api/eye/transcribe")
+async def eye_transcribe(request: Request, file: UploadFile = File(...), session: str = Form(""),
+                         kind: str = Form("subtitle")):
+    """把一段音频（电影声音或主人的话）交给 OpenAI 兼容转写服务。"""
+    cfg = _eye_owner(request)
+    e = cfg["eye"]
+    base = (e.get("stt_base_url") or cfg["llm"].get("base_url") or "").rstrip("/")
+    key = e.get("stt_api_key") or cfg["llm"].get("api_key") or ""
+    if not base or not key:
+        raise HTTPException(400, "还没配置转写服务（宇宙之眼设置 → 声音）")
+    data = await file.read()
+    import httpx
+    async with httpx.AsyncClient(timeout=60) as cl:
+        r = await cl.post(base + "/audio/transcriptions", headers={"Authorization": f"Bearer {key}"},
+                          data={"model": e.get("stt_model") or "whisper-1", "language": "zh"},
+                          files={"file": (file.filename or "audio.webm", data, file.content_type or "audio/webm")})
+    if r.status_code >= 400:
+        raise HTTPException(502, f"转写服务出错：HTTP {r.status_code} {r.text[:200]}")
+    text = (r.json().get("text") or "").strip()
+    if text and session and kind in ("subtitle", "user", "note"):
+        _eye_session(session)
+        if kind != "user":
+            eye.session.add(session, kind, text)
+    return {"text": text}
+
+
+def _sse(obj: dict) -> str:
+    import json as _j
+    return "data: " + _j.dumps(obj, ensure_ascii=False) + "\n\n"
+
+
+@app.post("/api/eye/ask")
+async def eye_ask(req: EyeAsk, request: Request):
+    cfg = _eye_owner(request)
+    e = cfg["eye"]
+    meta = _eye_session(req.session)
+    if meta.get("ended_at"):
+        raise HTTPException(400, "这次观看已经结束")
+    r = eye.resolve(cfg, req.engine or meta.get("engine") or None)
+    if not r["ready"]:
+        raise HTTPException(400, f"「{eye.ENGINES[r['engine']]}」还没配置好：需要地址、Key 和模型")
+    text = (req.text or "").strip()
+    if req.mode not in ("user", "auto"):
+        raise HTTPException(400, "mode 只能是 user / auto")
+    if req.mode == "user" and not text:
+        raise HTTPException(400, "要问点什么呀")
+    if req.mode == "auto":
+        ok, wait = eye.session.auto_allowed(req.session, e.get("pace", "normal"))
+        if not ok:
+            return {"skipped": True, "wait": round(wait, 1)}
+    try:
+        eye.session.check_budget(cfg)
+    except eye.BudgetError as ex:
+        raise HTTPException(429, str(ex))
+    frames = [f for f in req.frames if isinstance(f, str)][: max(1, int(e.get("max_frames", 6)))]
+    history = eye.session.history_messages(req.session, int(e.get("history_turns", 12)))
+    ctx = eye.session.recent_context(req.session)
+    if req.mode == "user":
+        eye.session.add(req.session, "user", text)
+    system = eye.session.system_prompt(cfg, req.session, text, req.mode)
+    prompt = (f"最近的台词 / 场景：\n{ctx}\n\n" if ctx else "") + (text or "（画面刚切换。）")
+    if e.get("save_frames") and frames:
+        d = config.soul_path("eye", "frames", req.session)
+        d.mkdir(parents=True, exist_ok=True)
+        import base64 as _b
+        for i, f in enumerate(frames):
+            try:
+                (d / f"{int(time.time() * 1000)}-{i}.jpg").write_bytes(_b.b64decode(f.split(",", 1)[-1]))
+            except Exception:
+                pass
+
+    async def gen():
+        yield _sse({"type": "start", "engine": r["engine"], "model": r["model"], "frames": len(frames), "mode": req.mode})
+        out, usage, fin = "", {}, {}
+        async for p in eye.engine.stream(r, system, history, prompt, frames):
+            if p["type"] == "delta":
+                out += p["text"]
+            elif p["type"] == "done":
+                fin = p
+                usage = p.get("usage") or {}
+                continue
+            yield _sse(p)
+        reply = out.strip() or "…"
+        try:
+            eye.session.add(req.session, "ai", reply, mode=req.mode, first_ms=fin.get("first_ms"))
+        except Exception:
+            pass
+        tokens = int(usage.get("input", 0)) + int(usage.get("output", 0))
+        if not tokens:  # 上游没报用量 → 粗估
+            tokens = len(frames) * 800 + (len(system) + len(prompt) + len(out)) // 2
+        u = eye.session.record_usage(tokens)
+        yield _sse({"type": "done", "text": reply, "silent": reply.strip("…. ") == "", "usage": usage,
+                    "tokens": tokens, "today": u, "first_ms": fin.get("first_ms"), "total_ms": fin.get("total_ms")})
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # ---------------- 静态面板 ----------------
 @app.get("/")
 def index():
@@ -637,6 +848,12 @@ def index():
 def skills_page():
     """技能进化模块页面。"""
     return FileResponse(config.WEB_DIR / "skills.html")
+
+
+@app.get("/eye")
+def eye_page():
+    """宇宙之眼模块页面。"""
+    return FileResponse(config.WEB_DIR / "eye.html")
 
 
 @app.get("/core")

@@ -9,11 +9,14 @@
 
 ![星图](docs/screenshot-starmap.png)
 
+![宇宙之眼](docs/screenshot-eye.png)
+
 星魂把「AI 的记忆」做成一个**放在 U 盘 / 网盘里的文件夹**：换电脑、换模型、换客户端都不丢。
 这个文件夹里的 `soul/`（灵魂包）就是 AI 的灵魂——模型只是来来去去的身体。
 
 - **核心记忆（独立模块）**：三段恒定内容（AI身份与名字 / 主人是谁及称呼 / 主人的喜好），每轮都注入，只占几十个 token。**永远不会被自动改写**，但**主人一句话就能改**：面板专属页面、任何 AI 客户端里的 `/核心 …` 指令或「记住，以后叫我X」、MCP `update_core`、REST `/api/core/update`。每次修改都有版本号、前后对比与来源，可撤销、可回到任意版本。
 - **技能自进化（参考 Hermes Agent）**：技能 = AI 的操作手册（怎么做某件事）。会用工具的 AI 做完复杂任务后自己存成技能、发现过时立即热补丁；不会用工具的客户端由星魂后台巡检回看对话，自动沉淀与修补。AI 自建技能过安全扫描，危险的交主人批准；全部可追溯、可回滚，永不硬删除。
+- **宇宙之眼（一起看）**：顶栏「👁 宇宙之眼」，让 AI 看你的屏幕、窗口、标签页或摄像头。浏览器在本机挑关键帧，你一开口或打字就立刻带上最新几帧去问，切场景时它会按节奏主动说一句；图片只进当次请求、历史只留文字，看两小时也不会越看越贵；结束后整场观看沉淀成一颗星。支持任意 OpenAI / Anthropic 兼容识图模型，并预留了千问 Qwen3.8-Omni-Flash 视频接口（填 Key 即用）。
 - **星星**：其余所有记忆。每条一颗星，新的亮、旧的暗，被想起会重新变亮；永不硬删除，所有变化写进只追加的事件日志。
 - **省 token 召回**：先看几十 token 的索引，再按预算（默认 600 token）取摘要，需要时才取全文。
 - **任何模型都能用**：MCP（Claude Desktop / Cursor / Cherry Studio / Hermes Agent…）、OpenAI 兼容代理（ChatGPT 类客户端、DeepSeek、Claude 的 OpenAI 兼容端点…）、REST API。
@@ -199,6 +202,13 @@ POST /api/skills/manage             {"action":"create|patch|edit|write_file|remo
 POST /api/skills/{name}/rollback    {"rev":3,"mode":"to|undo","confirm":true}；POST /api/skills/{name}/feedback {"good":false,"comment":"…"}
 GET  /api/skills/pending            待批准；POST /api/skills/pending/{id}/approve | reject
 GET  /api/evolve/status             巡检计数 / 上次巡检；POST /api/evolve/review {"background":true}
+GET  /api/eye/status                宇宙之眼状态（引擎、预检、今日用量；仅主人）
+POST /api/eye/preflight             能力预检 {"engine":"frame|qwen_omni"}
+POST /api/eye/session/start         开始观看 {"title":"星际穿越","source":"screen|tab|camera"}
+POST /api/eye/ask                   流式问答（SSE）{"session":"…","text":"…","frames":["data:image/jpeg;base64,…"],"mode":"user|auto"}
+POST /api/eye/session/{id}/note     记台词 / 场景 {"kind":"subtitle|scene|note","text":"…"}
+POST /api/eye/transcribe            转写一段音频（multipart：file、session）
+POST /api/eye/session/{id}/end      结束 {"make_star":true}；GET /api/eye/sessions | /api/eye/session/{id}
 POST /api/stars                     新增星 {"content":"…","tags":["…"],"importance":3}
 GET  /api/recall/index              第一层：索引
 POST /api/recall                    第二层：{"query":"…","budget_tokens":600}
@@ -330,6 +340,40 @@ tags: [博客, 部署]
 
 ---
 
+## 五·附三、宇宙之眼（一起看屏幕 / 摄像头）
+
+打开面板顶栏「👁 宇宙之眼」（`/eye`，**仅主人**：本机访问，或带主人令牌）。
+
+**怎么用：** 写上在看什么 → 选「共享屏幕 / 窗口」「标签页（含声音）」或「摄像头」→ 浏览器弹窗选内容 → 直接说话（勾「🎙 语音对话」）或打字问它；按 **H** 问「现在这个画面怎么样」，按 **Esc** 或点红色「● 正在看」立即停止。
+
+**它怎么看（参考 dsh-see-now 的思路，独立实现）：**
+- 浏览器每秒取 6 次 64×36 小图，按亮度 + 色度算变化分；**切场景**立刻留一帧，持续在动的画面按**动作累积量**留帧，静止画面几乎不出图。
+- 最近 2 分钟的关键帧放在环形缓冲里；提问时取「切场景帧优先 + 均匀补齐 + 现在这一帧」，最多 `max_frames` 张。
+- 通用帧模式默认把几帧**拼成一张分镜图**（宽高对齐 28 像素，每格标「几秒前 / 现在」），一张图的钱看好几帧，单图模型也能用。
+
+**它怎么说：**
+- **开口即问**：你一说话 / 打字就立刻发出，不等定时；AI 正在说话时你插话会立刻打断它（回声守卫会忽略它自己的声音）。
+- **主动吐槽**只在切场景时触发，并按节奏限速：安静 30 秒 / 陪看 15 秒 / 话痨 8 秒，外加上一句的朗读时长；没意思时模型只回「…」，不出声。
+- 系统提示带上核心记忆 + 相关星星，它以自己的身份陪你看。
+
+**为什么不会越看越贵：** 图片只放进**当次**请求，历史只保留文字（你说的、它说的、台词），前缀缓存一直有效。
+
+**参考 mcai 的部分（独立实现）：** 「⬚ 框选区域」只让 AI 看框内画面（省 token）；**能力预检**先发一张纯红小图问颜色，答不出说明模型不支持读图，免得静默白耗 token；每日 token 预算 / 请求次数上限。
+
+**两个引擎（设置页切换）：**
+| 引擎 | 协议 | 说明 |
+|---|---|---|
+| 通用帧模式 | OpenAI 兼容 / Anthropic 兼容 | 任意识图模型；地址留空就沿用「LLM 维护」的地址、Key、模型 |
+| 千问 Omni 视频接口（预留） | OpenAI 兼容：`https://maas.qianwenaiapi.com/compatible-mode/v1`<br>Anthropic 兼容：`https://maas.qianwenaiapi.com/apps/anthropic` | 默认模型 `qwen3.8-omni-flash`，**填上 Key 即可用**。OpenAI 协议下 ≥4 帧按「视频」传，上游不认就自动改成多图重试；可选让模型直接出语音（预留，未实测） |
+
+**声音：** 默认用浏览器识别你说的话、用浏览器朗读 AI 的话；设置里把「转写」改成「也转写电影声音」并填 OpenAI 兼容转写服务（Whisper / SenseVoice 等），共享标签页时勾选「共享音频」，台词每 6 秒转写一次进日记。
+
+**隐私：** 开启时一直显示红色「● 正在看」；画面默认**不保存**（设置里可手动打开），只存文字日记（`soul/eye/sessions/`）；结束时（可选）用 LLM 把日记写成一段回忆存为星星（标签「宇宙之眼」）。
+
+**还没实测：** 真实模型的首字延迟（预估通用帧模式 1.5–3 秒）、千问视频格式与直接出语音、各浏览器的屏幕 / 摄像头 / 标签页音频权限。面板每轮都会显示真实的首字耗时。
+
+---
+
 ## 六、LLM 自动整理（可选）
 
 在设置里填好上游 API Key 后：
@@ -401,10 +445,12 @@ MCP 服务器可同样打包 `mcp_server.py`。另一种免安装方案是使用
 pip install -r requirements.txt
 pip install wsgidav cheroot      # 可选：用于测试 WebDAV
 python tests/smoke_test.py
+python tests/eye_test.py         # 宇宙之眼
 ```
 
 冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、核心记忆模块（主人指令 / 令牌 / 代理 /核心 / 版本历史 / 回滚撤销 / 上锁转提案）、技能自进化（模糊补丁 / 安全扫描 / 待批准 / 后台巡检阈值 / 自修复 / 注入 / MCP skill_manage）、
 星汐/zip/markdown/ChatGPT 导入、代理注入（非流式 + 流式）、LLM 整理、MCP（官方 SDK 与内置实现）、快照恢复、WebDAV 加密备份与版本保留、机密加密、1 万颗星性能。
+`eye_test.py` 验证宇宙之眼：页面与按键、引擎解析与千问预留接口、能力预检、流式问答、图片不进历史、主动吐槽限速、预算、视频格式自动退回多图、直接出语音、Anthropic 协议、转写、密钥不外泄、仅主人、结束沉淀成星星。
 
 ---
 
@@ -419,10 +465,12 @@ python tests/smoke_test.py
 - [ ] Anthropic 原生 Messages API 代理（目前通过 Claude 的 OpenAI 兼容端点）
 - [ ] 导出回星汐格式（记忆卡.md + 日记），与 DSH 互通
 - [ ] 便携版 Python 一键包（免安装 Python）
+- [ ] 宇宙之眼实时直连模式（Gemini Live / OpenAI Realtime / Qwen-Omni Realtime 的 WebSocket / WebRTC 双向流）
 
 ---
 
 ## 十三、致谢与许可
 
 - 星图理念、档案格式与导入兼容对象：**星汐 dsh-xingxi**，作者 **Yuuyuko-uu**，<https://github.com/Yuuyuko-uu/dsh-xingxi>。原许可全文见 `LICENSE-XINGXI.txt`，说明见 `LICENSE-NOTICE.md`。
+- 宇宙之眼参考了 **mcai**（<https://github.com/MFHRY/mcai>，CC0 1.0）的按需提问、框选区域、读图能力预检与预算，以及 **dsh-see-now**（<https://github.com/SAOS-3624/dsh-see-now>，Apache-2.0）的变化分选帧、分镜拼图与节奏思路；代码均为独立实现，未复制源代码。
 - 3D 渲染：three.js（MIT）。中文分词：jieba（MIT）。

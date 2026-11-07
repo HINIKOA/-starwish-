@@ -1,0 +1,52 @@
+/* 星魂 · 宇宙之眼 */
+.cwrap.wide{max-width:1320px}
+.live{display:flex;align-items:center;gap:6px;color:#fff;background:rgba(255,60,80,.85);border-radius:14px;padding:4px 12px;font-size:13px;
+  cursor:pointer;box-shadow:0 0 18px rgba(255,60,80,.6);animation:pulse 1.6s infinite}
+@keyframes pulse{50%{box-shadow:0 0 4px rgba(255,60,80,.3)}}
+.eyegrid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(320px,1fr);gap:16px;margin-top:12px}
+@media (max-width:980px){.eyegrid{grid-template-columns:1fr}}
+.srcbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.srcbar input{flex:1;min-width:180px;width:auto}
+.eyestage{position:relative;margin-top:10px;aspect-ratio:16/9;border:1px solid var(--line);border-radius:14px;overflow:hidden;
+  background:radial-gradient(ellipse at center,#10132a,#05060f);user-select:none}
+.eyestage video{width:100%;height:100%;object-fit:contain;display:block}
+.eyestage.selecting{cursor:crosshair}
+.ph{position:absolute;inset:0;display:grid;place-content:center;text-align:center;color:var(--muted);line-height:1.9;padding:20px}
+.ph small{opacity:.7}
+.crop{position:absolute;border:2px dashed var(--accent);background:rgba(255,210,122,.07);box-shadow:0 0 0 9999px rgba(0,0,0,.45);pointer-events:none}
+.tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.tools select{width:auto}
+.sw{display:flex!important;align-items:center;gap:6px;margin:0!important;color:var(--text)!important;font-size:13px!important}
+.meter{flex:1;min-width:80px;height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden}
+.meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent2),var(--accent));transition:width .15s}
+.filmstrip{display:flex;gap:6px;margin-top:10px;overflow-x:auto;min-height:10px}
+.filmstrip figure{margin:0;position:relative;flex:0 0 auto}
+.filmstrip img{height:54px;border-radius:6px;border:1px solid var(--line);display:block}
+.filmstrip figcaption{position:absolute;left:4px;bottom:2px;font-size:10px;color:#fff;text-shadow:0 0 3px #000}
+.filmstrip figure.cut img{border-color:var(--accent)}
+.chatcol{display:flex;flex-direction:column;min-height:520px}
+.elog{flex:1;overflow:auto;border:1px solid var(--line);border-radius:14px;padding:12px;background:rgba(14,17,32,.6);max-height:560px}
+.msg{margin:8px 0;display:flex;flex-direction:column}
+.msg .b{max-width:88%;padding:8px 12px;border-radius:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+.msg.user{align-items:flex-end}.msg.user .b{background:rgba(143,180,255,.16);border:1px solid rgba(143,180,255,.3)}
+.msg.ai .b{background:rgba(255,210,122,.10);border:1px solid rgba(255,210,122,.28)}
+.msg.ai.auto .b{border-style:dashed}
+.msg.sub .b{background:transparent;color:var(--muted);font-size:12px;padding:2px 6px}
+.msg.sys .b{background:transparent;color:var(--muted);font-size:12px;border:1px dashed var(--line)}
+.msg .m{font-size:10.5px;color:var(--muted);margin:2px 4px}
+.stat{color:var(--muted);font-size:11.5px;margin-top:6px;min-height:16px}
+.sess{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:10px 0;background:rgba(14,17,32,.65);cursor:pointer}
+.sess:hover{border-color:rgba(255,210,122,.45)}
+.sess .hhead b{color:var(--text)}
+.diary{font-size:13px;line-height:1.7;margin-top:8px}
+.diary div{padding:2px 0;border-bottom:1px dashed rgba(140,160,255,.08)}
+.diary .k{display:inline-block;min-width:42px;color:var(--accent2);font-size:11.5px}
+.form h4{margin:18px 0 4px;color:var(--accent);font-weight:600;font-size:14px}
+.form .row{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:4px 16px}
+.form .row label{margin:8px 0 3px}
+.form .chk{display:flex;gap:8px;align-items:center;color:var(--text);font-size:13px;margin-top:22px}
+.engcards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px}
+@media (max-width:800px){.engcards{grid-template-columns:1fr}}
+.eng{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:rgba(14,17,32,.7)}
+.eng.on{border-color:rgba(255,210,122,.55);box-shadow:0 0 18px rgba(255,210,122,.12)}
+.eng .ok{color:var(--ok)}.eng .bad{color:var(--danger)}
