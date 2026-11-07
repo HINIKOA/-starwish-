@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星魂 SoulStar · 技能进化</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/core.css">
+</head>
+<body class="page">
+<div class="sky"></div>
+<header class="ctop">
+  <a class="back" href="/">← 星图</a>
+  <div class="brand"><span class="logo">✧</span> 技能进化 <small>SKILLS · 越用越强</small></div>
+  <div class="cmeta" id="emeta"></div>
+  <button id="reviewBtn" class="primary">🔭 立即巡检</button>
+</header>
+<main class="cwrap">
+  <section class="intro" id="intro"></section>
+  <nav class="ctabs">
+    <button data-tab="lib" class="on">技能库</button>
+    <button data-tab="pending">待批准 <span id="pBadge" class="badge hidden">0</span></button>
+    <button data-tab="log">进化日志</button>
+    <button data-tab="settings">设置</button>
+  </nav>
+  <section id="tab-lib" class="tab"></section>
+  <section id="tab-pending" class="tab hidden"></section>
+  <section id="tab-log" class="tab hidden"></section>
+  <section id="tab-settings" class="tab hidden"></section>
+</main>
+<div id="toast" class="hidden"></div>
+<script type="module" src="/static/skills.js"></script>
+</body>
+</html>

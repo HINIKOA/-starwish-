@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
-from . import archive, config, core, stars
+from . import archive, config, core, evolve, stars
 
 router = APIRouter()
 
@@ -43,6 +43,10 @@ def build_injection(query: str, cfg: dict, note: str = "") -> tuple[str, dict]:
     rec = stars.recall(query, budget_tokens=int(cfg["proxy"].get("budget_tokens", 600)), bump=True) if query.strip() else {"items": [], "text": "", "used_tokens": 0}
     if rec.get("text"):
         parts.append(rec["text"])
+    sk_txt, sk_used = evolve.review.injection(query) if query.strip() else ("", [])
+    if sk_txt:
+        parts.append(sk_txt)
+    rec["skills"] = sk_used
     if note:
         parts.append(note)
     if not parts:
@@ -67,10 +71,15 @@ def inject(body: dict, cfg: dict, note: str = "") -> tuple[dict, dict]:
     return body, rec
 
 
-def _log(cfg: dict, body: dict, reply: str, session: str) -> None:
+def _log(cfg: dict, body: dict, reply: str, session: str, rec: dict | None = None) -> None:
+    user = last_user_text(body.get("messages") or [])
+    try:  # 自进化：后台巡检计数 + 对话缓冲
+        evolve.review.on_turn(user, reply, (rec or {}).get("skills") or [], session=session,
+                              source="proxy:" + str(body.get("model", "")))
+    except Exception:
+        pass
     if not cfg["proxy"].get("log_to_archive"):
         return
-    user = last_user_text(body.get("messages") or [])
     msgs = [{"role": "user", "content": user}]
     if reply:
         msgs.append({"role": "assistant", "content": reply})
@@ -102,6 +111,13 @@ def _owner_ok(request: Request, cfg: dict) -> bool:
 def _core_command(body: dict, cfg: dict, request: Request) -> tuple[dict | None, str]:
     """返回 (斜杠指令的执行结果 或 None, 自然语言指令要附加给模型的说明)。"""
     cc = cfg.get("core") or {}
+    text = last_user_text(body.get("messages") or [])
+    sk = evolve.commands.parse(text) if cc.get("chat_commands", True) else None
+    if sk:
+        reply = evolve.commands.execute(sk, authorized=_owner_ok(request, cfg), source="command")
+        if sk["type"] == "slash":
+            return {"reply": reply}, ""
+        return None, "（星魂提示：主人要求把刚才的做法沉淀成技能，后台巡检已启动。请简短确认。）"
     if not (cc.get("chat_commands", True) or cc.get("natural_commands", True)):
         return None, ""
     cmd = core.commands.parse(last_user_text(body.get("messages") or []), natural=bool(cc.get("natural_commands", True)))
@@ -177,7 +193,8 @@ async def chat_completions(request: Request):
     url = base + "/chat/completions"
     timeout = httpx.Timeout(float(cfg["llm"].get("timeout", 120)), connect=15)
     extra = {"x-soulstar-recalled": ",".join(str(i["id"]) for i in rec.get("items", [])),
-             "x-soulstar-recall-tokens": str(rec.get("used_tokens", 0))}
+             "x-soulstar-recall-tokens": str(rec.get("used_tokens", 0)),
+             "x-soulstar-skills": ",".join(rec.get("skills") or [])}
 
     if body.get("stream"):
         client = httpx.AsyncClient(timeout=timeout)
@@ -214,7 +231,7 @@ async def chat_completions(request: Request):
                         reply.append(delta["content"])
                 except Exception:
                     pass
-            _log(cfg, body, "".join(reply), session)
+            _log(cfg, body, "".join(reply), session, rec)
 
         return StreamingResponse(gen(), media_type=r.headers.get("content-type", "text/event-stream"),
                                  headers={**extra, "Cache-Control": "no-cache"}, background=BackgroundTask(after))
@@ -228,5 +245,5 @@ async def chat_completions(request: Request):
         reply = data["choices"][0]["message"]["content"] or ""
     except Exception:
         reply = ""
-    _log(cfg, body, reply, session)
+    _log(cfg, body, reply, session, rec)
     return JSONResponse(data, headers=extra)

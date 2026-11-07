@@ -79,6 +79,18 @@ DEFAULT_CONFIG = {
         "natural_commands": True,   # 代理里识别「记住，以后叫我X」等主人原话
         "mcp_owner_edit": True,     # MCP 的 update_core 带主人原话时直接生效（否则转提案）
     },
+    "evolve": {
+        "enabled": True,            # 自进化总开关
+        "nudge_interval": 10,       # 后台巡检阈值：距上次保存技能累计多少轮对话（跨会话累积；0 = 不自动巡检）
+        "approval": "auto",         # auto：安全的直接生效、危险的交主人批准；always：AI 的所有技能修改都要主人批准
+        "max_ops": 5,               # 每次巡检最多改几个技能
+        "review_memory": True,      # 联合巡检：顺便提取星星、提出核心提案
+        "buffer_turns": 40,         # 巡检回看的最近对话轮数上限
+        "inject": True,             # 代理里注入相关技能
+        "inject_k": 3,
+        "inject_budget_tokens": 400,
+        "inject_full_threshold": 0.3,
+    },
     "server": {"host": "127.0.0.1", "port": 7860, "open_browser": True},
     "secrets_encrypted": False,
     "secrets_salt": "",

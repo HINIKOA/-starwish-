@@ -13,6 +13,7 @@
 这个文件夹里的 `soul/`（灵魂包）就是 AI 的灵魂——模型只是来来去去的身体。
 
 - **核心记忆（独立模块）**：三段恒定内容（AI身份与名字 / 主人是谁及称呼 / 主人的喜好），每轮都注入，只占几十个 token。**永远不会被自动改写**，但**主人一句话就能改**：面板专属页面、任何 AI 客户端里的 `/核心 …` 指令或「记住，以后叫我X」、MCP `update_core`、REST `/api/core/update`。每次修改都有版本号、前后对比与来源，可撤销、可回到任意版本。
+- **技能自进化（参考 Hermes Agent）**：技能 = AI 的操作手册（怎么做某件事）。会用工具的 AI 做完复杂任务后自己存成技能、发现过时立即热补丁；不会用工具的客户端由星魂后台巡检回看对话，自动沉淀与修补。AI 自建技能过安全扫描，危险的交主人批准；全部可追溯、可回滚，永不硬删除。
 - **星星**：其余所有记忆。每条一颗星，新的亮、旧的暗，被想起会重新变亮；永不硬删除，所有变化写进只追加的事件日志。
 - **省 token 召回**：先看几十 token 的索引，再按预算（默认 600 token）取摘要，需要时才取全文。
 - **任何模型都能用**：MCP（Claude Desktop / Cursor / Cherry Studio / Hermes Agent…）、OpenAI 兼容代理（ChatGPT 类客户端、DeepSeek、Claude 的 OpenAI 兼容端点…）、REST API。
@@ -55,6 +56,7 @@ soulstar/
 │   │   ├── history.py        版本历史与逐行 diff（读自 events.jsonl）
 │   │   ├── proposals.py      提案队列（自动渠道只能走这里）
 │   │   └── commands.py       主人指令解析（/核心 … 与「记住，以后叫我X」）
+│   ├── evolve/               技能自进化（skills / fuzzy / guard / review / commands）
 │   ├── stars.py              星星、亮度、分层召回
 │   ├── semantic.py           可选语义检索（bge-small-zh）
 │   ├── archive.py            原始对话归档（只追加）
@@ -65,12 +67,15 @@ soulstar/
 │   └── server.py             FastAPI：REST API + 面板 + 定时任务
 ├── web/                      面板（index.html + app.js + style.css，无需构建）
 │   ├── core.html / core.js / core.css   核心记忆模块页面（/core）
+│   ├── skills.html / skills.js           技能进化模块页面（/skills）
 │   └── vendor/three.module.min.js   three.js 0.160（本地离线可用，缺失时自动走 CDN）
 ├── tests/smoke_test.py       冒烟测试
 └── soul/                     ← 灵魂包（首次运行自动创建）
     ├── core.json             核心记忆（唯一真源，带版本号 rev 与锁定状态）
     ├── core.md               核心记忆的只读镜像，方便人看
     ├── soul.db               星星、提案、全文索引（SQLite）
+    ├── skills/               技能库：[分类/]名字/SKILL.md + references/ 等；.archive/ 归档；.usage.json 使用统计；.pending.json 待批准
+    ├── evolve_buffer.json    后台巡检要回看的最近对话
     ├── events.jsonl          事件日志：每次新增/修改/隐藏/召回/批准…只追加，永久可追溯
     ├── archive/              原始对话：YYYY-MM-DD.jsonl（只追加）；imported/ 存导入的原文
     ├── snapshots/            本地快照 zip
@@ -109,7 +114,7 @@ soulstar/
 }
 ```
 
-重启 Claude Desktop 后会出现 9 个工具：`get_core`、`recall_index`、`recall`、`recall_detail`、`remember`、`propose_core_change`、`update_core`、`core_history`、`undo_core`。
+重启 Claude Desktop 后会出现 13 个工具：`get_core`、`recall_index`、`recall`、`recall_detail`、`remember`、`propose_core_change`、`update_core`、`core_history`、`undo_core`，以及技能自进化的 `skills_list`、`skill_view`、`skill_manage`、`skill_feedback`。
 （`update_core` 必须在 `owner_instruction` 里原样附上主人的原话才会直接生效，否则自动转为提案。）
 建议在 Claude 的「项目说明 / 个性化」里加一句：*每次对话开始先调用 get_core；需要回忆时先 recall，不要一次读全部。*
 
@@ -189,6 +194,11 @@ POST /api/core/rollback             {"rev":3,"mode":"to|undo","confirm":true}
 POST /api/core/undo                 撤销最近一次修改（主人）
 POST /api/core/lock                 {"locked":true,"confirm":true}
 GET  /api/proposals                 待批准提案；POST /api/proposals/{id}/approve {"confirm":true}
+GET  /api/skills                    技能列表；GET /api/skills/{name} 全文；GET /api/skills/{name}/history 历史
+POST /api/skills/manage             {"action":"create|patch|edit|write_file|remove_file|archive|restore","name":"…",…,"as_agent":false}
+POST /api/skills/{name}/rollback    {"rev":3,"mode":"to|undo","confirm":true}；POST /api/skills/{name}/feedback {"good":false,"comment":"…"}
+GET  /api/skills/pending            待批准；POST /api/skills/pending/{id}/approve | reject
+GET  /api/evolve/status             巡检计数 / 上次巡检；POST /api/evolve/review {"background":true}
 POST /api/stars                     新增星 {"content":"…","tags":["…"],"importance":3}
 GET  /api/recall/index              第一层：索引
 POST /api/recall                    第二层：{"query":"…","budget_tokens":600}
@@ -278,6 +288,48 @@ three.js 已随包放在 `web/vendor/`，完全离线可用；如果删掉了，
 
 ---
 
+## 五·附二、技能自进化（参考 Hermes Agent）
+
+> 设计参考 Nous Research 的 [hermes-agent](https://github.com/nousresearch/hermes-agent)（MIT）以及 wbzhang233 的[《HermesAgent 自进化机制》](https://github.com/wbzhang233/VibeBloging)源码解析；星魂是独立的 Python 实现，未复制其代码。
+
+星魂把记忆分成三种：**核心记忆**（我是谁，主人亲手定）、**星星**（发生过什么）、**技能**（怎么做某件事，AI 自己写、自己修）。
+
+**技能格式**（与 Hermes / agentskills.io 兼容，可以直接把 Hermes 的技能文件夹拷进 `soul/skills/`）：
+
+```
+soul/skills/devops/deploy-blog/SKILL.md
+---
+name: deploy-blog
+description: 部署 Hexo 博客到 GitHub Pages 时使用
+tags: [博客, 部署]
+---
+# 部署博客
+## 步骤
+1. git pull
+2. hexo clean && hexo deploy
+## 注意 / 踩过的坑
+- 不先 clean 会残留旧文件
+```
+
+**双引擎：**
+
+| 引擎 | 谁 | 怎么触发 | 做什么 |
+|---|---|---|---|
+| 前台自觉 | 会用工具的 AI（Claude Desktop / Cursor / Hermes 等 MCP 客户端） | MCP 指令里的 SKILLS_GUIDANCE：复杂任务（5 步以上）做完、修好棘手错误、发现非显而易见的流程 | 调 `skill_manage(create)` 存成技能；用技能时发现过时 → 立即 `patch`。调用后巡检计数器归零 |
+| 后台巡检 | 星魂自己（用设置里的维护模型） | 代理每转发一轮计数 +1，**跨会话累积不重置**，达到阈值（默认 10）且期间没有前台保存 | 守护线程回看最近对话，按「试错 / 绕路 / 主人纠正」决定新建或修补技能；联合巡检顺便提取星星、提出核心提案（核心只提案） |
+
+**自修复：** 本轮注入过的技能、被差评（面板 👎、`/技能 差评 名字 原因`、MCP `skill_feedback`）的技能，会连同全文交给下一次巡检，优先用补丁修好。
+**热补丁模糊匹配：** 精确 → 去缩进 → 压缩空白 → 全半角标点归一 → 首尾锚点，AI 记不清原文也能补对；补丁会破坏 SKILL.md 结构时拒绝。
+**安全：** 每次写入后扫描（数据外泄、提示注入、绕过核心记忆、破坏性命令、持久化、反弹 shell、混淆、凭证暴露、不可见字符…）。信任矩阵：主人写的全部放行；AI 自建的 safe/caution 放行、dangerous **回滚并交主人批准**；AI 想归档主人创建的技能也要批准。设置里可改成「AI 的所有技能修改都要我批准」。
+**省 token（渐进式披露）：** 代理只注入与当前问题相关的技能「名字 + 一句话」，最相关且足够短的一个才附正文，总量受预算（默认 400 tok）封顶；MCP 客户端按需 `skills_list` → `skill_view`。
+**永不消失：** 技能和星星一样随时间变暗、被用到就变亮；不要的只会归档（`.archive/`），随时恢复。每次修改记 `skill_change` 事件（前后全文），可回到任意版本或撤销某一次。
+
+**面板 `/skills`（顶栏「✧ 技能进化」）：** 技能库（亮度、来源、使用 / 修补 / 好评差评）、编辑与版本历史 diff 回滚、待批准（含扫描报告）、进化日志、设置，右上角「立即巡检」。
+
+**对话指令：** `/技能`、`/技能 查看 名字`、`/技能 历史 名字`、`/技能 撤销 名字`、`/技能 归档|恢复 名字`、`/技能 好评|差评 名字 原因`、`/技能 巡检 [要求]`；也可以直接说「把刚才的做法存成技能」。
+
+---
+
 ## 六、LLM 自动整理（可选）
 
 在设置里填好上游 API Key 后：
@@ -351,7 +403,7 @@ pip install wsgidav cheroot      # 可选：用于测试 WebDAV
 python tests/smoke_test.py
 ```
 
-冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、核心记忆模块（主人指令 / 令牌 / 代理 /核心 / 版本历史 / 回滚撤销 / 上锁转提案）、
+冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、核心记忆模块（主人指令 / 令牌 / 代理 /核心 / 版本历史 / 回滚撤销 / 上锁转提案）、技能自进化（模糊补丁 / 安全扫描 / 待批准 / 后台巡检阈值 / 自修复 / 注入 / MCP skill_manage）、
 星汐/zip/markdown/ChatGPT 导入、代理注入（非流式 + 流式）、LLM 整理、MCP（官方 SDK 与内置实现）、快照恢复、WebDAV 加密备份与版本保留、机密加密、1 万颗星性能。
 
 ---

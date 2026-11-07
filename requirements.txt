@@ -7,5 +7,6 @@ requests>=2.31
 jieba>=0.42
 cryptography>=42
 mcp>=1.2
+pyyaml>=6
 # 可选：语义检索（体积较大，按需安装）
 # sentence-transformers>=2.7

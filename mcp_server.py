@@ -14,14 +14,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app import __version__, config, core, stars  # noqa: E402
+from app import __version__, config, core, evolve, stars  # noqa: E402
 from app.db import init_db  # noqa: E402
 
 INSTRUCTIONS = ("星魂记忆库。对话开始时先调用 get_core 获取恒定的核心记忆；需要回忆时先 recall_index 看概况，"
                 "再 recall(query) 在 token 预算内取相关摘要，必要时 recall_detail(id) 取全文。"
                 "值得长期记住的新信息用 remember 保存。核心记忆（AI身份/主人称呼/主人喜好）不能自作主张修改："
                 "只有主人在对话里明确要求时，才用 update_core 并在 owner_instruction 里原样附上主人的原话；"
-                "你自己推测出来的变化用 propose_core_change 提案，由主人批准。主人说撤销就用 undo_core。")
+                "你自己推测出来的变化用 propose_core_change 提案，由主人批准。主人说撤销就用 undo_core。\n"
+                "技能（skills）是你的操作手册：开始做事前先 skills_list 看有没有相关技能，有就 skill_view 读全文照做。\n"
+                + evolve.review.SKILLS_GUIDANCE)
 
 
 def _j(obj) -> str:
@@ -95,7 +97,55 @@ def undo_core(owner_instruction: str) -> str:
     return out["reply"]
 
 
-TOOLS = [get_core, recall_index, recall, recall_detail, remember, propose_core_change, update_core, core_history, undo_core]
+def skills_list(query: str = "") -> str:
+    """列出技能（名字 + 一句话说明）。给 query 时只列相关的。做事前先看看有没有现成的技能。"""
+    if query.strip():
+        items = [s for _, s in evolve.skills.relevant(query, k=10, min_score=0.01)]
+    else:
+        items = evolve.skills.list_skills()
+    if not items:
+        return "（还没有相关技能）"
+    return "\n".join(f"- {s['name']}：{s['description']}" for s in items[:60])
+
+
+def skill_view(name: str, file_path: str = "") -> str:
+    """读取技能全文（SKILL.md）；file_path 可读辅助文件（如 references/xx.md）。"""
+    try:
+        if file_path:
+            return evolve.skills.read_file(name, file_path)
+        v = evolve.skills.view(name)
+        return v["content"] + (("\n\n辅助文件：" + ", ".join(v["files"])) if v["files"] else "")
+    except KeyError as e:
+        return str(e).strip("'")
+
+
+def skill_manage(action: str, name: str, content: str = "", category: str = "", old_string: str = "",
+                 new_string: str | None = None, replace_all: bool = False, file_path: str = "", file_content: str | None = None) -> str:
+    """创建 / 修补技能（你的程序性记忆）。action: create（content=完整 SKILL.md，含 YAML 头 name+description）/
+    patch（old_string→new_string 精准热补丁，支持模糊匹配，首选）/ edit（content 整篇重写，慎用）/
+    write_file（file_path 必须在 references/ templates/ scripts/ assets/ 下）/ remove_file / archive（归档，不硬删）。
+    技能写「教训」不写「日志」：祈使句规则 + 原因。"""
+    kw = {k: v for k, v in {"content": content, "category": category, "old_string": old_string, "file_path": file_path}.items() if v}
+    if new_string is not None:
+        kw["new_string"] = new_string
+    if file_content is not None:
+        kw["file_content"] = file_content
+    r = evolve.skills.manage(action, name, replace_all=replace_all, source="mcp", trust="agent-created", **kw)
+    if r.get("success"):
+        evolve.review.note_skill_manage()
+    return r.get("message", "") or _j(r)
+
+
+def skill_feedback(name: str, good: bool, comment: str = "") -> str:
+    """技能好用 / 不好用的反馈。差评的技能会在下一次后台巡检被优先修复。"""
+    try:
+        return evolve.skills.feedback(name, bool(good), comment, source="mcp")["message"]
+    except KeyError as e:
+        return str(e).strip("'")
+
+
+TOOLS = [get_core, recall_index, recall, recall_detail, remember, propose_core_change, update_core, core_history, undo_core,
+         skills_list, skill_view, skill_manage, skill_feedback]
 
 SCHEMAS = {
     "get_core": {"type": "object", "properties": {}},
@@ -123,6 +173,20 @@ SCHEMAS = {
         "required": ["section", "content", "owner_instruction"]},
     "core_history": {"type": "object", "properties": {"limit": {"type": "integer", "default": 5}}},
     "undo_core": {"type": "object", "properties": {"owner_instruction": {"type": "string"}}, "required": ["owner_instruction"]},
+    "skills_list": {"type": "object", "properties": {"query": {"type": "string"}}},
+    "skill_view": {"type": "object", "properties": {"name": {"type": "string"}, "file_path": {"type": "string"}}, "required": ["name"]},
+    "skill_manage": {"type": "object", "properties": {
+        "action": {"type": "string", "enum": ["create", "patch", "edit", "write_file", "remove_file", "archive"]},
+        "name": {"type": "string", "description": "小写字母/数字/-_.，最长 64"},
+        "content": {"type": "string", "description": "create/edit：完整 SKILL.md（YAML 头 + 正文）"},
+        "category": {"type": "string"},
+        "old_string": {"type": "string", "description": "patch：要替换的原文（允许空白/缩进/标点有出入）"},
+        "new_string": {"type": "string", "description": "patch：替换后的内容；空字符串表示删除"},
+        "replace_all": {"type": "boolean", "default": False},
+        "file_path": {"type": "string"}, "file_content": {"type": "string"}},
+        "required": ["action", "name"]},
+    "skill_feedback": {"type": "object", "properties": {"name": {"type": "string"}, "good": {"type": "boolean"},
+                                                          "comment": {"type": "string"}}, "required": ["name", "good"]},
 }
 
 

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, archive, config, core, importers, maintenance, stars, sync
+from . import __version__, archive, config, core, evolve, importers, maintenance, stars, sync
 from .db import init_db, log_event, read_events
 from .proxy import router as proxy_router
 
@@ -80,6 +80,11 @@ async def _confirm(_, e):
 @app.exception_handler(KeyError)
 async def _nf(_, e):
     return JSONResponse({"detail": str(e).strip("'")}, status_code=404)
+
+
+@app.exception_handler(evolve.skills.SkillError)
+async def _skill_err(_, e):
+    return JSONResponse({"detail": str(e)}, status_code=400)
 
 
 @app.exception_handler(ValueError)
@@ -194,7 +199,7 @@ def health():
 
 @app.get("/api/stats")
 def api_stats():
-    return stars.stats()
+    return {**stars.stats(), "skills": evolve.skills.stats()}
 
 
 @app.get("/api/events")
@@ -307,6 +312,121 @@ def approve(pid: int, req: Decide):
 @app.post("/api/proposals/{pid}/reject")
 def reject(pid: int):
     return core.decide_proposal(pid, False, False)
+
+
+# ---------------- 技能 / 自进化 ----------------
+class SkillOp(BaseModel):
+    action: str
+    name: str
+    content: Optional[str] = None
+    category: Optional[str] = None
+    old_string: Optional[str] = None
+    new_string: Optional[str] = None
+    replace_all: bool = False
+    file_path: Optional[str] = None
+    file_content: Optional[str] = None
+    note: str = ""
+    as_agent: bool = False          # 以 AI 身份提交（走信任矩阵 / 审批），用于外部 Agent 通过 REST 自进化
+
+
+class SkillRollback(BaseModel):
+    rev: int
+    mode: str = "to"
+    confirm: bool = False
+
+
+class SkillFeedback(BaseModel):
+    good: bool
+    comment: str = ""
+
+
+class ReviewReq(BaseModel):
+    focus: str = ""
+    background: bool = True
+
+
+@app.get("/api/skills")
+def api_skills(archived: bool = False):
+    return evolve.skills.list_skills(include_archived=archived)
+
+
+@app.post("/api/skills/manage")
+def api_skill_manage(op: SkillOp, request: Request):
+    agent = op.as_agent or not is_owner(request)
+    d = op.model_dump(exclude={"note", "as_agent"})
+    r = evolve.skills.manage(**d, source="api" if not agent else "api-agent",
+                             trust="agent-created" if agent else "owner", note=op.note)
+    if agent and r.get("success"):
+        evolve.review.note_skill_manage()
+    if not r.get("success"):
+        return JSONResponse(r, status_code=400)
+    return r
+
+
+@app.get("/api/skills/pending")
+def api_skill_pending():
+    return evolve.skills.list_pending()
+
+
+@app.post("/api/skills/pending/{pid}/approve")
+def api_skill_approve(pid: str):
+    return evolve.skills.decide_pending(pid, True)
+
+
+@app.post("/api/skills/pending/{pid}/reject")
+def api_skill_reject(pid: str):
+    return evolve.skills.decide_pending(pid, False)
+
+
+@app.get("/api/skills/history")
+def api_skills_history_all(limit: int = 100):
+    return evolve.skills.history(None, min(limit, 1000))
+
+
+@app.get("/api/skills/{name}")
+def api_skill_view(name: str):
+    return evolve.skills.view(name, bump_view=False)
+
+
+@app.get("/api/skills/{name}/file")
+def api_skill_file(name: str, path: str):
+    return {"path": path, "content": evolve.skills.read_file(name, path)}
+
+
+@app.get("/api/skills/{name}/history")
+def api_skill_history(name: str, limit: int = 100):
+    return evolve.skills.history(name, min(limit, 1000))
+
+
+@app.post("/api/skills/{name}/rollback")
+def api_skill_rollback(name: str, req: SkillRollback):
+    if not req.confirm:
+        raise core.ConfirmRequiredError("回滚技能需要 confirm=true")
+    return evolve.skills.rollback(name, req.rev, "undo" if req.mode == "undo" else "to")
+
+
+@app.post("/api/skills/{name}/feedback")
+def api_skill_feedback(name: str, req: SkillFeedback):
+    return evolve.skills.feedback(name, req.good, req.comment)
+
+
+@app.post("/api/skills/{name}/pin")
+def api_skill_pin(name: str, pinned: bool = True):
+    return evolve.skills.set_pinned(name, pinned)
+
+
+@app.get("/api/evolve/status")
+def api_evolve_status():
+    return evolve.review.status()
+
+
+@app.post("/api/evolve/review")
+async def api_evolve_review(req: ReviewReq):
+    if not maintenance.llm_ready():
+        return {"ok": False, "skipped": True, "reason": "未配置 LLM API Key，无法巡检"}
+    if req.background:
+        return {"ok": True, "started": evolve.review.spawn_review(reason="面板手动巡检", focus=req.focus)}
+    return await run_in_threadpool(evolve.review.review, "面板手动巡检", req.focus, None, True)
 
 
 # ---------------- 星星 ----------------
@@ -511,6 +631,12 @@ async def api_import_upload(file: UploadFile = File(...), kind: str = Form("auto
 @app.get("/")
 def index():
     return FileResponse(config.WEB_DIR / "index.html")
+
+
+@app.get("/skills")
+def skills_page():
+    """技能进化模块页面。"""
+    return FileResponse(config.WEB_DIR / "skills.html")
 
 
 @app.get("/core")

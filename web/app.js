@@ -318,7 +318,7 @@ async function loadMap() {
 async function loadStats() {
   const s = await api("/api/stats");
   const chips = [
-    ["星星", s.total], ["今日新增", "+" + s.today], ["核心", s.core_tokens + " tok"],
+    ["星星", s.total], ["今日新增", "+" + s.today], ["核心", s.core_tokens + " tok"], ["技能", (s.skills ? s.skills.total : 0)],
     ["每轮注入约", s.est_tokens_per_turn + " tok"],
     ["检索", (s.jieba ? "jieba" : "二元组") + (s.fts ? "+FTS5" : "") + (s.semantic ? "+语义" : "")],
   ];
@@ -371,7 +371,7 @@ $("#drawerClose").addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
 document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click", () => openPanel(b.dataset.panel)));
 
-function openPanel(name) { ({ core: panelCore, proposals: panelProposals, add: panelAdd, import: panelImport, sync: panelSync, settings: panelSettings, events: panelEvents })[name](); }
+function openPanel(name) { if (name === "skills") { location.href = "/skills"; return; } ({ core: panelCore, proposals: panelProposals, add: panelAdd, import: panelImport, sync: panelSync, settings: panelSettings, events: panelEvents })[name](); }
 
 // —— 星星详情 ——
 async function openStar(id) {
@@ -592,7 +592,7 @@ async function panelSettings() {
 
 // —— 事件日志 ——
 const EV = { star_add: "新星", star_edit: "编辑星", star_merge: "合并", star_soft_delete: "隐藏", star_restore: "恢复", star_brighten: "变亮", star_dim: "变暗",
-  core_edit: "改核心(旧)", core_change: "改核心", core_lock: "锁定/解锁", proposal_create: "新提案", proposal_approve: "批准提案", proposal_reject: "拒绝提案", recall: "召回",
+  core_edit: "改核心(旧)", core_change: "改核心", skill_change: "技能修改", skill_staged: "技能待审", evolve_review: "技能巡检", skill_feedback: "技能反馈", core_lock: "锁定/解锁", proposal_create: "新提案", proposal_approve: "批准提案", proposal_reject: "拒绝提案", recall: "召回",
   recall_detail: "查看全文", archive_append: "归档", consolidate: "整理", snapshot_local: "快照", backup_webdav: "云备份", restore: "恢复快照", server_start: "启动" };
 async function panelEvents() {
   const list = await safe(() => api("/api/events?limit=200"));

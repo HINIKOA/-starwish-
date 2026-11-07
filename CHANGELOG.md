@@ -1,5 +1,12 @@
 # 更新记录
 
+## v0.3.0（2026-11-07）技能自进化（参考 Hermes Agent）
+- 新增 `app/evolve/`：技能库（Hermes/agentskills 兼容 SKILL.md，create/patch/edit/write_file/remove_file/archive/restore/rollback）、热补丁模糊匹配、安全扫描 + 信任矩阵、待批准队列。
+- 双引擎：MCP 前台自觉（SKILLS_GUIDANCE + skills_list/skill_view/skill_manage/skill_feedback，调用后计数器归零）；代理后台巡检（跨会话计数阈值 → 守护线程回看对话，联合提取星星与核心提案）。
+- 自修复：注入过 / 被差评的技能交巡检优先修补；技能亮度随时间变暗、使用变亮，永不硬删除。
+- 代理渐进式注入相关技能（预算封顶）；`/技能 …` 指令与「把刚才的做法存成技能」；REST `/api/skills*`、`/api/evolve/*`；面板 `/skills` 页面。
+- 冒烟测试 112 → 161 项。
+
 ## v0.2.0（2026-11-07）核心记忆独立模块
 - 核心记忆拆成独立模块 `app/core/`（store / edit / history / proposals / commands），所有修改走唯一入口，带版本号 `rev`。
 - 面板新增核心记忆模块页面 `/core`：三段分别编辑、锁定开关、待批准提案、版本历史（逐行 diff、回到此版本、撤销这次）、主人指令。
