@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星魂 SoulStar · 记忆星图</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="stage"></div>
+<div id="vignette"></div>
+
+<header id="topbar">
+  <div class="brand"><span class="logo">✦</span> 星魂 <small>SoulStar</small></div>
+  <div class="searchbox">
+    <input id="search" type="search" placeholder="搜索记忆（不命中的星会变暗）" autocomplete="off">
+    <div id="searchResults" class="dropdown hidden"></div>
+  </div>
+  <nav>
+    <button data-panel="core">核心记忆</button>
+    <button data-panel="proposals">提案 <span id="propBadge" class="badge hidden">0</span></button>
+    <button data-panel="add">＋ 新星</button>
+    <button data-panel="import">导入</button>
+    <button data-panel="sync">备份/整理</button>
+    <button data-panel="settings">设置</button>
+    <button data-panel="events">日志</button>
+  </nav>
+</header>
+
+<div id="stats" class="stats"></div>
+
+<footer id="timeline">
+  <span class="tl-label">时间线</span>
+  <input id="tlSlider" type="range" min="0" max="1000" value="1000">
+  <span id="tlText">全部</span>
+  <button id="resetView" title="重置视角">⟲ 视角</button>
+  <label class="tl-check"><input type="checkbox" id="autoRotate" checked> 缓慢旋转</label>
+</footer>
+
+<div id="tooltip" class="hidden"></div>
+<aside id="drawer" class="hidden">
+  <button id="drawerClose" title="关闭">×</button>
+  <div id="drawerBody"></div>
+</aside>
+<div id="toast" class="hidden"></div>
+<div id="noThree" class="hidden">
+  <h3>3D 星图未能加载</h3>
+  <p>没有找到 three.js。离线使用请把 <code>three.module.min.js</code>（0.160 版）放到 <code>web/vendor/</code> 目录；联网时会自动从 CDN 加载。</p>
+  <p>其他功能（核心记忆、提案、导入、备份、设置）都可以正常使用。</p>
+</div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
