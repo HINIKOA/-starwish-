@@ -58,6 +58,14 @@ DEFAULT_CONFIG = {
         "recall_budget_default": 600,
         "semantic": True,
         "semantic_model": "BAAI/bge-small-zh-v1.5",
+        # —— 星辰融合：相似的记忆融合、归纳、进化成一颗新星（成员不删除，可拆开还原）——
+        "fuse_auto": True,          # 自动融合
+        "fuse_every_new": 8,        # 每新增多少颗星检查一次
+        "fuse_threshold": 0.34,     # 相似度达到多少算「类似的记忆」
+        "fuse_max_group": 6,        # 一次最多几颗融成一颗
+        "fuse_max_per_run": 5,      # 每次最多融合几组
+        "fuse_scan": 400,           # 每次只看最近多少颗星（老星早已融合过）
+        "fuse_use_llm": True,       # 配好 LLM 时让它归纳；否则朴素拼接
     },
     "webdav": {
         "url": "",

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, archive, config, core, evolve, eye, importers, maintenance, stars, sync, voice
+from . import __version__, archive, config, core, evolve, eye, fusion, importers, maintenance, stars, sync, voice
 from .db import init_db, log_event, read_events
 from .proxy import router as proxy_router
 
@@ -38,6 +38,11 @@ async def scheduler_loop():
             if due("last_consolidate_t", sch.get("consolidate_hours")) and maintenance.llm_ready(cfg):
                 config.update_state(last_consolidate_t=now)
                 await run_in_threadpool(maintenance.consolidate)
+            if cfg["memory"].get("fuse_auto", True):
+                try:
+                    await run_in_threadpool(fusion.auto_fuse, cfg)
+                except Exception as e:  # noqa: BLE001
+                    log_event("star_fuse_error", error=str(e)[:200])
             if due("last_snapshot", sch.get("snapshot_hours")):
                 await run_in_threadpool(sync.local_snapshot)
             if due("last_backup_try", sch.get("backup_hours")) and cfg["webdav"].get("url"):
@@ -445,12 +450,53 @@ def get_map():
     return stars.star_map()
 
 
+class FuseReq(BaseModel):
+    ids: list[int] = []             # 指定要融合的星；留空 = 自动找相似组
+    use_llm: bool = True
+    max_groups: int = 5
+
+
+@app.get("/api/stars/fuse/preview")
+def fuse_preview():
+    """看看哪些星会被融合（不改动任何东西）。"""
+    return {"groups": fusion.find_groups()}
+
+
+@app.post("/api/stars/fuse")
+async def fuse_stars(req: FuseReq):
+    cfg = config.load_config()
+    try:
+        if req.ids:
+            st = await run_in_threadpool(fusion.fuse, req.ids, req.use_llm, cfg)
+            return {"fused": [{"members": sorted(set(req.ids)), "star": st}]}
+        groups = (await run_in_threadpool(fusion.find_groups, cfg))[: max(1, min(20, req.max_groups))]
+        done = []
+        for g in groups:
+            try:
+                done.append({"members": g["ids"], "star": await run_in_threadpool(fusion.fuse, g["ids"], req.use_llm, cfg)})
+            except ValueError:
+                continue
+        return {"fused": done}
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
+@app.post("/api/stars/{sid}/unfuse")
+def unfuse_star(sid: int):
+    try:
+        return fusion.unfuse(sid)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
 @app.get("/api/stars/{sid}")
 def get_star(sid: int):
     s = stars.get_star(sid)
     if not s:
         raise HTTPException(404, "星星不存在")
     s["raw"] = stars._raw_for(s.get("source", ""), 2000)
+    if s.get("fused_from"):
+        s["members"] = fusion.members(sid)
     return s
 
 

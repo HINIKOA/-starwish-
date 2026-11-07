@@ -98,16 +98,7 @@ function initScene(THREE) {
   const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 3000);
   Object.assign(S, { renderer, scene, camera });
 
-  // 背景星尘
-  const N = 2500, pos = new Float32Array(N * 3), r = rnd(7);
-  for (let i = 0; i < N; i++) {
-    const R = 300 + r() * 700, th = r() * Math.PI * 2, ph = Math.acos(2 * r() - 1);
-    pos[i * 3] = R * Math.sin(ph) * Math.cos(th); pos[i * 3 + 1] = R * Math.cos(ph); pos[i * 3 + 2] = R * Math.sin(ph) * Math.sin(th);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x5a6390, size: 1.2, sizeAttenuation: false, transparent: true, opacity: 0.55 })));
-
+  // 一开始只有主核星辰：不再铺背景星尘，星空随记忆一颗颗长出来
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
@@ -115,26 +106,16 @@ function initScene(THREE) {
   bindControls(renderer.domElement);
 }
 
-// 核心记忆：中央明亮星团（三颗主星 + 金色星尘）
+// 核心记忆：一颗金色的主核星辰（外加一圈柔光），三段核心记忆都在它里面
 function buildCore(THREE) {
   if (S.corePoints) { S.scene.remove(S.corePoints); S.corePoints.geometry.dispose(); }
   const secs = ["identity", "owner", "preferences"];
-  const N = 3 + 160, pos = new Float32Array(N * 3), col = new Float32Array(N * 3), size = new Float32Array(N),
-    br = new Float32Array(N), hi = new Float32Array(N), ph = new Float32Array(N);
-  const r = rnd(42);
-  for (let i = 0; i < N; i++) {
-    if (i < 3) {
-      const a = (i / 3) * Math.PI * 2;
-      pos.set([Math.cos(a) * 2.6, (i - 1) * 0.6, Math.sin(a) * 2.6], i * 3);
-      const filled = S.core && S.core.sections[secs[i]].content.trim();
-      col.set([1, 0.86, 0.55], i * 3); size[i] = 12; br[i] = filled ? 1 : 0.35;
-    } else {
-      const R = Math.abs((r() + r() + r()) / 3 - 0.5) * 9, th = r() * Math.PI * 2, y = (r() - 0.5) * 2.2;
-      pos.set([Math.cos(th) * R, y, Math.sin(th) * R], i * 3);
-      col.set([1, 0.8 + r() * 0.15, 0.5 + r() * 0.3], i * 3); size[i] = 1.2 + r() * 1.6; br[i] = 0.35 + r() * 0.5;
-    }
-    ph[i] = r() * 6.28;
-  }
+  const filled = S.core ? secs.filter((k) => (S.core.sections[k].content || "").trim()).length : 0;
+  const lum = 0.55 + 0.15 * filled;                       // 核心记忆填得越满，主核越亮
+  const pos = new Float32Array([0, 0, 0, 0, 0, 0]);
+  const col = new Float32Array([1, 0.84, 0.42, 1, 0.72, 0.28]);
+  const size = new Float32Array([16, 46]), br = new Float32Array([lum + 0.2, 0.22 + 0.06 * filled]);
+  const hi = new Float32Array([0, 0]), ph = new Float32Array([0, 1.7]);
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   g.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
@@ -148,32 +129,51 @@ function buildCore(THREE) {
 }
 
 // 记忆星：一个 Points 对象承载全部星星（1 万+ 依然流畅）
+// 大小与亮度按时间先后：越新越大越亮，老星变小变暗但不会消失；融合出来的星按「代数」更大，颜色偏白紫。
 function buildStars(THREE, list) {
   if (S.points) { S.scene.remove(S.points); S.points.geometry.dispose(); }
+  const prevPos = S.prevPos || new Map(), first = !S.knownIds;
   S.stars = list; S.idToIdx = new Map();
   const n = list.length;
   const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n),
     br = new Float32Array(n), hi = new Float32Array(n), ph = new Float32Array(n);
-  const base = new Float32Array(n);
+  const base = new Float32Array(n), final = new Float32Array(n * 3);
   const tagHue = new Map();
   const c = new THREE.Color();
+  const now = Date.now() / 1000;
+  S.anims = []; const ghosts = [];
   list.forEach((s, i) => {
-    const [id, created, bright, imp, tag] = s;
+    const [id, created, bright, imp, tag, , gen = 0, fused = []] = s;
     S.idToIdx.set(id, i);
     const f = n > 1 ? (n - 1 - i) / (n - 1) : 0; // 0 = 最新，1 = 最老
     const rr = rnd(hash(id) + 1);
-    const R = 8 + 85 * Math.sqrt(f) + rr() * 4;
+    const spread = 22 + 73 * Math.min(1, n / 300);                       // 星少时聚在主核周围，星多了再铺开
+    const R = 7 + spread * Math.sqrt(f) + rr() * 3;
     const arms = 5, arm = tag ? hash(tag) % arms : arms - 1;
     const ang = (arm / arms) * Math.PI * 2 + R * 0.075 + (rr() - 0.5) * 0.7;
-    pos[i * 3] = Math.cos(ang) * R;
-    pos[i * 3 + 1] = (rr() - 0.5) * (1.5 + R * 0.12);
-    pos[i * 3 + 2] = Math.sin(ang) * R;
+    const p = [Math.cos(ang) * R, (rr() - 0.5) * (1.5 + R * 0.12), Math.sin(ang) * R];
+    final.set(p, i * 3); pos.set(p, i * 3);
     if (!tagHue.has(tag)) tagHue.set(tag, tag ? (hash(tag) % 360) / 360 : 0.62);
     c.setHSL(tagHue.get(tag), tag ? 0.55 : 0.35, 0.72);
+    if (gen > 0) c.lerp(new THREE.Color(0.86, 0.8, 1.0), Math.min(0.7, 0.35 + gen * 0.15));
     col.set([c.r, c.g, c.b], i * 3);
-    size[i] = 1.6 + imp * 0.55;
-    base[i] = 0.16 + 0.84 * Math.min(1, bright / 1.5);
+    const ageDays = Math.max(0, (now - created) / 86400);
+    const recency = Math.max(1 - f, Math.pow(0.5, ageDays / 7));          // 时间顺序 + 真实时间，取较新的那个
+    size[i] = (1.8 + 5.2 * Math.pow(recency, 1.3)) * (0.85 + imp * 0.06) * (1 + 0.3 * gen);
+    base[i] = Math.min(1, 0.14 + 0.66 * Math.pow(recency, 1.1) + 0.2 * Math.min(1, bright / 1.5));
     ph[i] = rr() * 6.28;
+    // 诞生 / 融合动画（首次打开页面不播）
+    if (!first && !S.knownIds.has(id)) {
+      const from = fused.length ? fused.map((m) => prevPos.get(m)).filter(Boolean) : [];
+      if (from.length) {
+        from.forEach((fp) => ghosts.push({ from: fp, to: p, color: [c.r, c.g, c.b] }));
+        S.anims.push({ i, from: from[0], to: p, t0: performance.now() + 900, dur: 600, flash: 1, kind: "fuse" });
+        pos.set(from[0], i * 3);
+      } else {
+        S.anims.push({ i, from: [0, 0, 0], to: p, t0: performance.now(), dur: 1600, flash: 1, kind: "birth" });
+        pos.set([0, 0, 0], i * 3);
+      }
+    }
   });
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
@@ -185,9 +185,49 @@ function buildStars(THREE, list) {
   g.computeBoundingSphere();
   S.points = new THREE.Points(g, makeMaterial(THREE));
   S.scene.add(S.points);
-  S.positions = pos; S.baseBright = base;
+  S.positions = final; S.baseBright = base;
+  S.knownIds = new Set(list.map((x) => x[0]));
+  S.prevPos = new Map(list.map((x, i) => [x[0], [final[i * 3], final[i * 3 + 1], final[i * 3 + 2]]]));
+  // 被吸收的成员：旧位置也记着，后面再融合时还能从它们那里飞过来
   if (n) { S.minT = list[0][1]; S.maxT = list[n - 1][1]; }
+  if (first && !S.userZoomed) S.cam.dist = 45 + 75 * Math.min(1, n / 300);  // 星少时镜头拉近
+  buildGhosts(THREE, ghosts);
+  $("#emptyHint").classList.toggle("hidden", n > 0);
   applyFilters();
+}
+
+// 融合动画：被吸收的星从原位置飞向新星，然后新星一闪
+function buildGhosts(THREE, ghosts) {
+  if (S.ghostPoints) { S.scene.remove(S.ghostPoints); S.ghostPoints.geometry.dispose(); S.ghostPoints = null; }
+  if (!ghosts.length) return;
+  const m = ghosts.length, pos = new Float32Array(m * 3), col = new Float32Array(m * 3), size = new Float32Array(m).fill(3.2),
+    br = new Float32Array(m).fill(0.9), hi = new Float32Array(m), ph = new Float32Array(m);
+  ghosts.forEach((gh, k) => { pos.set(gh.from, k * 3); col.set(gh.color, k * 3); });
+  const g = new THREE.BufferGeometry();
+  for (const [k, a, d] of [["position", pos, 3], ["aColor", col, 3], ["aSize", size, 1], ["aBright", br, 1], ["aHi", hi, 1], ["aPhase", ph, 1]]) g.setAttribute(k, new THREE.BufferAttribute(a, d));
+  S.ghostPoints = new THREE.Points(g, makeMaterial(THREE));
+  S.ghostPoints.userData = { ghosts, t0: performance.now(), dur: 1000 };
+  S.scene.add(S.ghostPoints);
+}
+
+function stepAnims(now) {
+  const ease = (x) => 1 - Math.pow(1 - x, 3);
+  if (S.ghostPoints) {
+    const { ghosts, t0, dur } = S.ghostPoints.userData; const k = Math.min(1, (now - t0) / dur);
+    const pa = S.ghostPoints.geometry.getAttribute("position"), ba = S.ghostPoints.geometry.getAttribute("aBright");
+    ghosts.forEach((gh, j) => { for (let d = 0; d < 3; d++) pa.array[j * 3 + d] = gh.from[d] + (gh.to[d] - gh.from[d]) * ease(k); ba.array[j] = 0.9 * (1 - k * 0.6); });
+    pa.needsUpdate = true; ba.needsUpdate = true;
+    if (k >= 1) { S.scene.remove(S.ghostPoints); S.ghostPoints.geometry.dispose(); S.ghostPoints = null; }
+  }
+  if (!S.anims || !S.anims.length || !S.points) return;
+  const pa = S.points.geometry.getAttribute("position"), hi = S.points.geometry.getAttribute("aHi");
+  S.anims = S.anims.filter((a) => {
+    const k = Math.max(0, Math.min(1, (now - a.t0) / a.dur));
+    for (let d = 0; d < 3; d++) pa.array[a.i * 3 + d] = a.from[d] + (a.to[d] - a.from[d]) * ease(k);
+    hi.array[a.i] = k < 1 ? 0.6 + 0.4 * Math.sin(k * Math.PI) : 0;
+    return k < 1;
+  });
+  pa.needsUpdate = true; hi.needsUpdate = true;
 }
 
 function visible(i) { return S.stars[i][1] <= S.cutoff; }
@@ -201,7 +241,7 @@ function applyFilters() {
     else if (S.searchSet && !S.searchSet.has(S.stars[i][0])) b *= 0.07;
     if ((i === S.selected || i === S.hovered) && visible(i)) b = Math.max(b, 0.95);
     br.array[i] = b;
-    hi.array[i] = i === S.hovered || i === S.selected ? 1 : 0;
+    if (!(S.anims && S.anims.some((a) => a.i === i))) hi.array[i] = i === S.hovered || i === S.selected ? 1 : 0;
   }
   br.needsUpdate = true; hi.needsUpdate = true;
 }
@@ -225,7 +265,7 @@ function bindControls(dom) {
   });
   dom.addEventListener("wheel", (e) => {
     e.preventDefault();
-    S.cam.dist = Math.min(600, Math.max(6, S.cam.dist * (e.deltaY > 0 ? 1.1 : 0.9)));
+    S.cam.dist = Math.min(600, Math.max(6, S.cam.dist * (e.deltaY > 0 ? 1.1 : 0.9))); S.userZoomed = true;
     S.lastInteract = performance.now();
   }, { passive: false });
 }
@@ -240,7 +280,6 @@ function pick(e) {
   let best = null;
   for (const hit of rc.intersectObjects(objs, false)) {
     const isCore = hit.object.userData.isCore;
-    if (isCore && hit.index >= 3) continue;
     if (!isCore && (!visible(hit.index) || (S.searchSet && !S.searchSet.has(S.stars[hit.index][0])))) continue;
     const score = hit.distanceToRay / Math.max(1, hit.distance) - (isCore ? 0.01 : 0);
     if (!best || score < best.score) best = { ...hit, isCore, score };
@@ -257,9 +296,9 @@ function onHover(e) {
   if (!h) { S.hovered = -1; tt.classList.add("hidden"); $("#stage").style.cursor = "default"; }
   else if (h.isCore) {
     S.hovered = -1;
-    const key = ["identity", "owner", "preferences"][h.index];
-    const txt = S.core ? S.core.sections[key].content : "";
-    tt.innerHTML = `<b>核心 · ${CORE_TITLES[h.index]}</b><div>${esc((txt || "（空，点击填写）").slice(0, 120))}</div>`;
+    const secs = ["identity", "owner", "preferences"];
+    tt.innerHTML = `<b>✦ 主核星辰 · 核心记忆</b>` + secs.map((k, i) => { const txt = S.core ? S.core.sections[k].content : "";
+      return `<div><span class="meta">${CORE_TITLES[i]}：</span>${esc((txt || "（空）").slice(0, 60))}</div>`; }).join("") + `<div class="meta">点击打开核心记忆模块</div>`;
     showTip(e); $("#stage").style.cursor = "pointer";
   } else {
     S.hovered = h.index;
@@ -303,7 +342,8 @@ function animate(t) {
   const { theta, phi, dist, target } = S.cam;
   S.camera.position.set(target[0] + dist * Math.sin(phi) * Math.cos(theta), target[1] + dist * Math.cos(phi), target[2] + dist * Math.sin(phi) * Math.sin(theta));
   S.camera.lookAt(target[0], target[1], target[2]);
-  for (const p of [S.points, S.corePoints]) if (p) p.material.uniforms.uTime.value = t / 1000;
+  stepAnims(performance.now());
+  for (const p of [S.points, S.corePoints, S.ghostPoints]) if (p) p.material.uniforms.uTime.value = t / 1000;
   S.renderer.render(S.scene, S.camera);
 }
 
@@ -311,6 +351,9 @@ function animate(t) {
 async function loadMap() {
   const [m, core] = await Promise.all([api("/api/stars/map"), api("/api/core")]);
   S.core = core;
+  const sig = m.stars.map((x) => x[0]).join(",") + "|" + (core.rev ?? "") + "|" + Math.floor(Date.now() / 3600000);
+  if (S.three && sig === S.mapSig) { updateTimelineText(); return; }   // 没有变化就不重建
+  S.mapSig = sig;
   if (S.three) { buildCore(S.three); buildStars(S.three, m.stars); }
   else { S.stars = m.stars; }
   updateTimelineText();
@@ -322,6 +365,7 @@ async function loadStats() {
     ["每轮注入约", s.est_tokens_per_turn + " tok"],
     ["检索", (s.jieba ? "jieba" : "二元组") + (s.fts ? "+FTS5" : "") + (s.semantic ? "+语义" : "")],
   ];
+  if (s.fused) chips.push(["融合星", s.fused]);
   if (s.deleted) chips.push(["已隐藏", s.deleted]);
   $("#stats").innerHTML = chips.map(([k, v]) => `<span class="chip">${k} <b>${esc(v)}</b></span>`).join("");
   const b = $("#propBadge");
@@ -388,7 +432,10 @@ async function openStar(id) {
       <span>最近召回</span><span>${fmtDate(s.last_recalled_at)}</span>
       <span>召回次数</span><span>${s.recall_count}</span>
       <span>来源</span><span>${esc(s.source || "—")}</span>
+      ${s.generation ? `<span>进化</span><span>第 ${s.generation} 代融合星 · 由 ${s.fused_from.length} 颗相似记忆归纳而成</span>` : ""}
     </div>
+    ${s.members && s.members.length ? `<h3>融合前的记忆</h3>${s.members.map((m) => `<div class="card"><div class="meta">#${m.id} · ${fmtDay(m.created_at)}${m.generation ? ` · 第 ${m.generation} 代` : ""}</div>${esc(m.summary)}</div>`).join("")}
+      <div class="row"><button id="sUnfuse">拆开还原</button></div>` : ""}
     <label>摘要（召回时只发送摘要，省 token）</label><input id="sSummary" value="${esc(s.summary)}">
     <label>全文</label><textarea id="sContent" rows="7">${esc(s.content)}</textarea>
     <div class="grid2">
@@ -412,6 +459,7 @@ async function openStar(id) {
   $("#sDim").onclick = () => act("dim", "变暗了");
   if ($("#sDel")) $("#sDel").onclick = () => confirm("隐藏这颗星？（可随时恢复）") && act("delete", "已隐藏");
   if ($("#sRestore")) $("#sRestore").onclick = () => act("restore", "已恢复");
+  if ($("#sUnfuse")) $("#sUnfuse").onclick = () => confirm("把这颗融合星拆开，还原成原来的几颗？") && safe(async () => { await api(`/api/stars/${id}/unfuse`, { method: "POST" }); toast("已拆开还原"); closeDrawer(); await refresh(); });
 }
 
 // —— 核心记忆：独立模块页面 /core ——
@@ -499,6 +547,10 @@ async function panelSync() {
     <div class="sub">${st && st.llm_ready ? "已配置 API Key。" : '<span class="warn">未配置 API Key：整理功能不可用，其余功能不受影响。</span>'}
       待整理的归档对话：<b>${pending}</b> 条。上次整理：${st && st.last ? fmtDate(st.last.t) + `（新增 ${st.last.added}，合并 ${st.last.merged}，提案 ${st.last.proposals}）` : "—"}</div>
     <div class="row"><button class="primary" id="mGo" ${st && st.llm_ready ? "" : "disabled"}>立即整理</button></div>
+    <h3>星辰融合</h3>
+    <div class="sub">相似的记忆会融合、归纳成一颗新星（配好 LLM 时由它归纳，否则朴素拼接）。原来的星不会删除，可随时拆开还原。每新增 8 颗星自动检查一次。</div>
+    <div class="row"><button id="fusePrev">看看哪些会融合</button><button class="primary" id="fuseGo">立即融合归纳</button></div>
+    <div id="fuseBox"></div>
     <h3>本地快照</h3>
     <div class="sub">保存在 soul/snapshots/（不含 config.json）。恢复前会自动再做一次快照，可回退。</div>
     <div class="row"><button id="snapGo">立即快照</button></div>
@@ -509,6 +561,10 @@ async function panelSync() {
     <div id="davBox"></div>
   `);
   if ($("#mGo")) $("#mGo").onclick = () => safe(async () => { await api("/api/maintenance/consolidate", { method: "POST" }); toast("整理已在后台开始"); });
+  $("#fusePrev").onclick = () => safe(async () => { const r = await api("/api/stars/fuse/preview");
+    $("#fuseBox").innerHTML = r.groups.map((g) => `<div class="card"><div class="meta">${g.ids.length} 颗 · 相似度 ${g.score}</div>${g.summaries.map(esc).join("<br>")}</div>`).join("") || '<div class="sub">现在没有足够相似的星。</div>'; });
+  $("#fuseGo").onclick = () => safe(async () => { $("#fuseGo").disabled = true; $("#fuseGo").textContent = "融合中…";
+    const r = await api("/api/stars/fuse", { method: "POST", body: {} }); toast(r.fused.length ? `融合了 ${r.fused.length} 组` : "现在没有足够相似的星"); closeDrawer(); await refresh(); });
   $("#snapGo").onclick = () => safe(async () => { const r = await api("/api/sync/snapshot", { method: "POST" }); toast("快照：" + r.name); panelSync(); });
   document.querySelectorAll("[data-rl]").forEach((b) => (b.onclick = () => {
     if (!confirm("用这个快照覆盖当前灵魂包？（会先自动备份当前状态）")) return;
@@ -608,5 +664,6 @@ async function panelEvents() {
   else $("#noThree").classList.remove("hidden");
   await refresh();
   setInterval(() => safe(loadStats), 30000);
+  setInterval(() => { if (document.visibilityState === "visible" && $("#drawer").classList.contains("hidden")) safe(loadMap); }, 20000);  // 新记忆在使用中一颗颗长出来
   window.__soulstar = S; // 调试用
 })();

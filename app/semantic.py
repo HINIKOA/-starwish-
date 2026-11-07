@@ -71,7 +71,7 @@ def search(conn, query: str, cfg: dict, limit: int = 100) -> dict[int, float]:
     import numpy as np
 
     rows = conn.execute(
-        "SELECT e.star_id, e.vec FROM embeddings e JOIN stars s ON s.id=e.star_id WHERE s.deleted_at IS NULL AND e.model=?",
+        "SELECT e.star_id, e.vec FROM embeddings e JOIN stars s ON s.id=e.star_id WHERE s.deleted_at IS NULL AND s.fused_into IS NULL AND e.model=?",
         (cfg["memory"]["semantic_model"],),
     ).fetchall()
     if not rows:

@@ -82,6 +82,12 @@ def init_db() -> None:
         conn = _connect()
         try:
             conn.executescript(SCHEMA)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(stars)").fetchall()}
+            for col, ddl in (("fused_into", "INTEGER"), ("generation", "INTEGER NOT NULL DEFAULT 0"),
+                             ("fused_from", "TEXT NOT NULL DEFAULT ''")):
+                if col not in cols:  # v0.6.0：星辰融合（旧灵魂包自动升级）
+                    conn.execute(f"ALTER TABLE stars ADD COLUMN {col} {ddl}")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_fused ON stars(fused_into)")
             try:
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS stars_fts USING fts5(tok, tokenize='unicode61')"

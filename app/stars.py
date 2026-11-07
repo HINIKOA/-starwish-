@@ -14,7 +14,7 @@ from .db import (estimate_tokens, fts_query, get_conn, jaccard, log_event,
 from . import db as _db
 
 FIELDS = ("id", "content", "summary", "tags", "created_at", "updated_at", "last_recalled_at",
-          "recall_count", "importance", "boost", "source", "session", "deleted_at")
+          "recall_count", "importance", "boost", "source", "session", "deleted_at", "fused_into", "generation", "fused_from")
 
 
 def _hash(content: str) -> str:
@@ -66,6 +66,8 @@ def brightness(row, now: float | None = None, cfg: dict | None = None) -> float:
 def to_dict(row, cfg=None, now=None, full=True) -> dict:
     d = {k: row[k] for k in FIELDS if k in row.keys()}
     d["tags"] = json.loads(d.get("tags") or "[]")
+    if "fused_from" in d:
+        d["fused_from"] = json.loads(d["fused_from"]) if d["fused_from"] else []
     d["brightness"] = brightness(row, now, cfg)
     if not full:
         d.pop("content", None)
@@ -94,9 +96,20 @@ def add_star(content: str, summary: str = "", tags=None, importance: int = 3, so
     h = _hash(content)
     cfg = config.load_config()
     with get_conn() as c:
-        dup = c.execute("SELECT * FROM stars WHERE hash=? AND deleted_at IS NULL", (h,)).fetchone()
+        dup = c.execute("SELECT * FROM stars WHERE hash=? AND deleted_at IS NULL AND fused_into IS NULL", (h,)).fetchone()
         if dup:
             return {**to_dict(dup, cfg), "duplicate": True}
+        absorbed = c.execute("SELECT fused_into FROM stars WHERE hash=? AND deleted_at IS NULL AND fused_into IS NOT NULL", (h,)).fetchone()
+        if absorbed:  # 这条记忆已经被融合进某颗星了
+            top = absorbed["fused_into"]
+            for _ in range(10):
+                nxt = c.execute("SELECT fused_into FROM stars WHERE id=?", (top,)).fetchone()
+                if not nxt or not nxt["fused_into"]:
+                    break
+                top = nxt["fused_into"]
+            r = c.execute("SELECT * FROM stars WHERE id=?", (top,)).fetchone()
+            if r and not r["deleted_at"]:
+                return {**to_dict(r, cfg), "duplicate": True}
         if merge_near:
             near = find_near_duplicate(c, content, summary)
             if near is not None:
@@ -126,7 +139,7 @@ def find_near_duplicate(conn, content: str, summary: str = "", threshold: float 
     if not q or not _db.FTS_OK:
         return None
     rows = conn.execute(
-        "SELECT s.* FROM stars_fts f JOIN stars s ON s.id=f.rowid WHERE stars_fts MATCH ? AND s.deleted_at IS NULL"
+        "SELECT s.* FROM stars_fts f JOIN stars s ON s.id=f.rowid WHERE stars_fts MATCH ? AND s.deleted_at IS NULL AND s.fused_into IS NULL"
         " ORDER BY bm25(stars_fts) LIMIT 10", (q,)).fetchall()
     best, best_s = None, 0.0
     for r in rows:
@@ -207,7 +220,7 @@ def list_stars(limit: int = 50, offset: int = 0, include_deleted: bool = False, 
     cfg = config.load_config()
     now = time.time()
     with get_conn() as c:
-        where = "1=1" if include_deleted else "deleted_at IS NULL"
+        where = "1=1" if include_deleted else "deleted_at IS NULL AND fused_into IS NULL"
         params: list = []
         if tag:
             where += " AND tags LIKE ?"
@@ -218,16 +231,17 @@ def list_stars(limit: int = 50, offset: int = 0, include_deleted: bool = False, 
 
 
 def star_map() -> dict:
-    """星图用的紧凑数据：[id, 创建时间, 亮度, 重要度, 主标签, 摘要]。"""
+    """星图用的紧凑数据：[id, 创建时间, 亮度, 重要度, 主标签, 摘要, 融合代数, 融合成员编号]。"""
     cfg = config.load_config()
     now = time.time()
     with get_conn() as c:
-        rows = c.execute("SELECT * FROM stars WHERE deleted_at IS NULL ORDER BY created_at").fetchall()
+        rows = c.execute("SELECT * FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL ORDER BY created_at").fetchall()
         out = []
         for r in rows:
             tags = json.loads(r["tags"] or "[]")
+            ff = json.loads(r["fused_from"]) if r["fused_from"] else []
             out.append([r["id"], int(r["created_at"]), brightness(r, now, cfg), r["importance"],
-                        tags[0] if tags else "", (r["summary"] or "")[:48]])
+                        tags[0] if tags else "", (r["summary"] or "")[:48], int(r["generation"] or 0), ff])
     return {"stars": out, "now": int(now)}
 
 
@@ -240,7 +254,7 @@ def _candidates(conn, query: str, cfg: dict, limit: int = 200) -> dict[int, floa
     if q and _db.FTS_OK:
         rows = conn.execute(
             "SELECT f.rowid AS id, bm25(stars_fts) AS s FROM stars_fts f JOIN stars s ON s.id=f.rowid"
-            " WHERE stars_fts MATCH ? AND s.deleted_at IS NULL ORDER BY s LIMIT ?", (q, limit)).fetchall()
+            " WHERE stars_fts MATCH ? AND s.deleted_at IS NULL AND s.fused_into IS NULL ORDER BY s LIMIT ?", (q, limit)).fetchall()
         if rows:
             best = min(r["s"] for r in rows) or -1e-9
             for r in rows:
@@ -250,7 +264,7 @@ def _candidates(conn, query: str, cfg: dict, limit: int = 200) -> dict[int, floa
             if uq:
                 urows = conn.execute(
                     "SELECT f.rowid AS id, bm25(stars_fts) AS s FROM stars_fts f JOIN stars s ON s.id=f.rowid"
-                    " WHERE stars_fts MATCH ? AND s.deleted_at IS NULL ORDER BY s LIMIT ?", (uq, limit)).fetchall()
+                    " WHERE stars_fts MATCH ? AND s.deleted_at IS NULL AND s.fused_into IS NULL ORDER BY s LIMIT ?", (uq, limit)).fetchall()
                 if urows:
                     ub = min(r["s"] for r in urows) or -1e-9
                     for r in urows:
@@ -267,7 +281,7 @@ def _candidates(conn, query: str, cfg: dict, limit: int = 200) -> dict[int, floa
         for t in terms:
             if not t:
                 continue
-            for r in conn.execute("SELECT id FROM stars WHERE deleted_at IS NULL AND (content LIKE ? OR summary LIKE ?)"
+            for r in conn.execute("SELECT id FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL AND (content LIKE ? OR summary LIKE ?)"
                                   " LIMIT 50", (f"%{t}%", f"%{t}%")).fetchall():
                 rel[r["id"]] = rel.get(r["id"], 0) + 1.0 / len(terms)
     return rel
@@ -294,8 +308,8 @@ def search(query: str, limit: int = 5000) -> list[dict]:
 def recall_index() -> dict:
     """第一层：极简索引（几十个 token）。"""
     with get_conn() as c:
-        n = c.execute("SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM stars WHERE deleted_at IS NULL").fetchone()
-        tag_rows = c.execute("SELECT tags FROM stars WHERE deleted_at IS NULL").fetchall()
+        n = c.execute("SELECT COUNT(*), MIN(created_at), MAX(created_at) FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL").fetchone()
+        tag_rows = c.execute("SELECT tags FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL").fetchall()
         pend = c.execute("SELECT COUNT(*) FROM proposals WHERE status='pending'").fetchone()[0]
     counts: dict[str, int] = {}
     for r in tag_rows:
@@ -327,7 +341,7 @@ def recall(query: str, budget_tokens: int | None = None, bump: bool = True, limi
         if rel:
             rows = c.execute(f"SELECT * FROM stars WHERE id IN ({','.join('?' * len(rel))})", list(rel)).fetchall()
         elif not query:
-            rows = c.execute("SELECT * FROM stars WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 300").fetchall()
+            rows = c.execute("SELECT * FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL ORDER BY created_at DESC LIMIT 300").fetchall()
         else:
             rows = []
         scored = []
@@ -409,11 +423,13 @@ def stats() -> dict:
     cfg = config.load_config()
     today0 = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     with get_conn() as c:
-        total = c.execute("SELECT COUNT(*) FROM stars WHERE deleted_at IS NULL").fetchone()[0]
+        total = c.execute("SELECT COUNT(*) FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL").fetchone()[0]
         deleted = c.execute("SELECT COUNT(*) FROM stars WHERE deleted_at IS NOT NULL").fetchone()[0]
-        today = c.execute("SELECT COUNT(*) FROM stars WHERE deleted_at IS NULL AND created_at>=?", (today0,)).fetchone()[0]
+        today = c.execute("SELECT COUNT(*) FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL AND created_at>=?", (today0,)).fetchone()[0]
         pend = c.execute("SELECT COUNT(*) FROM proposals WHERE status='pending'").fetchone()[0]
-        rng = c.execute("SELECT MIN(created_at), MAX(created_at) FROM stars WHERE deleted_at IS NULL").fetchone()
+        rng = c.execute("SELECT MIN(created_at), MAX(created_at) FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL").fetchone()
+        fused = c.execute("SELECT COUNT(*) FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL AND fused_from!=''").fetchone()[0]
+        absorbed = c.execute("SELECT COUNT(*) FROM stars WHERE deleted_at IS NULL AND fused_into IS NOT NULL").fetchone()[0]
     hist = config.load_state().get("recall_tokens") or []
     ct = core.core_tokens()
     avg = int(sum(hist) / len(hist)) if hist else None
@@ -423,6 +439,7 @@ def stats() -> dict:
         "core_tokens": ct, "recall_budget": budget, "avg_recall_tokens": avg,
         "est_tokens_per_turn": ct + (avg if avg is not None else budget),
         "from": rng[0], "to": rng[1], "fts": _db.FTS_OK, "jieba": _db.HAS_JIEBA,
+        "fused": fused, "absorbed": absorbed,
         "semantic": semantic.enabled(cfg),
         "archive_files": sum(1 for _ in config.ARCHIVE_DIR.rglob("*") if _.is_file()) if config.ARCHIVE_DIR.exists() else 0,
     }
@@ -435,7 +452,7 @@ def backfill_embeddings(max_n: int = 500) -> int:
     n = 0
     with get_conn() as c:
         rows = c.execute("SELECT s.id, s.summary, s.content FROM stars s LEFT JOIN embeddings e ON e.star_id=s.id"
-                         " WHERE e.star_id IS NULL AND s.deleted_at IS NULL LIMIT ?", (max_n,)).fetchall()
+                         " WHERE e.star_id IS NULL AND s.deleted_at IS NULL AND s.fused_into IS NULL LIMIT ?", (max_n,)).fetchall()
         for r in rows:
             semantic.store(c, r["id"], f"{r['summary']}\n{r['content']}", cfg)
             n += 1

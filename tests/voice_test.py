@@ -271,7 +271,7 @@ def api_tests():
         check("服务器启动", wait_up(B + "/api/health"))
         check("模拟上游启动", wait_up(U + "/v1/models"))
         from app import __version__
-        check("版本号 0.5.0", __version__ == "0.5.0" and c.get("/api/health").json()["version"] == "0.5.0")
+        check("版本号 ≥ 0.5.0 且与服务一致", tuple(map(int, __version__.split("."))) >= (0, 5, 0) and c.get("/api/health").json()["version"] == __version__)
 
         print("== 页面与开关")
         pg = c.get("/eye").text

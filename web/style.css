@@ -70,3 +70,5 @@ pre{white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,.35);border-
 #noThree{position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 22px;max-width:460px;z-index:3;line-height:1.7}
 code{background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px}
 @media (max-width:820px){nav button{padding:5px 7px;font-size:12px}.brand small{display:none}}
+#emptyHint{position:fixed;left:50%;bottom:86px;transform:translateX(-50%);max-width:560px;text-align:center;color:#d9c79a;font-size:13px;line-height:1.8;
+  background:rgba(10,10,24,.55);border:1px solid rgba(255,210,122,.25);border-radius:14px;padding:10px 18px;pointer-events:none;z-index:5}
