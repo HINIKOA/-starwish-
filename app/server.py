@@ -7,7 +7,9 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import hmac
+
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -96,11 +98,33 @@ class CoreEdit(BaseModel):
     content: str
     confirm: bool = False
     mode: str = "replace"
+    note: str = ""
+
+
+class CoreUpdate(BaseModel):
+    section: str
+    content: str
+    mode: str = "replace"          # replace / append
+    instruction: str = ""          # 主人原话（可选，记入日志）
+    note: str = ""
+
+
+class CoreCommand(BaseModel):
+    text: str
+    natural: bool = True
+
+
+class CoreRollback(BaseModel):
+    rev: Optional[int] = None
+    legacy_no: Optional[int] = None
+    mode: str = "to"               # to = 回到此版本；undo = 撤销这次修改
+    confirm: bool = False
 
 
 class LockReq(BaseModel):
     locked: bool
     confirm: bool = False
+    note: str = ""
 
 
 class ProposalIn(BaseModel):
@@ -178,22 +202,91 @@ def api_events(limit: int = 100):
     return read_events(min(1000, limit))
 
 
-# ---------------- 核心记忆 ----------------
+# ---------------- 核心记忆（独立模块） ----------------
+LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def is_owner(request: Request) -> bool:
+    """主人身份：配置了主人令牌 → 必须带对令牌；没配置 → 只信任本机请求。"""
+    token = (config.load_config().get("core") or {}).get("owner_token") or ""
+    got = request.headers.get("x-soulstar-owner", "")
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        got = got or auth[7:].strip()
+    if token:
+        return bool(got) and hmac.compare_digest(got, token)
+    host = request.client.host if request.client else ""
+    return host in LOOPBACK
+
+
+def _core_view(c: dict | None = None) -> dict:
+    c = c or core.load_core()
+    cfg = config.masked_config().get("core", {})
+    return {**c, "text": core.core_text(c), "tokens": core.core_tokens(), "section_titles": core.SECTIONS,
+            "settings": cfg, "pending": len(core.list_proposals("pending"))}
+
+
 @app.get("/api/core")
 def get_core():
-    c = core.load_core()
-    return {**c, "text": core.core_text(c), "tokens": core.core_tokens(), "section_titles": core.SECTIONS}
+    return _core_view()
 
 
 @app.put("/api/core")
 def put_core(req: CoreEdit):
-    c = core.set_section(req.section, req.content, req.confirm, mode=req.mode)
-    return {**c, "text": core.core_text(c)}
+    """面板保存（需要 confirm=true；上锁时 423）。"""
+    c = core.set_section(req.section, req.content, req.confirm, mode=req.mode, source="panel", note=req.note)
+    return _core_view(c)
+
+
+@app.post("/api/core/update")
+def core_update(req: CoreUpdate, request: Request):
+    """任意客户端的主人修改：主人身份 → 直接生效；否则 / 上锁时 → 转为提案。"""
+    mode = req.mode if req.mode in ("replace", "append") else "replace"
+    res = core.owner_update({core.norm_section(req.section): (req.content, mode)}, source="api",
+                            authorized=is_owner(request), instruction=req.instruction, note=req.note)
+    res.pop("core", None)
+    return {**res, "core": _core_view()}
+
+
+@app.post("/api/core/command")
+def core_command(req: CoreCommand, request: Request):
+    """执行一条主人指令文本（/核心 … 或「记住，以后叫我X」）。"""
+    out = core.commands.run_text(req.text, source="api", authorized=is_owner(request), natural=req.natural)
+    if out is None:
+        return {"matched": False, "reply": "这不是核心记忆指令。\n\n" + core.commands.HELP}
+    res = out.get("result") or {}
+    res.pop("core", None) if isinstance(res, dict) else None
+    return {"matched": True, "reply": out["reply"], "result": res, "cmd": out.get("cmd")}
+
+
+@app.get("/api/core/history")
+def core_history(limit: int = 100):
+    items = core.list_history(min(1000, limit))
+    for x in items:
+        x["source_title"] = core.SOURCE_TITLES.get(x.get("source"), x.get("source"))
+    return items
+
+
+@app.post("/api/core/rollback")
+def core_rollback(req: CoreRollback):
+    res = core.rollback(rev=req.rev, confirm=req.confirm, mode="undo" if req.mode == "undo" else "to",
+                        legacy_no=req.legacy_no, source="panel")
+    res.pop("core", None)
+    return {**res, "core": _core_view()}
+
+
+@app.post("/api/core/undo")
+def core_undo(request: Request):
+    if not is_owner(request):
+        raise PermissionError("只有主人可以撤销核心记忆修改")
+    res = core.undo_last(source="api")
+    res.pop("core", None)
+    return {**res, "core": _core_view()}
 
 
 @app.post("/api/core/lock")
 def lock_core(req: LockReq):
-    return core.set_lock(req.locked, req.confirm)
+    return core.set_lock(req.locked, req.confirm, note=req.note)
 
 
 @app.get("/api/proposals")
@@ -418,6 +511,12 @@ async def api_import_upload(file: UploadFile = File(...), kind: str = Form("auto
 @app.get("/")
 def index():
     return FileResponse(config.WEB_DIR / "index.html")
+
+
+@app.get("/core")
+def core_page():
+    """核心记忆模块独立页面。"""
+    return FileResponse(config.WEB_DIR / "core.html")
 
 
 app.mount("/static", StaticFiles(directory=str(config.WEB_DIR)), name="static")

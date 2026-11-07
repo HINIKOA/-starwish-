@@ -12,7 +12,7 @@
 星魂把「AI 的记忆」做成一个**放在 U 盘 / 网盘里的文件夹**：换电脑、换模型、换客户端都不丢。
 这个文件夹里的 `soul/`（灵魂包）就是 AI 的灵魂——模型只是来来去去的身体。
 
-- **核心记忆**：三段恒定不变的内容（AI身份与名字 / 主人是谁及称呼 / 主人的喜好），每轮都注入，只占几十个 token；永远不会被自动改写。
+- **核心记忆（独立模块）**：三段恒定内容（AI身份与名字 / 主人是谁及称呼 / 主人的喜好），每轮都注入，只占几十个 token。**永远不会被自动改写**，但**主人一句话就能改**：面板专属页面、任何 AI 客户端里的 `/核心 …` 指令或「记住，以后叫我X」、MCP `update_core`、REST `/api/core/update`。每次修改都有版本号、前后对比与来源，可撤销、可回到任意版本。
 - **星星**：其余所有记忆。每条一颗星，新的亮、旧的暗，被想起会重新变亮；永不硬删除，所有变化写进只追加的事件日志。
 - **省 token 召回**：先看几十 token 的索引，再按预算（默认 600 token）取摘要，需要时才取全文。
 - **任何模型都能用**：MCP（Claude Desktop / Cursor / Cherry Studio / Hermes Agent…）、OpenAI 兼容代理（ChatGPT 类客户端、DeepSeek、Claude 的 OpenAI 兼容端点…）、REST API。
@@ -26,7 +26,7 @@
 3. 双击 **`start.bat`**。
    - 第一次会在文件夹里创建 `.venv` 并安装依赖（需要联网，约 1~3 分钟）。
    - 之后会自动打开浏览器：<http://127.0.0.1:7860/>
-4. 在面板里点「核心记忆」，填好三段内容，然后点「上锁」防误改。
+4. 在面板右上角点金色的「✦ 核心记忆」进入核心记忆模块（也可直接打开 <http://127.0.0.1:7860/core>），填好三段内容。
 5. 在「设置」里填上游大模型的 Base URL 和 API Key（例如 DeepSeek），就可以让客户端连上星魂了。
 
 > 换到另一台电脑：直接插上 U 盘双击 `start.bat`。`.venv` 绑定了原电脑的 Python 路径，脚本检测到失效会自动重建，**灵魂包 `soul/` 不受影响**。
@@ -49,7 +49,12 @@ soulstar/
 ├── app/
 │   ├── config.py             路径 / 配置 / 机密加密（全部相对本文件夹）
 │   ├── db.py                 SQLite + FTS5 + jieba 分词 + 事件日志
-│   ├── core.py               核心记忆与提案
+│   ├── core/                 核心记忆（独立模块）
+│   │   ├── store.py          三段内容存储（core.json）与注入文本
+│   │   ├── edit.py           唯一修改入口：版本号 / 锁 / 主人指令 / 回滚撤销
+│   │   ├── history.py        版本历史与逐行 diff（读自 events.jsonl）
+│   │   ├── proposals.py      提案队列（自动渠道只能走这里）
+│   │   └── commands.py       主人指令解析（/核心 … 与「记住，以后叫我X」）
 │   ├── stars.py              星星、亮度、分层召回
 │   ├── semantic.py           可选语义检索（bge-small-zh）
 │   ├── archive.py            原始对话归档（只追加）
@@ -59,10 +64,11 @@ soulstar/
 │   ├── importers.py          导入星汐档案、markdown/txt、ChatGPT 导出
 │   └── server.py             FastAPI：REST API + 面板 + 定时任务
 ├── web/                      面板（index.html + app.js + style.css，无需构建）
+│   ├── core.html / core.js / core.css   核心记忆模块页面（/core）
 │   └── vendor/three.module.min.js   three.js 0.160（本地离线可用，缺失时自动走 CDN）
 ├── tests/smoke_test.py       冒烟测试
 └── soul/                     ← 灵魂包（首次运行自动创建）
-    ├── core.json             核心记忆（唯一真源）
+    ├── core.json             核心记忆（唯一真源，带版本号 rev 与锁定状态）
     ├── core.md               核心记忆的只读镜像，方便人看
     ├── soul.db               星星、提案、全文索引（SQLite）
     ├── events.jsonl          事件日志：每次新增/修改/隐藏/召回/批准…只追加，永久可追溯
@@ -103,7 +109,8 @@ soulstar/
 }
 ```
 
-重启 Claude Desktop 后会出现 6 个工具：`get_core`、`recall_index`、`recall`、`recall_detail`、`remember`、`propose_core_change`。
+重启 Claude Desktop 后会出现 9 个工具：`get_core`、`recall_index`、`recall`、`recall_detail`、`remember`、`propose_core_change`、`update_core`、`core_history`、`undo_core`。
+（`update_core` 必须在 `owner_instruction` 里原样附上主人的原话才会直接生效，否则自动转为提案。）
 建议在 Claude 的「项目说明 / 个性化」里加一句：*每次对话开始先调用 get_core；需要回忆时先 recall，不要一次读全部。*
 
 > MCP 服务器直接读写 `soul/`，**不需要先启动网页服务**；两者同时运行也没问题。
@@ -173,8 +180,13 @@ model:
 ### 7. REST API 速查
 
 ```
-GET  /api/core                      核心记忆
-PUT  /api/core                      {"section":"identity|owner|preferences","content":"…","confirm":true}
+GET  /api/core                      核心记忆（含版本号 rev、锁定状态、待批准提案数）
+PUT  /api/core                      面板保存 {"section":"identity|owner|preferences","content":"…","confirm":true,"note":"…"}
+POST /api/core/update               主人修改 {"section":"owner","content":"…","mode":"replace|append","instruction":"主人原话"}
+POST /api/core/command              主人指令 {"text":"记住，以后叫我天天"} 或 {"text":"/核心 喜好 + 爱喝冰美式"}
+GET  /api/core/history              版本历史（每条带 before/after/来源/逐行 diff）
+POST /api/core/rollback             {"rev":3,"mode":"to|undo","confirm":true}
+POST /api/core/undo                 撤销最近一次修改（主人）
 POST /api/core/lock                 {"locked":true,"confirm":true}
 GET  /api/proposals                 待批准提案；POST /api/proposals/{id}/approve {"confirm":true}
 POST /api/stars                     新增星 {"content":"…","tags":["…"],"importance":3}
@@ -213,16 +225,56 @@ POST /api/import/path | /api/import/upload
 
 ## 五、面板功能
 
-- **3D 星图**：深色星空，一个 `Points` 对象承载全部星星（1 万颗以上依然流畅）。越新越靠近中心、越亮；同一标签的星落在同一条旋臂、同一种颜色。中央金色星团是核心记忆，点它直接编辑。
+- **3D 星图**：深色星空，一个 `Points` 对象承载全部星星（1 万颗以上依然流畅）。越新越靠近中心、越亮；同一标签的星落在同一条旋臂、同一种颜色。中央金色星团是核心记忆，点它进入核心记忆模块。
 - 鼠标悬停高亮并显示摘要；点击打开侧栏：查看/编辑全文、摘要、标签、重要度，**变亮 / 变暗 / 隐藏（软删除）/ 恢复**，查看原始对话。
 - **搜索**：不命中的星变暗，下拉列表点一条会飞过去。
 - **时间线**：拖动只显示某天之前的星，看记忆如何长出来。
 - **统计**：星星数、今日新增、核心 token、每轮注入 token、检索引擎。
-- **核心记忆编辑器**：上锁 / 解锁，保存需要二次确认。
-- **提案队列**：LLM 整理、MCP、导入产生的核心修改提案，可先改再批准或拒绝。
+- **核心记忆模块**（顶栏金色按钮 / 点中央金色星团 / 直接打开 `/core`）：独立页面，见下一节。
+- **提案队列**：LLM 整理、MCP、导入产生的核心修改提案，可先改再批准或拒绝（核心模块页面里也有）。
 - **导入**、**备份/整理**、**设置**、**事件日志**。
 
 three.js 已随包放在 `web/vendor/`，完全离线可用；如果删掉了，面板会自动从 CDN 加载。
+
+---
+
+## 五·附、核心记忆模块
+
+![核心记忆模块](docs/screenshot-core.png)
+
+核心记忆是星魂的灵魂。原则只有两条：**自动的永远改不了它；主人一句话就能改它。**
+
+| 谁 | 能做什么 |
+|---|---|
+| 后台 LLM 整理、导入、AI 自己的推测（`propose_core_change`） | **只能提提案**，等主人批准 |
+| 主人在面板「核心记忆」页面编辑 | 直接生效 |
+| 主人在任何接入星魂代理的客户端里说 `/核心 …` 或「记住，以后叫我X」 | 直接生效（代理密钥 = 主人身份；没设代理密钥时只信任本机） |
+| MCP `update_core`（AI 必须附上主人原话） | 直接生效；没附原话 → 转提案 |
+| REST `/api/core/update` | 带主人令牌（或本机且未设令牌）→ 直接生效；否则 → 转提案 |
+
+**模块页面（`/core`）四个标签：**
+
+1. **三段内容**：三张卡片分别编辑，每次保存可写「修改说明」；下方实时显示真正注入给模型的文本和 token 数。
+2. **待批准提案**：批准前可以先改内容。
+3. **版本历史**：全部读自只追加的 `events.jsonl`，每一版显示 版本号 / 时间 / 来源 / 主人原话 / 逐行 diff。
+   「回到此版本」恢复到那次修改后的样子；「撤销这次」只恢复那次改动的分区。回滚本身也生成新版本，所以回滚也能撤销。v1 旧日志同样能读、能撤销。
+4. **主人指令**：指令速查、试运行框，以及开关（代理识别 /核心、识别自然语言、MCP 直接生效、主人令牌）。
+
+**锁（冻结）**：上锁后任何直接修改与回滚都会被拒绝；远程发来的主人指令不会丢，会自动转成提案，解锁后批准即可。
+
+**对话指令速查**（在 ChatGPT 类客户端 / DeepSeek / Hermes 等任何走星魂代理的地方都能用）：
+
+```
+/核心                         查看当前核心记忆（星魂直接回复，不消耗模型 token）
+/核心 主人 九天，称呼天天       替换整段（分区：身份 / 主人 / 喜好）
+/核心 喜好 + 爱喝冰美式         追加一行
+/核心 称呼 = 天天              只改称呼（「名字 = 小星」改 AI 名字；会就地替换原来的写法）
+/核心 历史 | /核心 撤销 | /核心 回到 r3
+记住，以后叫我天天              自然语言：改称呼，并照常转给模型，让它自然地确认
+记住，你以后叫小星 · 记住，我叫九天 · 记住，我不吃香菜
+```
+
+每次修改在 `events.jsonl` 里是一条 `core_change` 事件：`rev`、`source`（panel / api / mcp / proxy-command / proxy-natural / proposal / rollback / undo）、`instruction`（主人原话）、`before`、`after`、`snapshot`（三段完整内容）。
 
 ---
 
@@ -299,7 +351,7 @@ pip install wsgidav cheroot      # 可选：用于测试 WebDAV
 python tests/smoke_test.py
 ```
 
-冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、
+冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、核心记忆模块（主人指令 / 令牌 / 代理 /核心 / 版本历史 / 回滚撤销 / 上锁转提案）、
 星汐/zip/markdown/ChatGPT 导入、代理注入（非流式 + 流式）、LLM 整理、MCP（官方 SDK 与内置实现）、快照恢复、WebDAV 加密备份与版本保留、机密加密、1 万颗星性能。
 
 ---

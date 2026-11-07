@@ -14,12 +14,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app import __version__, core, stars  # noqa: E402
+from app import __version__, config, core, stars  # noqa: E402
 from app.db import init_db  # noqa: E402
 
 INSTRUCTIONS = ("星魂记忆库。对话开始时先调用 get_core 获取恒定的核心记忆；需要回忆时先 recall_index 看概况，"
                 "再 recall(query) 在 token 预算内取相关摘要，必要时 recall_detail(id) 取全文。"
-                "值得长期记住的新信息用 remember 保存。核心记忆只能用 propose_core_change 提案，由主人批准。")
+                "值得长期记住的新信息用 remember 保存。核心记忆（AI身份/主人称呼/主人喜好）不能自作主张修改："
+                "只有主人在对话里明确要求时，才用 update_core 并在 owner_instruction 里原样附上主人的原话；"
+                "你自己推测出来的变化用 propose_core_change 提案，由主人批准。主人说撤销就用 undo_core。")
 
 
 def _j(obj) -> str:
@@ -66,7 +68,34 @@ def propose_core_change(section: str, content: str, reason: str = "", mode: str 
     return f"已提交提案 #{p['id']}（{p['section_title']}），等待主人批准。"
 
 
-TOOLS = [get_core, recall_index, recall, recall_detail, remember, propose_core_change]
+def _owner_ok(owner_instruction: str) -> bool:
+    return bool((owner_instruction or "").strip()) and bool((config.load_config().get("core") or {}).get("mcp_owner_edit", True))
+
+
+def update_core(section: str, content: str, owner_instruction: str, mode: str = "replace") -> str:
+    """按主人的明确指令修改核心记忆（section: identity / owner / preferences；mode: replace 替换整段 / append 追加一行）。
+    owner_instruction 必须原样填写主人说的话（例如「记住，以后叫我天天」）；仅在主人明确要求时调用。
+    上锁或未授权时会自动转为提案。每次修改都记入永久日志，可撤销。"""
+    m = mode if mode in ("replace", "append") else "replace"
+    res = core.owner_update({core.norm_section(section): (content, m)}, source="mcp",
+                            authorized=_owner_ok(owner_instruction), instruction=owner_instruction or "")
+    return core.commands._describe(res)
+
+
+def core_history(limit: int = 5) -> str:
+    """查看核心记忆最近的修改记录（版本号、时间、来源、改了哪段）。"""
+    return core.commands._fmt_history(int(limit or 5))
+
+
+def undo_core(owner_instruction: str) -> str:
+    """撤销最近一次核心记忆修改。仅在主人明确要求撤销时调用，owner_instruction 填主人原话。"""
+    if not _owner_ok(owner_instruction):
+        return "只有主人明确要求时才能撤销（请在 owner_instruction 填写主人原话）。"
+    out = core.commands.execute({"op": "undo"}, source="mcp", authorized=True)
+    return out["reply"]
+
+
+TOOLS = [get_core, recall_index, recall, recall_detail, remember, propose_core_change, update_core, core_history, undo_core]
 
 SCHEMAS = {
     "get_core": {"type": "object", "properties": {}},
@@ -86,6 +115,14 @@ SCHEMAS = {
         "content": {"type": "string"}, "reason": {"type": "string"},
         "mode": {"type": "string", "enum": ["append", "replace"], "default": "append"}},
         "required": ["section", "content"]},
+    "update_core": {"type": "object", "properties": {
+        "section": {"type": "string", "enum": ["identity", "owner", "preferences"]},
+        "content": {"type": "string"},
+        "owner_instruction": {"type": "string", "description": "主人的原话，必须原样填写"},
+        "mode": {"type": "string", "enum": ["replace", "append"], "default": "replace"}},
+        "required": ["section", "content", "owner_instruction"]},
+    "core_history": {"type": "object", "properties": {"limit": {"type": "integer", "default": 5}}},
+    "undo_core": {"type": "object", "properties": {"owner_instruction": {"type": "string"}}, "required": ["owner_instruction"]},
 }
 
 

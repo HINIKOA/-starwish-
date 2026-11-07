@@ -73,6 +73,12 @@ DEFAULT_CONFIG = {
         "snapshot_hours": 24,
         "keep_local_snapshots": 10,
     },
+    "core": {
+        "owner_token": "",          # 主人令牌：远程 API 带上它才能直接改核心记忆（为空时只信任本机 127.0.0.1）
+        "chat_commands": True,      # 代理里识别 /核心 指令
+        "natural_commands": True,   # 代理里识别「记住，以后叫我X」等主人原话
+        "mcp_owner_edit": True,     # MCP 的 update_core 带主人原话时直接生效（否则转提案）
+    },
     "server": {"host": "127.0.0.1", "port": 7860, "open_browser": True},
     "secrets_encrypted": False,
     "secrets_salt": "",
@@ -83,6 +89,7 @@ SECRET_FIELDS = [
     ("webdav", "password"),
     ("webdav", "passphrase"),
     ("proxy", "proxy_key"),
+    ("core", "owner_token"),
 ]
 
 _lock = threading.RLock()

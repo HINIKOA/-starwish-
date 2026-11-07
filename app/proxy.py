@@ -35,7 +35,7 @@ def last_user_text(messages: list[dict]) -> str:
     return ""
 
 
-def build_injection(query: str, cfg: dict) -> tuple[str, dict]:
+def build_injection(query: str, cfg: dict, note: str = "") -> tuple[str, dict]:
     parts = []
     ct = core.core_text()
     if ct:
@@ -43,16 +43,18 @@ def build_injection(query: str, cfg: dict) -> tuple[str, dict]:
     rec = stars.recall(query, budget_tokens=int(cfg["proxy"].get("budget_tokens", 600)), bump=True) if query.strip() else {"items": [], "text": "", "used_tokens": 0}
     if rec.get("text"):
         parts.append(rec["text"])
+    if note:
+        parts.append(note)
     if not parts:
         return "", rec
     parts.append("（以上为星魂记忆库自动注入的长期记忆，请自然地参考，不要逐字复述。）")
     return "\n\n".join(parts), rec
 
 
-def inject(body: dict, cfg: dict) -> tuple[dict, dict]:
+def inject(body: dict, cfg: dict, note: str = "") -> tuple[dict, dict]:
     msgs = list(body.get("messages") or [])
     query = last_user_text(msgs)
-    text, rec = build_injection(query, cfg)
+    text, rec = build_injection(query, cfg, note)
     if text:
         if msgs and msgs[0].get("role") == "system":
             first = dict(msgs[0])
@@ -88,6 +90,57 @@ def _upstream(cfg: dict) -> tuple[str, dict]:
     return base, headers
 
 
+# ---------------- 主人指令（核心记忆） ----------------
+def _owner_ok(request: Request, cfg: dict) -> bool:
+    """能走到这里说明代理密钥已通过；没设代理密钥时只信任本机请求。"""
+    if cfg["proxy"].get("proxy_key"):
+        return True
+    host = request.client.host if request.client else ""
+    return host in ("127.0.0.1", "::1", "localhost", "testclient")
+
+
+def _core_command(body: dict, cfg: dict, request: Request) -> tuple[dict | None, str]:
+    """返回 (斜杠指令的执行结果 或 None, 自然语言指令要附加给模型的说明)。"""
+    cc = cfg.get("core") or {}
+    if not (cc.get("chat_commands", True) or cc.get("natural_commands", True)):
+        return None, ""
+    cmd = core.commands.parse(last_user_text(body.get("messages") or []), natural=bool(cc.get("natural_commands", True)))
+    if not cmd or (cmd["type"] == "slash" and not cc.get("chat_commands", True)):
+        return None, ""
+    slash = cmd["type"] == "slash"
+    out = core.commands.execute(cmd, source="proxy-command" if slash else "proxy-natural",
+                                authorized=_owner_ok(request, cfg))
+    if slash:
+        return out, ""
+    res = out.get("result") or {}
+    if res.get("applied"):
+        note = f"（星魂提示：主人刚刚在这条消息里更新了核心记忆 r{res['rev']}：{cmd.get('summary', '')}。请简短自然地确认已记住。）"
+    elif res.get("proposed"):
+        note = "（星魂提示：主人想修改核心记忆，但核心记忆已上锁 / 未授权，已转为提案等待主人在面板批准。请如实告知。）"
+    else:
+        note = ""
+    return None, note
+
+
+def _synth(body: dict, text: str) -> Response:
+    """不调用上游，直接以 OpenAI 格式回复（斜杠指令用，0 token）。"""
+    cid, now, model = f"soulstar-core-{int(time.time() * 1000)}", int(time.time()), body.get("model") or "soulstar"
+    hdr = {"x-soulstar-core-command": "1"}
+    if body.get("stream"):
+        def gen():
+            first = {"id": cid, "object": "chat.completion.chunk", "created": now, "model": model,
+                     "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}]}
+            last = {"id": cid, "object": "chat.completion.chunk", "created": now, "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+            yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps(last, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={**hdr, "Cache-Control": "no-cache"})
+    return JSONResponse({"id": cid, "object": "chat.completion", "created": now, "model": model,
+                         "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}, headers=hdr)
+
+
 @router.get("/v1/models")
 async def models(request: Request):
     cfg = config.load_config()
@@ -114,9 +167,12 @@ async def chat_completions(request: Request):
         body["model"] = cfg["proxy"]["model_override"]
     elif not body.get("model"):
         body["model"] = cfg["llm"].get("model")
+    cmd_out, core_note = await run_in_threadpool(_core_command, body, cfg, request)
+    if cmd_out is not None:  # /核心 指令：本地处理，不发给上游
+        return _synth(body, cmd_out["reply"])
     rec = {}
     if cfg["proxy"].get("inject", True) and request.headers.get("x-soulstar-inject", "1") != "0":
-        body, rec = await run_in_threadpool(inject, body, cfg)
+        body, rec = await run_in_threadpool(inject, body, cfg, core_note)
     base, headers = _upstream(cfg)
     url = base + "/chat/completions"
     timeout = httpx.Timeout(float(cfg["llm"].get("timeout", 120)), connect=15)

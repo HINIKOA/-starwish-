@@ -414,33 +414,8 @@ async function openStar(id) {
   if ($("#sRestore")) $("#sRestore").onclick = () => act("restore", "已恢复");
 }
 
-// —— 核心记忆 ——
-async function panelCore() {
-  const c = await safe(() => api("/api/core"));
-  if (!c) return;
-  const locked = c.locked;
-  openDrawer(`
-    <h2>核心记忆 ${locked ? '<span class="locked">🔒 已上锁</span>' : '<span class="okc">🔓 未上锁</span>'}</h2>
-    <div class="sub">恒定的三段，每轮对话都会注入（当前约 <b>${c.tokens}</b> tokens）。不会被自动修改；AI 只能提出「提案」，由你批准。</div>
-    ${Object.entries(c.sections).map(([k, v]) => `
-      <h3>${esc(v.title)}</h3>
-      <textarea id="core_${k}" rows="4" ${locked ? "disabled" : ""}>${esc(v.content)}</textarea>
-      <div class="row"><button class="primary" data-save="${k}" ${locked ? "disabled" : ""}>保存「${esc(v.title)}」</button></div>`).join("")}
-    <div class="row" style="margin-top:20px">
-      <button id="coreLock">${locked ? "解锁（允许编辑）" : "上锁（防误改）"}</button>
-    </div>
-    <div class="sub">上锁后，任何修改（包括批准提案）都会被拒绝，直到解锁。</div>
-  `);
-  document.querySelectorAll("[data-save]").forEach((b) => (b.onclick = () => {
-    const k = b.dataset.save;
-    if (!confirm(`确认修改核心记忆「${c.sections[k].title}」？此改动会记入永久日志。`)) return;
-    safe(async () => { await api("/api/core", { method: "PUT", body: { section: k, content: $("#core_" + k).value, confirm: true } }); toast("核心记忆已更新"); await refresh(); panelCore(); });
-  }));
-  $("#coreLock").onclick = () => {
-    if (!confirm(locked ? "确认解锁核心记忆？" : "确认上锁核心记忆？")) return;
-    safe(async () => { await api("/api/core/lock", { method: "POST", body: { locked: !locked, confirm: true } }); panelCore(); });
-  };
-}
+// —— 核心记忆：独立模块页面 /core ——
+function panelCore() { location.href = "/core"; }
 
 // —— 提案 ——
 async function panelProposals(showAll = false) {
@@ -617,7 +592,7 @@ async function panelSettings() {
 
 // —— 事件日志 ——
 const EV = { star_add: "新星", star_edit: "编辑星", star_merge: "合并", star_soft_delete: "隐藏", star_restore: "恢复", star_brighten: "变亮", star_dim: "变暗",
-  core_edit: "改核心", core_lock: "锁定", proposal_create: "新提案", proposal_approve: "批准提案", proposal_reject: "拒绝提案", recall: "召回",
+  core_edit: "改核心(旧)", core_change: "改核心", core_lock: "锁定/解锁", proposal_create: "新提案", proposal_approve: "批准提案", proposal_reject: "拒绝提案", recall: "召回",
   recall_detail: "查看全文", archive_append: "归档", consolidate: "整理", snapshot_local: "快照", backup_webdav: "云备份", restore: "恢复快照", server_start: "启动" };
 async function panelEvents() {
   const list = await safe(() => api("/api/events?limit=200"));

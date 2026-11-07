@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>星魂 SoulStar · 核心记忆模块</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/core.css">
+</head>
+<body class="page">
+<div class="sky"></div>
+<header class="ctop">
+  <a class="back" href="/">← 星图</a>
+  <div class="brand"><span class="logo">✦</span> 核心记忆 <small>CORE · 星魂的灵魂</small></div>
+  <div class="cmeta" id="cmeta"></div>
+  <button id="lockBtn" class="lockbtn"></button>
+</header>
+
+<main class="cwrap">
+  <section class="intro" id="intro"></section>
+
+  <nav class="ctabs">
+    <button data-tab="edit" class="on">三段内容</button>
+    <button data-tab="proposals">待批准提案 <span id="pBadge" class="badge hidden">0</span></button>
+    <button data-tab="history">版本历史</button>
+    <button data-tab="command">主人指令</button>
+  </nav>
+
+  <section id="tab-edit" class="tab"></section>
+  <section id="tab-proposals" class="tab hidden"></section>
+  <section id="tab-history" class="tab hidden"></section>
+  <section id="tab-command" class="tab hidden"></section>
+</main>
+
+<div id="toast" class="hidden"></div>
+<script type="module" src="/static/core.js"></script>
+</body>
+</html>

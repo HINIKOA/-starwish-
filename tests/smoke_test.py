@@ -183,7 +183,16 @@ def mcp_session(env, fallback: bool):
         call = read_id(3)
         rpc({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "propose_core_change", "arguments": {"section": "owner", "content": "MCP 提案测试"}}})
         prop = read_id(4)
-        return init, tl, call, prop
+        rpc({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "update_core", "arguments": {
+            "section": "preferences", "content": "MCP主人指令测试" + ("B" if fallback else "A"), "mode": "append",
+            "owner_instruction": "记住，我喜欢MCP测试"}}})
+        upd = read_id(5)
+        rpc({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "update_core", "arguments": {
+            "section": "owner", "content": "没有主人原话的修改", "owner_instruction": ""}}})
+        upd2 = read_id(6)
+        rpc({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "undo_core", "arguments": {"owner_instruction": "撤销刚才那条"}}})
+        und = read_id(7)
+        return init, tl, call, prop, upd, upd2, und
     finally:
         p.terminate()
         try:
@@ -346,6 +355,99 @@ def main():
         arch = list((soul / "archive").glob("*.jsonl"))
         check("代理对话写入归档", arch and "Atlas" in arch[0].read_text("utf-8"))
 
+        print("== 核心记忆模块")
+        check("核心模块页面 /core 可访问", c.get("/core").status_code == 200 and "核心记忆" in c.get("/core").text
+              and c.get("/static/core.js").status_code == 200 and c.get("/static/core.css").status_code == 200)
+        check("主面板有核心记忆入口按钮", 'data-panel="core"' in c.get("/").text)
+        core0 = c.get("/api/core").json()
+        check("核心记忆带版本号", core0["rev"] >= 3, str(core0["rev"]))
+        h = c.get("/api/core/history").json()
+        check("版本历史：每次修改都有前/后/来源", h and all(("before" in x and "after" in x and x.get("source")) for x in h if x["kind"] != "lock"), str(h)[:300])
+        check("版本历史：带逐行 diff", any(x.get("diff") and any(op == "+" for d in x["diff"].values() for op, _ in d) for x in h))
+        check("版本历史：记录上锁/解锁", sum(1 for x in h if x["kind"] == "lock") >= 2)
+        # 主人 API（本机 = 主人）
+        r = c.post("/api/core/update", json={"section": "喜好", "content": "周末喜欢爬山", "mode": "append", "instruction": "记住我周末爬山"})
+        j = r.json()
+        check("REST /api/core/update 本机主人直接生效", r.status_code == 200 and j["applied"] and "爬山" in j["core"]["text"], r.text[:300])
+        rev_hike = j["rev"]
+        # 自然语言指令
+        r = c.post("/api/core/command", json={"text": "记住，以后叫我小天"})
+        own = c.get("/api/core").json()["sections"]["owner"]["content"]
+        check("指令「记住，以后叫我X」改称呼（就地替换旧称呼）", r.json().get("matched") and "称呼「小天」" in own and "天天" not in own, own)
+        r = c.post("/api/core/command", json={"text": "记住，你以后叫星星"})
+        idt = c.get("/api/core").json()["sections"]["identity"]["content"]
+        check("指令「你以后叫X」改 AI 名字（就地替换）", "名字「星星」" in idt and "小星" not in idt and "我是星魂" in idt, idt)
+        before_owner = c.get("/api/core").json()["sections"]["owner"]["content"]
+        r = c.post("/api/core/command", json={"text": "/核心 称呼 = 天天"})
+        own = c.get("/api/core").json()["sections"]["owner"]["content"]
+        check("/核心 称呼 = X 只替换称呼", "天天" in own and "小天" not in own and own.count("称呼") == 1 and "九天" in own, own)
+        check("普通聊天不会被当成指令", c.post("/api/core/command", json={"text": "今天天气真不错"}).json()["matched"] is False)
+        # 撤销与回滚
+        r = c.post("/api/core/undo").json()
+        check("撤销最近一次修改", r["applied"] and c.get("/api/core").json()["sections"]["owner"]["content"] == before_owner, str(r)[:200])
+        r = c.post("/api/core/rollback", json={"rev": rev_hike, "mode": "to"})
+        check("回滚需要 confirm", r.status_code == 428)
+        r = c.post("/api/core/rollback", json={"rev": rev_hike, "mode": "to", "confirm": True}).json()
+        cc = c.get("/api/core").json()
+        check("回到指定版本（三段全部还原）", r["applied"] and "爬山" in cc["text"] and "小天" not in cc["text"] and "星星" not in cc["text"], cc["text"])
+        r = c.post("/api/core/rollback", json={"rev": r["rev"], "mode": "undo", "confirm": True}).json()
+        cc = c.get("/api/core").json()
+        check("回滚本身也能撤销", r["applied"] and "小天" in cc["text"] and "星星" in cc["text"], cc["text"])
+        # 旧版本 v1 事件也能撤销（legacy 格式）
+        with open(soul / "events.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": "2026-01-01T00:00:00+08:00", "t": 1.0, "type": "core_edit", "section": "identity",
+                                "old": "旧身份", "new": "新身份"}, ensure_ascii=False) + "\n")
+        hl = [x for x in c.get("/api/core/history").json() if x.get("legacy")]
+        check("兼容读取 v1 旧日志", hl and hl[0]["changed"] == ["identity"])
+        # 上锁：直接修改拒绝，远程主人指令转提案
+        c.post("/api/core/lock", json={"locked": True, "confirm": True})
+        r = c.post("/api/core/update", json={"section": "owner", "content": "上锁时的修改"})
+        check("上锁时主人 API 指令转为提案", r.status_code == 200 and r.json().get("proposed") and "上锁时的修改" not in c.get("/api/core").json()["text"], r.text[:200])
+        r = c.post("/api/core/rollback", json={"rev": 1, "mode": "to", "confirm": True})
+        check("上锁时回滚被拒绝 (423)", r.status_code == 423)
+        c.post("/api/core/lock", json={"locked": False, "confirm": True})
+        # 主人令牌
+        c.put("/api/settings", json={"core": {"owner_token": "owner-secret-token-1"}})
+        r = c.post("/api/core/update", json={"section": "preferences", "content": "无令牌的修改", "mode": "append"})
+        check("设了主人令牌后，无令牌请求只能产生提案", r.json().get("proposed") and "无令牌的修改" not in c.get("/api/core").json()["text"], r.text[:200])
+        r = c.post("/api/core/update", json={"section": "preferences", "content": "带令牌的修改", "mode": "append"},
+                   headers={"Authorization": "Bearer owner-secret-token-1"})
+        check("带主人令牌直接生效", r.json().get("applied") and "带令牌的修改" in c.get("/api/core").json()["text"], r.text[:200])
+        check("主人令牌在设置里掩码显示", "owner-secret-token-1" not in json.dumps(c.get("/api/settings").json()))
+        c.post("/api/core/undo", headers={"Authorization": "Bearer owner-secret-token-1"})
+        r = c.post("/api/core/undo")
+        check("无令牌不能撤销 (403)", r.status_code == 403)
+        c.put("/api/settings", json={"core": {"owner_token": ""}})
+        # 代理里的主人指令
+        n_up = mock_app.state.last
+        r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/核心"}]})
+        txt = r.json()["choices"][0]["message"]["content"]
+        check("代理：/核心 本地回复、不发上游", "核心记忆" in txt and r.headers.get("x-soulstar-core-command") == "1" and mock_app.state.last is n_up, txt[:200])
+        r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/核心 喜好 + 喜欢看星星"}]})
+        check("代理：/核心 修改直接生效", "已更新" in r.json()["choices"][0]["message"]["content"] and "喜欢看星星" in c.get("/api/core").json()["text"])
+        with c.stream("POST", "/v1/chat/completions", json={"model": "x", "stream": True, "messages": [{"role": "user", "content": "/核心 历史"}]}) as resp:
+            sb = b"".join(resp.iter_raw()).decode()
+        check("代理：/核心 支持流式", "核心记忆修改" in sb and "[DONE]" in sb, sb[:200])
+        r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "记住，以后叫我阿九"}]})
+        rep = r.json()["choices"][0]["message"]["content"]
+        cc = c.get("/api/core").json()
+        check("代理：主人原话「以后叫我X」直接生效且仍转发模型", "阿九" in cc["sections"]["owner"]["content"] and "ECHO-SYSTEM" in rep and "阿九" in rep, rep[:300])
+        h = c.get("/api/core/history?limit=1").json()[0]
+        check("代理指令记入日志（来源 + 主人原话 + 前后）", h["source"] == "proxy-natural" and "阿九" in h["instruction"] and "阿九" not in h["before"]["owner"], str(h)[:300])
+        c.post("/api/core/lock", json={"locked": True, "confirm": True})
+        r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "记住，以后叫我锁定测试"}]})
+        check("代理：上锁时主人原话转为提案", "锁定测试" not in c.get("/api/core").json()["text"]
+              and any("锁定测试" in p["content"] for p in c.get("/api/proposals").json()))
+        c.post("/api/core/lock", json={"locked": False, "confirm": True})
+        c.put("/api/settings", json={"core": {"chat_commands": False, "natural_commands": False}})
+        r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/核心"}]})
+        check("可在设置里关闭对话指令", r.headers.get("x-soulstar-core-command") is None and "ECHO-SYSTEM" in r.json()["choices"][0]["message"]["content"])
+        c.put("/api/settings", json={"core": {"chat_commands": True, "natural_commands": True}})
+        # 注入里也包含最新核心
+        r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "你好"}]})
+        check("代理注入的是最新核心记忆", "阿九" in r.json()["choices"][0]["message"]["content"])
+        check("core.md 带版本号", f"r{c.get('/api/core').json()['rev']}" in (soul / "core.md").read_text("utf-8"))
+
         print("== LLM 整理（模拟上游）")
         r = c.post("/api/maintenance/consolidate?background=false").json()
         check("整理：从归档生成新星", r.get("added", 0) >= 1, json.dumps(r, ensure_ascii=False))
@@ -356,14 +458,23 @@ def main():
         print("== MCP")
         for fb in (False, True):
             label = "极简 JSON-RPC 后备" if fb else "官方 mcp SDK"
-            init, tl, call, prop = mcp_session(env, fb)
+            init, tl, call, prop, upd, upd2, und = mcp_session(env, fb)
             names = sorted(t["name"] for t in (tl or {}).get("result", {}).get("tools", []))
             check(f"MCP[{label}] 初始化", init and "result" in init, str(init)[:200])
-            check(f"MCP[{label}] 列出 6 个工具", names == sorted(["get_core", "recall_index", "recall", "recall_detail", "remember", "propose_core_change"]), str(names))
+            check(f"MCP[{label}] 列出 9 个工具", names == sorted(["get_core", "recall_index", "recall", "recall_detail", "remember",
+                                                               "propose_core_change", "update_core", "core_history", "undo_core"]), str(names))
             txt = ((call or {}).get("result", {}).get("content") or [{}])[0].get("text", "")
             check(f"MCP[{label}] recall 调用", "咖啡" in txt, str(call)[:300])
             ptxt = ((prop or {}).get("result", {}).get("content") or [{}])[0].get("text", "")
             check(f"MCP[{label}] 提案进入队列", "提案" in ptxt, str(prop)[:200])
+            t = lambda m: ((m or {}).get("result", {}).get("content") or [{}])[0].get("text", "")
+            tag = "MCP主人指令测试" + ("B" if fb else "A")
+            hh = c.get("/api/core/history?limit=10").json()
+            check(f"MCP[{label}] update_core 带主人原话直接生效", "已更新" in t(upd) and any(tag in (x.get("after") or {}).get("preferences", "") for x in hh), t(upd))
+            check(f"MCP[{label}] update_core 无主人原话转为提案", "提案" in t(upd2) and "没有主人原话" not in c.get("/api/core").json()["text"], t(upd2))
+            check(f"MCP[{label}] undo_core 撤销", "已更新" in t(und) and tag not in c.get("/api/core").json()["text"], t(und))
+            h = c.get("/api/core/history?limit=3").json()
+            check(f"MCP[{label}] 日志记录来源 mcp 与主人原话", any(x["source"] == "mcp" and "MCP测试" in x.get("instruction", "") for x in h), str(h)[:200])
 
         print("== 快照 / 加密 / WebDAV")
         snap = c.post("/api/sync/snapshot").json()
@@ -411,7 +522,7 @@ def main():
         print("== 事件日志")
         ev = [json.loads(l) for l in (soul / "events.jsonl").read_text("utf-8").splitlines()]
         types = {e["type"] for e in ev}
-        check("事件日志记录各类操作", {"star_add", "star_edit", "star_soft_delete", "core_edit", "proposal_approve", "recall", "restore"} <= types, str(types))
+        check("事件日志记录各类操作", {"star_add", "star_edit", "star_soft_delete", "core_change", "core_lock", "proposal_approve", "recall", "restore"} <= types, str(types))
     finally:
         srv.terminate()
         try:
