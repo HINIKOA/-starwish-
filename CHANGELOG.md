@@ -1,5 +1,14 @@
 # 更新记录
 
+## v0.8.0（2026-11-08）更名「星愿记忆」、软件图标、exe 桌面版、依赖预装、设置窗口与模型服务
+- 全部「星魂 / SoulStar」改为「星愿 / StarWish」，软件名「星愿记忆」；环境变量前缀改为 `STARWISH_`，快照文件名改为 `starwish-*.zip`。
+- 软件图标：用主人设计的图做成圆角图标（`assets/starwish.ico` 16~256 多尺寸、网页 favicon、PWA manifest、顶栏图标）。
+- 桌面版：新增 `desktop.py`（后台线程跑服务 + pywebview / WebView2 桌面窗口，关窗即停服务、进程退出；无 WebView2 时退回 Edge/Chrome 应用窗口，再不行用浏览器 + 心跳自动退出；已在运行时只开窗口；端口被占自动换）与 `星愿记忆.exe` 启动器（`tools/launcher/`，无控制台、带图标）。去掉 `start.bat` / `mcp.bat`，改为 `MCP接入.bat`。
+- 依赖预装：`tools/build_windows.py` 打出免安装版，内置 Python 3.12 embeddable + 全部依赖（含桌面窗口与声纹插件）+ 内置向量模型 + 声纹模型，启动不再联网下载。
+- 设置改为独立浮动窗口（`web/settings.js`）：点「设置」开 / 关，可拖动、可调大小、Esc 关闭；左侧分区：模型服务 / 默认模型 / 向量模型 / 视频交互模型 / 接入与代理 / 记忆与星辰 / 备份与同步 / 安全 / 关于。
+- 模型服务（新增 `app/providers.py`）：13 家预设服务商；填 Key 点「检测」即验证并自动同步模型；地址少 `/v1` 自动补；模型自动分类（对话 / 识图 / 向量 / 其他）；每个模型和每个默认模型都能检测；默认模型下拉选择并自动映射到代理、整理（可在另一家）、宇宙之眼、向量接口；服务商 Key 掩码显示、可随主密码加密；旧设置自动显示为一个服务商。
+- 新增 `tests/desktop_test.py`。
+
 ## v0.7.0（2026-11-07）向量模型三档可选，语义 + 字面混合检索
 - 新增 `app/embed/` 与重写 `app/semantic.py`：① 内置 bge-small-zh-v1.5 int8 ONNX（23.9MB，常驻默认，缺了自动下载）；② BGE-M3 int8 ONNX（约 590MB，设置里一键部署，主站不通自动换 hf-mirror）；③ Qwen3-Embedding 接口（百炼 text-embedding-v4 或任何 OpenAI 兼容 /embeddings，单独填 Key，按机密保存）。
 - 去掉 sentence-transformers / PyTorch 依赖，改用 onnxruntime + tokenizers + numpy（Windows 约 31MB，写进 requirements）。

@@ -1,4 +1,4 @@
-// 星魂 SoulStar —— 核心记忆模块页面（查看 / 编辑三段 / 锁定 / 提案 / 版本历史与回滚 / 主人指令）
+// 星愿 StarWish —— 核心记忆模块页面（查看 / 编辑三段 / 锁定 / 提案 / 版本历史与回滚 / 主人指令）
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -41,7 +41,7 @@ function renderTop() {
   const lb = $("#lockBtn");
   lb.textContent = C.locked ? "🔒 已上锁 · 点此解锁" : "🔓 未上锁 · 点此上锁";
   lb.classList.toggle("is-locked", !!C.locked);
-  $("#intro").innerHTML = `核心记忆是星魂的<b>灵魂</b>：三段恒定内容，每轮对话都会注入。<b>后台 LLM 整理、导入、AI 自己的推测永远不能直接改它</b>，只能提「提案」。
+  $("#intro").innerHTML = `核心记忆是星愿的<b>灵魂</b>：三段恒定内容，每轮对话都会注入。<b>后台 LLM 整理、导入、AI 自己的推测永远不能直接改它</b>，只能提「提案」。
     主人可以在这里编辑，也可以在任何 AI 客户端里直接下指令（<code>/核心 …</code> 或「记住，以后叫我X」），立即生效。
     每次修改都带 前/后/来源 记入永久日志，随时可以撤销或回到任意版本。
     ${C.locked ? '<br><span class="locked">🔒 当前已上锁（冻结）：所有直接修改都会被拒绝，远程主人指令会自动转为提案。</span>' : ""}`;
@@ -136,8 +136,8 @@ async function renderHistory() {
 function renderCommand() {
   const s = C.settings || {};
   $("#tab-command").innerHTML = `
-    <div class="intro" style="margin-top:12px">在任何接入星魂代理的客户端（ChatGPT 类客户端 / DeepSeek / Hermes / 其他 OpenAI 兼容工具）里直接对 AI 说，星魂会在转发前就地执行；
-      Claude 等 MCP 客户端用 <code>update_core</code> 工具（必须附上主人原话）。斜杠指令由星魂直接回复，不消耗模型 token。</div>
+    <div class="intro" style="margin-top:12px">在任何接入星愿代理的客户端（ChatGPT 类客户端 / DeepSeek / Hermes / 其他 OpenAI 兼容工具）里直接对 AI 说，星愿会在转发前就地执行；
+      Claude 等 MCP 客户端用 <code>update_core</code> 工具（必须附上主人原话）。斜杠指令由星愿直接回复，不消耗模型 token。</div>
     <table class="cheat">
       <tr><td>/核心</td><td>查看当前核心记忆</td></tr>
       <tr><td>/核心 主人 九天，称呼天天</td><td>替换整段（分区：身份 / 主人 / 喜好）</td></tr>
@@ -186,3 +186,6 @@ $$(".ctabs button").forEach((b) => (b.onclick = () => {
   const h = location.hash.slice(1);
   if (["proposals", "history", "command"].includes(h)) $(`.ctabs [data-tab="${h}"]`).click();
 })();
+
+// 桌面版心跳：页面全部关闭后，后台服务才会自动退出（仅浏览器兜底模式用到）
+setInterval(() => fetch("/api/ping", { method: "POST" }).catch(() => {}), 15000); fetch("/api/ping", { method: "POST" }).catch(() => {});

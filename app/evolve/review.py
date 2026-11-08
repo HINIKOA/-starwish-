@@ -19,12 +19,12 @@ from ..db import estimate_tokens, log_event
 from . import skills
 
 SKILLS_GUIDANCE = (
-    "【星魂·技能自进化】完成复杂任务（5 步以上）、修好棘手错误、或发现不显而易见的流程后，用 skill_manage(action='create') "
+    "【星愿·技能自进化】完成复杂任务（5 步以上）、修好棘手错误、或发现不显而易见的流程后，用 skill_manage(action='create') "
     "把做法存成技能，下次直接复用。使用某个技能时发现它过时、不完整或有错，立即用 skill_manage(action='patch') 修补，"
     "不要等主人提醒——不维护的技能会变成负担。技能写「教训」而不是「日志」：祈使句规则 + 原因，一条一条。"
 )
 
-REVIEW_PROMPT = """你是「星魂」记忆库的技能巡检员。下面是主人与 AI 最近的对话。请判断是否需要保存或更新「技能」（AI 的操作手册 / 程序性记忆）。
+REVIEW_PROMPT = """你是「星愿」记忆库的技能巡检员。下面是主人与 AI 最近的对话。请判断是否需要保存或更新「技能」（AI 的操作手册 / 程序性记忆）。
 
 重点关注：
 1. 是否用了一个不简单的方法完成任务，过程中有试错、绕路，或因为中途发现的情况改变了做法？
@@ -144,7 +144,7 @@ def spawn_review(reason: str = "", focus: str = "") -> bool:
         finally:
             _running.clear()
 
-    threading.Thread(target=run, daemon=True, name="soulstar-review").start()
+    threading.Thread(target=run, daemon=True, name="starwish-review").start()
     return True
 
 
@@ -269,7 +269,7 @@ def injection(query: str) -> tuple[str, list[str]]:
     if not hits:
         return "", []
     budget = int(c.get("inject_budget_tokens", 400))
-    lines = ["【星魂·相关技能】"]
+    lines = ["【星愿·相关技能】"]
     used = []
     top_score, top = hits[0]
     if top_score >= float(c.get("inject_full_threshold", 0.3)):
@@ -289,5 +289,5 @@ def injection(query: str) -> tuple[str, list[str]]:
         return "", []
     for n in used:
         skills.bump(n, "injections")
-    lines.append("（按技能做；发现技能不对请照实际情况处理，星魂会在后台修补它。）")
+    lines.append("（按技能做；发现技能不对请照实际情况处理，星愿会在后台修补它。）")
     return "\n".join(lines), used

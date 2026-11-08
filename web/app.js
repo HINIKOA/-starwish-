@@ -1,5 +1,7 @@
-// 星魂 SoulStar —— 记忆星图面板（无需构建，原生 ES Module + three.js）
+// 星愿 StarWish —— 记忆星图面板（无需构建，原生 ES Module + three.js）
 // 设计灵感来自 dsh-xingxi（作者 Yuuyuko-uu）：越新的星越亮，老星只是变暗、不会消失。
+
+import { initSettings, toggleSettings } from "./settings.js";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -583,86 +585,7 @@ async function panelSync() {
 }
 
 // —— 设置 ——
-async function panelSettings() {
-  const c = await safe(() => api("/api/settings"));
-  if (!c) return;
-  const inp = (path, label, type = "text", ph = "") => {
-    const [a, b] = path.split(".");
-    const v = c[a][b];
-    if (type === "checkbox") return `<label class="tl-check" style="margin-top:10px"><input type="checkbox" data-k="${path}" ${v ? "checked" : ""}> ${label}</label>`;
-    return `<label>${label}</label><input data-k="${path}" type="${type}" value="${type === "password" ? "" : esc(v)}" placeholder="${esc(ph)}">`;
-  };
-  const sel = (path, label, opts) => { const [a, b] = path.split(".");
-    return `<label>${label}</label><select data-k="${path}">${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(c[a][b]) === String(v) ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>`; };
-  const sec = (path, label) => { const [a, b] = path.split("."); return inp(path, label, "password", c[a][b + "_set"] ? "已设置（留空则不修改）" : "未设置"); };
-  const origin = location.origin;
-  openDrawer(`
-    <h2>设置</h2>
-    <div class="sub">配置保存在 <code>soul/config.json</code>。${c.secrets_encrypted ? (c.secrets_unlocked ? '<span class="okc">机密已加密，当前已解锁。</span>' : '<span class="warn">机密已加密，尚未解锁（API Key 等暂不可用）。</span>') : '<span class="warn">API Key 等目前以明文保存，可在下方开启主密码加密。</span>'}</div>
-    <h3>接入地址</h3>
-    <div class="kv"><span>OpenAI 兼容</span><span>${origin}/v1</span><span>REST API</span><span>${origin}/api</span><span>MCP</span><span>python mcp_server.py</span></div>
-    <h3>上游大模型（代理转发 + 整理用）</h3>
-    ${inp("llm.base_url", "Base URL", "text", "https://api.deepseek.com/v1")}
-    ${sec("llm.api_key", "API Key")}
-    <div class="grid2"><div>${inp("llm.model", "默认模型")}</div><div>${inp("llm.maintenance_model", "整理用模型（可空）")}</div></div>
-    <h3>代理</h3>
-    ${inp("proxy.inject", "自动注入核心记忆 + 相关星星", "checkbox")}
-    ${inp("proxy.log_to_archive", "把对话写入归档，供日后整理", "checkbox")}
-    <div class="grid2"><div>${inp("proxy.budget_tokens", "每轮召回预算（tokens）", "number")}</div><div>${inp("proxy.model_override", "强制模型（可空）")}</div></div>
-    ${sec("proxy.proxy_key", "代理密钥（可空；填了则客户端需用它作为 API Key）")}
-    <h3>记忆亮度</h3>
-    <div class="grid2">
-      <div>${inp("memory.half_life_days", "半衰期（天）", "number")}</div><div>${inp("memory.brightness_floor", "最低亮度", "number")}</div>
-      <div>${inp("memory.brightness_weight", "亮度在排序中的权重", "number")}</div><div>${inp("memory.recall_budget_default", "默认召回预算", "number")}</div>
-    </div>
-    <h3>向量模型（语义检索）</h3>
-    <div class="sub">和 jieba + FTS5 一起找记忆：字面没对上也能按意思找到（搜「保暖外套」能找到「羽绒服」）。选的档位没准备好时自动用内置模型。</div>
-    ${inp("memory.semantic", "启用语义检索", "checkbox")}
-    ${sel("embed.provider", "使用哪个向量模型", [["small", "① 内置 bge-small-zh int8（23.9MB · 常驻默认）"], ["m3", "② BGE-M3 int8（约 590MB · 一键部署）"], ["api", "③ Qwen3-Embedding 接口（填 Key）"]])}
-    <div id="embBox" class="sub">正在读取向量模型状态…</div>
-    <div class="grid2"><div>${inp("embed.api_base_url", "③ 接口地址（OpenAI 兼容）", "text", "https://dashscope.aliyuncs.com/compatible-mode/v1")}</div><div>${sec("embed.api_key", "③ 向量接口 API Key")}</div>
-    <div>${inp("embed.api_model", "③ 模型", "text", "text-embedding-v4")}</div><div>${inp("embed.api_dimensions", "③ 维度（0 = 服务默认）", "number")}</div></div>
-    <div class="grid2"><div>${inp("embed.hf_mirror", "模型下载镜像", "text", "https://hf-mirror.com")}</div><div>${inp("embed.pip_index", "pip 镜像（可空）", "text", "https://pypi.tuna.tsinghua.edu.cn/simple")}</div></div>
-    ${inp("embed.prefer_mirror", "先走镜像（国内网络建议勾选）", "checkbox")}
-    <h3>视频交互模型（宇宙之眼）</h3>
-    <div class="sub">陪你看屏幕 / 摄像头时用的识图模型。帧模式的地址、Key、模型留空则沿用上面的上游大模型。</div>
-    ${sel("eye.engine", "引擎", [["frame", "通用帧模式（任意 OpenAI / Anthropic 兼容识图模型）"], ["qwen_omni", "千问全模态视频接口（Qwen3.8-Omni-Flash）"]])}
-    <div class="grid2"><div>${sel("eye.frame_protocol", "帧模式协议", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]])}</div><div>${inp("eye.frame_model", "帧模式模型", "text", "例如 qwen-vl-max / gpt-4o")}</div>
-    <div>${inp("eye.frame_base_url", "帧模式地址（可空）")}</div><div>${sec("eye.frame_api_key", "帧模式 API Key（可空）")}</div></div>
-    <div class="grid2"><div>${sel("eye.qwen_protocol", "千问协议", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]])}</div><div>${inp("eye.qwen_model", "千问模型")}</div>
-    <div>${sec("eye.qwen_api_key", "千问 API Key")}</div><div>${sel("eye.qwen_video_mode", "帧序列传法", [["video", "按视频传（失败自动退回多图）"], ["images", "每帧一张图"]])}</div></div>
-    <h3>WebDAV</h3>
-    ${inp("webdav.url", "地址", "text", "https://dav.jianguoyun.com/dav/")}
-    <div class="grid2"><div>${inp("webdav.user", "账号")}</div><div>${sec("webdav.password", "密码 / 应用密码")}</div>
-    <div>${inp("webdav.remote_dir", "远端目录")}</div><div>${inp("webdav.keep_versions", "保留版本数", "number")}</div></div>
-    ${sec("webdav.passphrase", "备份口令（用于加密上传的快照，请牢记）")}
-    <h3>定时任务（小时，0 = 关闭）</h3>
-    <div class="grid2"><div>${inp("schedules.consolidate_hours", "LLM 整理", "number")}</div><div>${inp("schedules.backup_hours", "WebDAV 备份", "number")}</div>
-    <div>${inp("schedules.snapshot_hours", "本地快照", "number")}</div><div>${inp("schedules.keep_local_snapshots", "本地快照保留数", "number")}</div></div>
-    <div class="row"><button class="primary" id="setSave">保存设置</button></div>
-    <h3>机密加密（可选）</h3>
-    <div class="sub">用主密码加密 config.json 里的 API Key / WebDAV 密码 / 备份口令。启用后每次启动需在此解锁（或设置环境变量 SOULSTAR_MASTER）。</div>
-    <input id="master" type="password" placeholder="主密码">
-    <div class="row">
-      ${c.secrets_encrypted ? '<button id="mUnlock">解锁</button><button class="danger" id="mOff">关闭加密</button>' : '<button id="mOn">启用加密</button>'}
-    </div>
-  `);
-  embedPanel();
-  $("#setSave").onclick = () => safe(async () => {
-    const patch = {};
-    document.querySelectorAll("[data-k]").forEach((el) => {
-      const [a, b] = el.dataset.k.split(".");
-      let v = el.type === "checkbox" ? el.checked : el.value;
-      if (el.type === "number") v = v === "" ? 0 : Number(v);
-      if (el.type === "password" && v === "") return;
-      (patch[a] = patch[a] || {})[b] = v;
-    });
-    await api("/api/settings", { method: "PUT", body: patch }); toast("设置已保存"); refresh(); panelSettings();
-  });
-  if ($("#mOn")) $("#mOn").onclick = () => safe(async () => { await api("/api/secrets/encrypt", { method: "POST", body: { passphrase: $("#master").value } }); toast("已启用加密"); panelSettings(); });
-  if ($("#mUnlock")) $("#mUnlock").onclick = () => safe(async () => { await api("/api/secrets/unlock", { method: "POST", body: { passphrase: $("#master").value } }); toast("已解锁"); panelSettings(); });
-  if ($("#mOff")) $("#mOff").onclick = () => confirm("关闭加密后机密将以明文保存，确认？") && safe(async () => { await api("/api/secrets/decrypt", { method: "POST" }); panelSettings(); });
-}
+function panelSettings() { toggleSettings(); }   // v0.8.0：设置改为独立窗口（web/settings.js），点「设置」开 / 关
 
 // —— 向量模型状态卡 ——
 const EMB_NAME = { small: "内置 bge-small-zh", m3: "BGE-M3", api: "Qwen3-Embedding 接口" };
@@ -679,8 +602,8 @@ async function embedPanel() {
       <div class="meta">常驻默认，完整包自带；中文为主，CPU 上每条约 10 毫秒。</div></div>
     <div class="card"><b>② BGE-M3 int8</b> · 1024 维 · ${L.m3.installed ? `<span class="okc">已部署 ${mb(L.m3.bytes)}</span>` : `未安装（约 ${L.m3.need_mb}MB）`}${job(L.m3.job)}
       <div class="meta">中英等 100+ 语言、长文本更强；占内存约 1GB，放在程序目录 models/embed/m3，不进灵魂包。</div></div>
-    <div class="card"><b>③ Qwen3-Embedding 接口</b> · ${st.api.configured ? `<span class="okc">已填写（${esc(st.api.model)}${st.api.dimensions ? " · " + st.api.dimensions + " 维" : ""}）</span>` : "未填写 Key"}${st.api.error ? ` · <span class="warn">${esc(st.api.error)}</span>` : ""}
-      <div class="meta">阿里云百炼 text-embedding-v4 就是 Qwen3-Embedding；也可以填硅基流动等任何 OpenAI 兼容 /embeddings 地址。按量计费，记忆内容会发给接口方。</div></div>
+    <div class="card"><b>③ Qwen3-Embedding 接口</b> · ${st.api.configured ? `<span class="okc">已填写（${esc(st.api.model)}${st.api.dimensions ? " · " + st.api.dimensions + " 维" : ""}）</span>` : "未选择接口模型（在「默认模型」里选）"}${st.api.error ? ` · <span class="warn">${esc(st.api.error)}</span>` : ""}
+      <div class="meta">在「模型服务」添加服务商（如阿里云百炼、硅基流动）并同步模型后，到「默认模型」选向量模型。按量计费，记忆内容会发给接口方。</div></div>
     <div class="row">
       ${!st.deps_ok ? '<button id="embDeps">一键安装运行库</button>' : ""}
       ${!L.small.installed ? '<button id="embSmall">下载内置模型</button>' : ""}
@@ -710,11 +633,15 @@ async function panelEvents() {
 
 // ---------------- 启动 ----------------
 (async function main() {
+  initSettings({ api, toast, esc, safe, refresh, embedPanel });
   const THREE = await loadThree();
   if (THREE) { S.three = THREE; initScene(THREE); requestAnimationFrame(animate); }
   else $("#noThree").classList.remove("hidden");
   await refresh();
   setInterval(() => safe(loadStats), 30000);
   setInterval(() => { if (document.visibilityState === "visible" && $("#drawer").classList.contains("hidden")) safe(loadMap); }, 20000);  // 新记忆在使用中一颗颗长出来
-  window.__soulstar = S; // 调试用
+  window.__starwish = S; // 调试用
 })();
+
+// 桌面版心跳：页面全部关闭后，后台服务才会自动退出（仅浏览器兜底模式用到）
+setInterval(() => fetch("/api/ping", { method: "POST" }).catch(() => {}), 15000); fetch("/api/ping", { method: "POST" }).catch(() => {});

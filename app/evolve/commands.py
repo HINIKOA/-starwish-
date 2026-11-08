@@ -59,7 +59,7 @@ def execute(cmd: dict, authorized: bool, source: str = "command") -> str:
         items = skills.list_skills()
         if not items:
             return "还没有技能。AI 做完复杂任务后会自己沉淀，或者说「/技能 巡检」。"
-        return "星魂技能（亮→暗）：\n" + "\n".join(
+        return "星愿技能（亮→暗）：\n" + "\n".join(
             f"{'★' if s['created_by'] == 'agent' else '·'} {s['name']}（亮度 {s['brightness']:.2f}）：{s['description']}" for s in items[:30])
     if op == "review":
         ok = review.spawn_review(reason="主人要求巡检", focus=cmd.get("focus", ""))

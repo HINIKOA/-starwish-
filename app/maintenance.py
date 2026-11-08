@@ -17,7 +17,7 @@ from .db import log_event
 
 _run_lock = threading.Lock()
 
-PROMPT = """你是「星魂」记忆库的整理员。下面是主人与 AI 的一段原始对话。请提取值得长期记住的信息。
+PROMPT = """你是「星愿」记忆库的整理员。下面是主人与 AI 的一段原始对话。请提取值得长期记住的信息。
 要求：
 1. 只提取事实、事件、决定、约定、主人的状态与偏好变化；寒暄和一次性的问答不要。
 2. 每条记忆一颗「星」：content 写完整一两句（中文），summary 写不超过 30 字的摘要，tags 1~3 个短标签，importance 1~5（5 最重要）。
@@ -39,10 +39,12 @@ def llm_ready(cfg: dict | None = None) -> bool:
 
 def chat(messages: list[dict], cfg: dict | None = None, model: str | None = None, temperature: float = 0.2) -> str:
     cfg = cfg or config.load_config()
-    url = cfg["llm"]["base_url"].rstrip("/") + "/chat/completions"
+    other = not model and cfg["llm"].get("maint_base_url")   # 整理模型在另一个服务商
+    url = (cfg["llm"]["maint_base_url"] if other else cfg["llm"]["base_url"]).rstrip("/") + "/chat/completions"
+    key = cfg["llm"].get("maint_api_key") if other else cfg["llm"]["api_key"]
     body = {"model": model or cfg["llm"].get("maintenance_model") or cfg["llm"]["model"],
             "messages": messages, "temperature": temperature, "stream": False}
-    r = httpx.post(url, json=body, headers={"Authorization": f"Bearer {cfg['llm']['api_key']}"},
+    r = httpx.post(url, json=body, headers={"Authorization": f"Bearer {key}"},
                    timeout=float(cfg["llm"].get("timeout", 120)))
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"] or ""

@@ -1,4 +1,4 @@
-// 星魂 SoulStar —— 宇宙之眼：在浏览器里采集屏幕 / 摄像头，算画面变化，挑关键帧，开口即问。
+// 星愿 StarWish —— 宇宙之眼：在浏览器里采集屏幕 / 摄像头，算画面变化，挑关键帧，开口即问。
 // 变化检测与选帧思路参考 dsh-see-now（Apache-2.0），框选区域 / 能力预检 / 预算参考 mcai（CC0）；本文件为独立实现。
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -582,3 +582,6 @@ function voiceSettingsHtml() {
 function bindVoiceSettings() {
   if ($("#vRemove")) $("#vRemove").onclick = () => safe(async () => { if (!confirm("删除已下载的声纹模型？声纹库不受影响。")) return; await api("/api/voice/models", { method: "DELETE" }); await loadVoice(); renderSettings(); });
 }
+
+// 桌面版心跳：页面全部关闭后，后台服务才会自动退出（仅浏览器兜底模式用到）
+setInterval(() => fetch("/api/ping", { method: "POST" }).catch(() => {}), 15000); fetch("/api/ping", { method: "POST" }).catch(() => {});

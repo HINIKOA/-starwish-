@@ -1,6 +1,6 @@
 """快照与 WebDAV 备份。
 
-- 本地快照：soul/snapshots/soulstar-时间.zip（不含 config.json 与 snapshots 本身）。
+- 本地快照：soul/snapshots/starwish-时间.zip（不含 config.json 与 snapshots 本身）。
 - WebDAV：直接用 requests 发 MKCOL / PUT / PROPFIND / GET / DELETE。
 - 加密：设置了备份口令时，用 PBKDF2(SHA256, 39 万次) 派生密钥 + Fernet 加密整个 zip（.zip.enc）；
   未设置口令则上传明文 zip 并给出警告。
@@ -69,12 +69,12 @@ def build_zip_bytes() -> bytes:
             if not p.is_file() or rel.parts[0] in EXCLUDE_TOP or p.suffix == ".tmp":
                 continue
             z.write(p, rel.as_posix())
-        z.writestr("SOULSTAR_SNAPSHOT.txt", f"星魂灵魂包快照\n创建时间: {datetime.now().isoformat()}\n")
+        z.writestr("STARWISH_SNAPSHOT.txt", f"星愿灵魂包快照\n创建时间: {datetime.now().isoformat()}\n")
     return buf.getvalue()
 
 
 def _snap_name(enc: bool) -> str:
-    return f"soulstar-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip" + (".enc" if enc else "")
+    return f"starwish-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip" + (".enc" if enc else "")
 
 
 def local_snapshot(keep: int | None = None) -> dict:
@@ -100,7 +100,7 @@ def list_local() -> list[dict]:
     if not config.SNAPSHOT_DIR.exists():
         return []
     items = [{"name": p.name, "size": p.stat().st_size, "mtime": p.stat().st_mtime}
-             for p in config.SNAPSHOT_DIR.glob("soulstar-*.zip*")]
+             for p in config.SNAPSHOT_DIR.glob("starwish-*.zip*")]
     return sorted(items, key=lambda d: d["name"], reverse=True)
 
 
@@ -113,7 +113,7 @@ def restore_bytes(data: bytes, passphrase: str = "") -> dict:
     zf = zipfile.ZipFile(io.BytesIO(data))
     names = zf.namelist()
     if "soul.db" not in names and "core.json" not in names:
-        raise ValueError("不是有效的星魂快照")
+        raise ValueError("不是有效的星愿快照")
     safety = local_snapshot()
     for n in names:
         target = (config.SOUL_DIR / n).resolve()
@@ -139,7 +139,7 @@ def restore_local(name: str, passphrase: str = "") -> dict:
 # ---------------- WebDAV ----------------
 
 class WebDAV:
-    def __init__(self, url: str, user: str = "", password: str = "", remote_dir: str = "soulstar"):
+    def __init__(self, url: str, user: str = "", password: str = "", remote_dir: str = "starwish"):
         if not url:
             raise ValueError("未配置 WebDAV 地址")
         self.base = url.rstrip("/") + "/"
@@ -195,7 +195,7 @@ class WebDAV:
         for resp in root.findall("d:response", ns):
             href = unquote(resp.findtext("d:href", default="", namespaces=ns))
             name = href.rstrip("/").split("/")[-1]
-            if not name.startswith("soulstar-"):
+            if not name.startswith("starwish-"):
                 continue
             size = resp.findtext(".//d:getcontentlength", default="0", namespaces=ns)
             out.append({"name": name, "size": int(size or 0)})
@@ -204,7 +204,7 @@ class WebDAV:
 
 def _dav(cfg) -> WebDAV:
     w = cfg["webdav"]
-    return WebDAV(w["url"], w.get("user", ""), w.get("password", ""), w.get("remote_dir", "soulstar"))
+    return WebDAV(w["url"], w.get("user", ""), w.get("password", ""), w.get("remote_dir", "starwish"))
 
 
 def webdav_backup() -> dict:

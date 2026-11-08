@@ -1,7 +1,7 @@
-"""星魂 SoulStar —— MCP 服务器（stdio）。
+"""星愿 StarWish —— MCP 服务器（stdio）。
 
 优先使用官方 `mcp` Python SDK（兼容 1.x 的 FastMCP 与 2.x 的 MCPServer）；
-未安装或设置环境变量 SOULSTAR_MCP_FALLBACK=1 时，退化为内置的极简 JSON-RPC stdio 实现。
+未安装或设置环境变量 STARWISH_MCP_FALLBACK=1 时，退化为内置的极简 JSON-RPC stdio 实现。
 直接读写 ./soul/ 灵魂包，不需要先启动网页服务（两者可同时运行，SQLite WAL 模式）。
 
 用法：python mcp_server.py
@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app import __version__, config, core, evolve, stars  # noqa: E402
 from app.db import init_db  # noqa: E402
 
-INSTRUCTIONS = ("星魂记忆库。对话开始时先调用 get_core 获取恒定的核心记忆；需要回忆时先 recall_index 看概况，"
+INSTRUCTIONS = ("星愿记忆。对话开始时先调用 get_core 获取恒定的核心记忆；需要回忆时先 recall_index 看概况，"
                 "再 recall(query) 在 token 预算内取相关摘要，必要时 recall_detail(id) 取全文。"
                 "值得长期记住的新信息用 remember 保存。核心记忆（AI身份/主人称呼/主人喜好）不能自作主张修改："
                 "只有主人在对话里明确要求时，才用 update_core 并在 owner_instruction 里原样附上主人的原话；"
@@ -34,7 +34,7 @@ def _j(obj) -> str:
 
 def get_core() -> str:
     """获取恒定的核心记忆（AI身份与名字 / 主人是谁及称呼 / 主人的喜好）。每次对话开始时调用一次。"""
-    return core.core_text() or "（核心记忆为空，请主人在星魂面板中填写）"
+    return core.core_text() or "（核心记忆为空，请主人在星愿面板中填写）"
 
 
 def recall_index() -> str:
@@ -220,7 +220,7 @@ def run_fallback() -> None:
             if method == "initialize":
                 result = {"protocolVersion": params.get("protocolVersion", "2024-11-05"),
                           "capabilities": {"tools": {"listChanged": False}},
-                          "serverInfo": {"name": "soulstar", "version": __version__},
+                          "serverInfo": {"name": "starwish", "version": __version__},
                           "instructions": INSTRUCTIONS}
             elif method == "ping":
                 result = {}
@@ -251,12 +251,12 @@ def run_sdk() -> bool:
     try:
         from mcp.server.mcpserver import MCPServer  # mcp 2.x
 
-        server = MCPServer("soulstar", instructions=INSTRUCTIONS, version=__version__)
+        server = MCPServer("starwish", instructions=INSTRUCTIONS, version=__version__)
     except Exception:
         try:
             from mcp.server.fastmcp import FastMCP  # mcp 1.x
 
-            server = FastMCP("soulstar", instructions=INSTRUCTIONS)
+            server = FastMCP("starwish", instructions=INSTRUCTIONS)
         except Exception:
             return False
     for f in TOOLS:
@@ -268,7 +268,7 @@ def run_sdk() -> bool:
 def main():
     init_db()
     core.load_core()
-    if os.environ.get("SOULSTAR_MCP_FALLBACK") == "1" or not run_sdk():
+    if os.environ.get("STARWISH_MCP_FALLBACK") == "1" or not run_sdk():
         run_fallback()
 
 

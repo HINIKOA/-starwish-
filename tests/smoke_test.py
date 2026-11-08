@@ -1,4 +1,4 @@
-"""星魂 SoulStar 冒烟测试。
+"""星愿 StarWish 冒烟测试。
 
 用法：python tests/smoke_test.py
 在临时目录里建一个独立的灵魂包，启动真实服务器 + 模拟上游（mock OpenAI），逐项验证。
@@ -171,7 +171,7 @@ def make_xingxi(folder: Path):
 def mcp_session(env, fallback: bool):
     e = dict(env)
     if fallback:
-        e["SOULSTAR_MCP_FALLBACK"] = "1"
+        e["STARWISH_MCP_FALLBACK"] = "1"
     p = subprocess.Popen([sys.executable, str(ROOT / "mcp_server.py")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, env=e, cwd=str(ROOT))
 
@@ -235,9 +235,9 @@ def mcp_session(env, fallback: bool):
 
 
 def main():
-    tmp = Path(tempfile.mkdtemp(prefix="soulstar-smoke-"))
+    tmp = Path(tempfile.mkdtemp(prefix="starwish-smoke-"))
     soul = tmp / "soul"
-    env = {**os.environ, "SOULSTAR_SOUL_DIR": str(soul), "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "STARWISH_SOUL_DIR": str(soul), "PYTHONIOENCODING": "utf-8"}
     up_port, port, dav_port = free_port(), free_port(), free_port()
     mock_app, _ = start_mock_upstream(up_port)
     srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
@@ -249,7 +249,7 @@ def main():
         check("服务器启动", wait_up(B + "/api/health"))
         check("模拟上游启动", wait_up(f"http://127.0.0.1:{up_port}/v1/models"))
         r = c.get("/")
-        check("面板 / 可访问", r.status_code == 200 and "星魂" in r.text)
+        check("面板 / 可访问", r.status_code == 200 and "星愿" in r.text)
         check("app.js / three.js 本地文件可访问",
               c.get("/static/app.js").status_code == 200 and c.get("/static/vendor/three.module.min.js").status_code == 200)
 
@@ -295,12 +295,12 @@ def main():
         check("编辑星", r.json()["summary"] == "冰美式不加糖" and r.json()["importance"] == 5)
 
         print("== 核心记忆锁")
-        r = c.put("/api/core", json={"section": "identity", "content": "我是星魂，名字叫小星"})
+        r = c.put("/api/core", json={"section": "identity", "content": "我是星愿，名字叫小星"})
         check("无 confirm 拒绝修改 (428)", r.status_code == 428, str(r.status_code))
-        r = c.put("/api/core", json={"section": "identity", "content": "我是星魂，名字叫小星", "confirm": True})
+        r = c.put("/api/core", json={"section": "identity", "content": "我是星愿，名字叫小星", "confirm": True})
         check("带 confirm 可修改", r.status_code == 200)
         c.put("/api/core", json={"section": "owner", "content": "主人九天，称呼「天天」", "confirm": True})
-        check("core.md 自动生成", "我是星魂" in (soul / "core.md").read_text("utf-8"))
+        check("core.md 自动生成", "我是星愿" in (soul / "core.md").read_text("utf-8"))
         c.post("/api/core/lock", json={"locked": True, "confirm": True})
         r = c.put("/api/core", json={"section": "identity", "content": "被篡改", "confirm": True})
         check("上锁后拒绝修改 (423)", r.status_code == 423, str(r.status_code))
@@ -366,10 +366,10 @@ def main():
         if not check("代理：非流式请求成功", r.status_code == 200 and "choices" in r.text, f"{r.status_code} {r.text[:300]}"):
             raise SystemExit(1)
         reply = r.json()["choices"][0]["message"]["content"]
-        check("代理：注入核心记忆", "我是星魂" in reply and "天天" in reply, reply[:300])
-        check("代理：注入相关星星", "冰美式" in reply and "【星魂·相关记忆】" in reply, reply[:400])
+        check("代理：注入核心记忆", "我是星愿" in reply and "天天" in reply, reply[:300])
+        check("代理：注入相关星星", "冰美式" in reply and "【星愿·相关记忆】" in reply, reply[:400])
         check("代理：保留原 system 提示", "你是一个助手" in reply)
-        check("代理：响应头带召回信息", r.headers.get("x-soulstar-recalled", "") != "")
+        check("代理：响应头带召回信息", r.headers.get("x-starwish-recalled", "") != "")
         sent = mock_app.state.last
         check("代理：注入后仍只有一条 system", sum(1 for m in sent["messages"] if m["role"] == "system") == 1)
         with c.stream("POST", "/v1/chat/completions", json={"model": "x", "stream": True, "messages": [
@@ -406,7 +406,7 @@ def main():
         check("指令「记住，以后叫我X」改称呼（就地替换旧称呼）", r.json().get("matched") and "称呼「小天」" in own and "天天" not in own, own)
         r = c.post("/api/core/command", json={"text": "记住，你以后叫星星"})
         idt = c.get("/api/core").json()["sections"]["identity"]["content"]
-        check("指令「你以后叫X」改 AI 名字（就地替换）", "名字「星星」" in idt and "小星" not in idt and "我是星魂" in idt, idt)
+        check("指令「你以后叫X」改 AI 名字（就地替换）", "名字「星星」" in idt and "小星" not in idt and "我是星愿" in idt, idt)
         before_owner = c.get("/api/core").json()["sections"]["owner"]["content"]
         r = c.post("/api/core/command", json={"text": "/核心 称呼 = 天天"})
         own = c.get("/api/core").json()["sections"]["owner"]["content"]
@@ -452,7 +452,7 @@ def main():
         n_up = mock_app.state.last
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/核心"}]})
         txt = r.json()["choices"][0]["message"]["content"]
-        check("代理：/核心 本地回复、不发上游", "核心记忆" in txt and r.headers.get("x-soulstar-core-command") == "1" and mock_app.state.last is n_up, txt[:200])
+        check("代理：/核心 本地回复、不发上游", "核心记忆" in txt and r.headers.get("x-starwish-core-command") == "1" and mock_app.state.last is n_up, txt[:200])
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/核心 喜好 + 喜欢看星星"}]})
         check("代理：/核心 修改直接生效", "已更新" in r.json()["choices"][0]["message"]["content"] and "喜欢看星星" in c.get("/api/core").json()["text"])
         with c.stream("POST", "/v1/chat/completions", json={"model": "x", "stream": True, "messages": [{"role": "user", "content": "/核心 历史"}]}) as resp:
@@ -471,7 +471,7 @@ def main():
         c.post("/api/core/lock", json={"locked": False, "confirm": True})
         c.put("/api/settings", json={"core": {"chat_commands": False, "natural_commands": False}})
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/核心"}]})
-        check("可在设置里关闭对话指令", r.headers.get("x-soulstar-core-command") is None and "ECHO-SYSTEM" in r.json()["choices"][0]["message"]["content"])
+        check("可在设置里关闭对话指令", r.headers.get("x-starwish-core-command") is None and "ECHO-SYSTEM" in r.json()["choices"][0]["message"]["content"])
         c.put("/api/settings", json={"core": {"chat_commands": True, "natural_commands": True}})
         # 注入里也包含最新核心
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "你好"}]})
@@ -533,7 +533,7 @@ def main():
         # 注入
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "帮我写这周的周报"}]})
         rep = r.json()["choices"][0]["message"]["content"]
-        check("代理注入相关技能（渐进式披露）", "【星魂·相关技能】" in rep and "weekly-report" in rep and "weekly-report" in r.headers.get("x-soulstar-skills", ""), rep[-300:])
+        check("代理注入相关技能（渐进式披露）", "【星愿·相关技能】" in rep and "weekly-report" in rep and "weekly-report" in r.headers.get("x-starwish-skills", ""), rep[-300:])
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "今天天气怎么样"}]})
         check("无关问题不注入技能", "相关技能" not in r.json()["choices"][0]["message"]["content"])
         # 后台巡检：计数器跨轮累积
@@ -585,7 +585,7 @@ def main():
         c.put("/api/settings", json={"evolve": {"approval": "auto", "nudge_interval": 10}})
         # 对话指令
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/技能"}]})
-        check("代理 /技能 列表（本地回复）", "deploy-blog" in r.json()["choices"][0]["message"]["content"] and r.headers.get("x-soulstar-core-command") == "1")
+        check("代理 /技能 列表（本地回复）", "deploy-blog" in r.json()["choices"][0]["message"]["content"] and r.headers.get("x-starwish-core-command") == "1")
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/技能 差评 weekly-report 太啰嗦"}]})
         check("代理 /技能 差评", "差评" in r.json()["choices"][0]["message"]["content"] and "weekly-report" in c.get("/api/evolve/status").json()["needs_fix"])
         mock_app.state.reviews = 0
@@ -654,7 +654,7 @@ def main():
             print("  - 跳过 WebDAV（未安装 wsgidav/cheroot）")
         else:
             c.put("/api/settings", json={"webdav": {"url": f"http://127.0.0.1:{dav_port}/", "user": "tester", "password": "pw123",
-                                                    "remote_dir": "备份/soulstar", "passphrase": "my-secret", "keep_versions": 2}})
+                                                    "remote_dir": "备份/starwish", "passphrase": "my-secret", "keep_versions": 2}})
             names = []
             for _ in range(3):
                 r = c.post("/api/sync/backup")
@@ -663,7 +663,7 @@ def main():
                 time.sleep(1.1)
             lst = c.get("/api/sync/remote").json()
             check("WebDAV 只保留 N 个版本", len(lst) == 2, str(lst))
-            files = list(davroot.rglob("soulstar-*"))
+            files = list(davroot.rglob("starwish-*"))
             check("云端文件是密文", files and files[0].read_bytes().startswith(b"SSENC1"))
             c.post("/api/stars", json={"content": "备份之后新增的星"})
             r = c.post("/api/sync/restore", json={"name": lst[0]["name"], "source": "remote", "confirm": True})
@@ -693,7 +693,7 @@ def main():
 
     # ---------------- 性能：1 万颗星 ----------------
     print("== 性能（1 万颗星，进程内）")
-    perf = subprocess.run([sys.executable, "-c", PERF], env={**os.environ, "SOULSTAR_SOUL_DIR": str(tmp / "perf")},
+    perf = subprocess.run([sys.executable, "-c", PERF], env={**os.environ, "STARWISH_SOUL_DIR": str(tmp / "perf")},
                           cwd=str(ROOT), capture_output=True, text=True, timeout=600)
     try:
         pr = json.loads(perf.stdout.strip().splitlines()[-1])

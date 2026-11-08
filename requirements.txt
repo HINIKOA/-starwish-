@@ -1,4 +1,4 @@
-# 星魂 SoulStar 依赖（Python 3.10+）
+# 星愿 StarWish 依赖（Python 3.10+）
 fastapi>=0.110
 uvicorn>=0.27
 python-multipart>=0.0.9

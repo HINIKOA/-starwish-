@@ -48,7 +48,7 @@ _jobs: dict[str, dict] = {}
 
 
 def models_dir() -> Path:
-    d = Path(os.environ.get("SOULSTAR_MODELS_DIR") or (config.APP_DIR / "models")) / "voice"
+    d = Path(os.environ.get("STARWISH_MODELS_DIR") or (config.APP_DIR / "models")) / "voice"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -105,7 +105,7 @@ def _job(name: str, **kw) -> dict:
 
 
 def _url(path: str, vcfg: dict) -> str:
-    base = (os.environ.get("SOULSTAR_VOICE_MODEL_BASE") or vcfg.get("model_base_url") or RELEASE_BASE).rstrip("/")
+    base = (os.environ.get("STARWISH_VOICE_MODEL_BASE") or vcfg.get("model_base_url") or RELEASE_BASE).rstrip("/")
     mirror = (vcfg.get("download_mirror") or "").strip()
     url = f"{base}/{path}"
     if mirror and base.startswith("https://github.com"):
@@ -157,7 +157,7 @@ def _pip(vcfg: dict) -> None:
     if getattr(sys, "frozen", False):
         _job(name, state="error", error="打包版不能在线装 Python 依赖，请用源码版或下载带插件的版本")
         return
-    cmd = os.environ.get("SOULSTAR_VOICE_PIP_CMD")
+    cmd = os.environ.get("STARWISH_VOICE_PIP_CMD")
     args = cmd.split() + missing if cmd else [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *missing]
     if vcfg.get("pip_index") and not cmd:
         args += ["-i", vcfg["pip_index"]]

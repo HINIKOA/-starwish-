@@ -341,7 +341,7 @@ def recall(query: str, budget_tokens: int | None = None, bump: bool = True, limi
     w = float(cfg["memory"].get("brightness_weight", 0.5))
     now = time.time()
     query = (query or "").strip()
-    header = "【星魂·相关记忆】(#编号 日期 摘要；需要全文可调用 recall_detail)"
+    header = "【星愿·相关记忆】(#编号 日期 摘要；需要全文可调用 recall_detail)"
     used = estimate_tokens(header)
     items = []
     with get_conn() as c:

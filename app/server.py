@@ -1,4 +1,4 @@
-"""星魂 SoulStar —— FastAPI 主程序：REST API + 网页面板 + OpenAI 兼容代理 + 定时任务。"""
+"""星愿 StarWish —— FastAPI 主程序：REST API + 网页面板 + OpenAI 兼容代理 + 定时任务。"""
 from __future__ import annotations
 
 import asyncio
@@ -16,12 +16,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, archive, config, core, evolve, eye, fusion, importers, maintenance, semantic, stars, sync, voice
+from . import __version__, archive, config, core, evolve, eye, fusion, importers, maintenance, providers, semantic, stars, sync, voice
 from .embed import models as embed_models
 from .db import init_db, log_event, read_events
 from .proxy import router as proxy_router
 
-log = logging.getLogger("soulstar")
+log = logging.getLogger("starwish")
 
 
 # ---------------- 定时任务（简单 asyncio 循环，无需 APScheduler） ----------------
@@ -64,7 +64,7 @@ def _embed_boot() -> None:
     try:
         cfg = config.load_config()
         e = cfg.get("embed") or {}
-        if os.environ.get("SOULSTAR_NO_EMBED_BOOT"):
+        if os.environ.get("STARWISH_NO_EMBED_BOOT"):
             return
         if not embed_models.installed("small") and e.get("auto_download", True) and embed_models.deps_ok():
             embed_models.install("small", e, deps=False)
@@ -85,7 +85,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="星魂 SoulStar", version=__version__, lifespan=lifespan)
+app = FastAPI(title="星愿 StarWish", version=__version__, lifespan=lifespan)
 app.include_router(proxy_router)
 
 
@@ -216,7 +216,17 @@ class ImportPath(BaseModel):
 # ---------------- 基础 ----------------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "app": "soulstar", "version": __version__, "soul_dir": str(config.SOUL_DIR)}
+    return {"ok": True, "app": "starwish", "version": __version__, "soul_dir": str(config.SOUL_DIR)}
+
+
+LAST_PING = 0.0  # 桌面版浏览器兜底模式用：页面心跳，全部关闭一段时间后自动退出
+
+
+@app.post("/api/ping")
+def ping():
+    global LAST_PING
+    LAST_PING = time.time()
+    return {"ok": True}
 
 
 @app.get("/api/stats")
@@ -236,7 +246,7 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
 def is_owner(request: Request) -> bool:
     """主人身份：配置了主人令牌 → 必须带对令牌；没配置 → 只信任本机请求。"""
     token = (config.load_config().get("core") or {}).get("owner_token") or ""
-    got = request.headers.get("x-soulstar-owner", "")
+    got = request.headers.get("x-starwish-owner", "")
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         got = got or auth[7:].strip()
@@ -595,6 +605,53 @@ def get_settings():
     return config.masked_config()
 
 
+# ---------------- 模型服务（服务商 / 同步模型 / 检测） ----------------
+def _prov_args(body: dict) -> tuple[str, str, str]:
+    """前端没带 Key（或是掩码）时，用已保存的那一份。"""
+    cfg = config.load_config()
+    p = providers.find(cfg, body.get("id", "")) or {}
+    if not p and body.get("id") == "legacy":
+        p = {"api_key": cfg["llm"].get("api_key", ""), "base_url": cfg["llm"].get("base_url", "")}
+    key = body.get("api_key") or ""
+    if not key or key.startswith("****"):
+        key = p.get("api_key", "")
+    base = body.get("base_url") or p.get("base_url", "")
+    return base, key, body.get("protocol") or p.get("protocol", "openai")
+
+
+@app.get("/api/providers/presets")
+def providers_presets():
+    return providers.PRESETS
+
+
+@app.post("/api/providers/models")
+def providers_models(body: dict):
+    base, key, proto = _prov_args(body or {})
+    try:
+        return providers.list_models(base, key, proto)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/providers/check")
+def providers_check(body: dict):
+    body = body or {}
+    if body.get("role"):   # 检测某个默认模型
+        r = providers.resolve(config.load_config(), body["role"])
+        if not r:
+            raise HTTPException(400, "还没有选择这个默认模型，或它所在的服务商已关闭")
+        base, key, proto, model = r["base_url"], r["api_key"], r["protocol"], r["model"]
+    else:
+        base, key, proto = _prov_args(body)
+        model = body.get("model", "")
+    try:
+        res = providers.check(base, key, proto, model, body.get("kind", ""))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e))
+    log_event("provider_check", model=model or None, ok=True)
+    return res
+
+
 @app.put("/api/settings")
 def put_settings(patch: dict):
     patch = dict(patch or {})
@@ -609,7 +666,7 @@ def put_settings(patch: dict):
     before = semantic.active(config.load_config())
     config.update_config(patch)
     log_event("settings_update", keys=sorted(patch.keys()))
-    if "embed" in patch or "memory" in patch:   # 换了向量档位 / 接口：重新加载并在后台补齐
+    if any(k in patch for k in ("embed", "memory", "defaults", "providers")):   # 换了向量档位 / 接口：重新加载并在后台补齐
         semantic.reset()
         after = semantic.active(config.load_config())
         if after != before:
@@ -1169,6 +1226,11 @@ def voice_library_delete(key: str, request: Request):
 
 
 # ---------------- 静态面板 ----------------
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(config.WEB_DIR / "favicon.ico")
+
+
 @app.get("/")
 def index():
     return FileResponse(config.WEB_DIR / "index.html")

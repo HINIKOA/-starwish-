@@ -1,4 +1,4 @@
-"""星魂 SoulStar · 宇宙之眼测试。
+"""星愿 StarWish · 宇宙之眼测试。
 
 用法：python tests/eye_test.py
 在临时灵魂包里启动真实服务器 + 模拟上游（OpenAI 兼容 / Anthropic 兼容 / 转写），验证：
@@ -111,9 +111,9 @@ def sse(c, body, headers=None):
 
 
 def main():
-    tmp = Path(tempfile.mkdtemp(prefix="soulstar-eye-"))
+    tmp = Path(tempfile.mkdtemp(prefix="starwish-eye-"))
     soul = tmp / "soul"
-    env = {**os.environ, "SOULSTAR_SOUL_DIR": str(soul), "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "STARWISH_SOUL_DIR": str(soul), "PYTHONIOENCODING": "utf-8"}
     up, port = free_port(), free_port()
     mock = start_mock(up)
     srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
@@ -192,7 +192,7 @@ def main():
         check("节奏设为「不主动说话」时不吐槽", d and d["skipped"])
         c.put("/api/settings", json={"eye": {"pace": "normal"}})
         from app.eye import session as es
-        os.environ["SOULSTAR_SOUL_DIR"] = str(soul)
+        os.environ["STARWISH_SOUL_DIR"] = str(soul)
         check("限速规则：上一句越长等越久", es.PACE_GAP["calm"] > es.PACE_GAP["normal"] > es.PACE_GAP["chatty"])
         used = c.get("/api/eye/status").json()["usage"]["requests"]
         c.put("/api/settings", json={"eye": {"daily_max_requests": used}})
@@ -288,8 +288,8 @@ def main():
         print("== 仅主人")
         c.put("/api/settings", json={"core": {"owner_token": "owner-secret-xyz"}})
         check("设了主人令牌后，不带令牌访问被拒（403）", c.get("/api/eye/status").status_code == 403)
-        check("带主人令牌可以访问", c.get("/api/eye/status", headers={"x-soulstar-owner": "owner-secret-xyz"}).status_code == 200)
-        c.put("/api/settings", json={"core": {"owner_token": ""}}, headers={"x-soulstar-owner": "owner-secret-xyz"})
+        check("带主人令牌可以访问", c.get("/api/eye/status", headers={"x-starwish-owner": "owner-secret-xyz"}).status_code == 200)
+        c.put("/api/settings", json={"core": {"owner_token": ""}}, headers={"x-starwish-owner": "owner-secret-xyz"})
         c.put("/api/settings", json={"eye": {"enabled": False}})
         check("设置里关闭宇宙之眼后接口拒绝", c.get("/api/eye/status").status_code == 403)
         c.put("/api/settings", json={"eye": {"enabled": True}})

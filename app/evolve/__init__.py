@@ -1,4 +1,4 @@
-"""星魂 · 自进化模块（参考 Hermes Agent 的 Skill 自学习与自修复架构）。
+"""星愿 · 自进化模块（参考 Hermes Agent 的 Skill 自学习与自修复架构）。
 
   skills.py    技能库（SKILL.md，兼容 Hermes / agentskills.io）：create / patch / edit / archive / restore / 文件 / 历史 / 回滚
   fuzzy.py     热补丁模糊匹配（精确 → 去缩进 → 压缩空白 → 标点归一 → 首尾锚点）

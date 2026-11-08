@@ -1,9 +1,9 @@
-"""星魂 SoulStar · 宇宙之声测试。
+"""星愿 StarWish · 宇宙之声测试。
 
 用法：python tests/voice_test.py
 单元部分在进程内跑（音高、男女、标记解析、登记簿匹配 / 学习 / 重新聚类 / 投票确认 / 声纹库）；
 接口部分启动真实服务器（假声纹后端：纯音频率即身份）+ 模拟上游（转写 / 视觉模型 / LLM / 模型下载）。
-如果本机已装 sherpa-onnx 且有真实模型（环境变量 SOULSTAR_REAL_VOICE_DIR 指向的目录，含 campplus.onnx / model.int8.onnx / four.wav），再用真实四人对话录音跑一遍分人。
+如果本机已装 sherpa-onnx 且有真实模型（环境变量 STARWISH_REAL_VOICE_DIR 指向的目录，含 campplus.onnx / model.int8.onnx / four.wav），再用真实四人对话录音跑一遍分人。
 """
 import io
 import json
@@ -24,9 +24,9 @@ sys.path.insert(0, str(ROOT))
 for _k in ("NO_PROXY", "no_proxy"):
     os.environ[_k] = ",".join(x for x in [os.environ.get(_k, ""), "127.0.0.1", "localhost"] if x)
 
-TMP = Path(tempfile.mkdtemp(prefix="soulstar-voice-"))
-os.environ["SOULSTAR_SOUL_DIR"] = str(TMP / "unit-soul")
-os.environ["SOULSTAR_MODELS_DIR"] = str(TMP / "unit-models")
+TMP = Path(tempfile.mkdtemp(prefix="starwish-voice-"))
+os.environ["STARWISH_SOUL_DIR"] = str(TMP / "unit-soul")
+os.environ["STARWISH_MODELS_DIR"] = str(TMP / "unit-models")
 
 import httpx  # noqa: E402
 import numpy as np  # noqa: E402
@@ -96,7 +96,7 @@ def unit():
     print("== 登记簿：匹配、学习、重新聚类")
     fb = be.FakeBackend()
     v = {"match_threshold": 0.5, "min_learn_sec": 1.5, "merge_threshold": 0.65, "auto_accept_votes": 2}
-    os.environ["SOULSTAR_SOUL_DIR"] = str(TMP / "unit-soul")
+    os.environ["STARWISH_SOUL_DIR"] = str(TMP / "unit-soul")
     reg = rg.Registry.load("aaaaaa000001", "星际穿越 第1集")
     a, _, n1 = reg.match(fb.embed(tone(120, 2)), 2.0, 120.0, v)
     b, _, n2 = reg.match(fb.embed(tone(230, 2)), 2.0, 230.0, v)
@@ -155,8 +155,8 @@ def unit():
     print("== 插件安装状态")
     st = md.status()
     check("未下载时提示需要的大小（不含已装依赖约 35MB 模型）", (not st["ready"]) and st["need_mb"] >= 34, st["need_mb"])
-    check("模型放在程序目录 models/voice（测试时为临时目录）", st["models_dir"].endswith("voice") and not st["models_dir"].startswith(os.environ["SOULSTAR_SOUL_DIR"]))
-    os.environ.pop("SOULSTAR_VOICE_BACKEND", None)
+    check("模型放在程序目录 models/voice（测试时为临时目录）", st["models_dir"].endswith("voice") and not st["models_dir"].startswith(os.environ["STARWISH_SOUL_DIR"]))
+    os.environ.pop("STARWISH_VOICE_BACKEND", None)
     check("没装好时真实后端给出明确提示", _raises(lambda: be.get({"backend": "sherpa"}), be.BackendError))
     check("假后端只要 numpy", md.ready("fake"))
 
@@ -261,8 +261,8 @@ def api_tests():
     up, port = free_port(), free_port()
     mock = start_mock(up)
     U, B = f"http://127.0.0.1:{up}", f"http://127.0.0.1:{port}"
-    env = {**os.environ, "SOULSTAR_SOUL_DIR": str(soul), "SOULSTAR_MODELS_DIR": str(mdir), "SOULSTAR_VOICE_BACKEND": "fake",
-           "SOULSTAR_VOICE_MODEL_BASE": U + "/rel", "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "STARWISH_SOUL_DIR": str(soul), "STARWISH_MODELS_DIR": str(mdir), "STARWISH_VOICE_BACKEND": "fake",
+           "STARWISH_VOICE_MODEL_BASE": U + "/rel", "PYTHONIOENCODING": "utf-8"}
     srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
                            env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     c = httpx.Client(base_url=B, timeout=60)
@@ -395,7 +395,7 @@ def api_tests():
         check("空音频 400", c.post(f"/api/voice/session/{S2['id']}/audio", content=b"").status_code == 400)
         c.put("/api/settings", json={"core": {"owner_token": "owner-xyz"}})
         check("非主人不能用宇宙之声（403）", c.get("/api/voice/status").status_code == 403)
-        c.put("/api/settings", json={"core": {"owner_token": ""}}, headers={"x-soulstar-owner": "owner-xyz"})
+        c.put("/api/settings", json={"core": {"owner_token": ""}}, headers={"x-starwish-owner": "owner-xyz"})
         ev_log = c.get("/api/events?limit=500").json()
         check("事件日志记录新说话人 / 认名字 / 合并", all(any(x.get("type") == t for x in ev_log) for t in ("voice_new_speaker", "voice_name", "voice_merge")))
     finally:
@@ -408,7 +408,7 @@ def api_tests():
 
 # ======================= 真实模型（可选） =======================
 def real_models():
-    ref = Path(os.environ.get("SOULSTAR_REAL_VOICE_DIR") or "/workspace/work/voice-real")
+    ref = Path(os.environ.get("STARWISH_REAL_VOICE_DIR") or "/workspace/work/voice-real")
     emb, segtar, wav = ref / "campplus.onnx", ref / "model.int8.onnx", ref / "four.wav"
     try:
         import sherpa_onnx  # noqa: F401
@@ -425,8 +425,8 @@ def real_models():
     d.mkdir(parents=True)
     shutil.copy(emb, d / md.MODELS["embedding"]["file"])
     shutil.copy(segtar, d / md.MODELS["segmentation"]["file"])
-    os.environ["SOULSTAR_MODELS_DIR"] = str(TMP / "real-models")
-    os.environ.pop("SOULSTAR_VOICE_BACKEND", None)
+    os.environ["STARWISH_MODELS_DIR"] = str(TMP / "real-models")
+    os.environ.pop("STARWISH_VOICE_BACKEND", None)
     v = {"backend": "sherpa", "match_threshold": 0.5, "merge_threshold": 0.65, "min_learn_sec": 1.5}
     b = be.get(v)
     x, sr = audio.wav_to_float(wav.read_bytes())

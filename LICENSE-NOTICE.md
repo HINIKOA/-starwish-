@@ -2,14 +2,14 @@
 
 ## 来源
 
-星魂 SoulStar 的设计灵感、档案格式（`记忆卡.md` 八章结构、`日记/YYYY-MM-DD.md`、`原始对话/YYYY-MM-DD.txt`）
+星愿 StarWish 的设计灵感、档案格式（`记忆卡.md` 八章结构、`日记/YYYY-MM-DD.md`、`原始对话/YYYY-MM-DD.txt`）
 以及「一条记忆一颗星、越新越亮、老星只变暗不消失」的星图理念，来自：
 
 > **星汐 · dsh-xingxi**
 > 原仓库：<https://github.com/Yuuyuko-uu/dsh-xingxi>
 > 原作者：**Yuuyuko-uu**
 
-星魂是用 Python 独立重写的程序，**没有复制**星汐的 JavaScript 源代码；开发时阅读了星汐的 `README.md`、`index.js`
+星愿是用 Python 独立重写的程序，**没有复制**星汐的 JavaScript 源代码；开发时阅读了星汐的 `README.md`、`index.js`
 以理解其档案格式与星图设计，从而实现兼容导入。
 
 ## 相对星汐的改动

@@ -20,7 +20,7 @@ class BackendError(RuntimeError):
 
 
 def name(vcfg: dict) -> str:
-    return os.environ.get("SOULSTAR_VOICE_BACKEND") or vcfg.get("backend") or "sherpa"
+    return os.environ.get("STARWISH_VOICE_BACKEND") or vcfg.get("backend") or "sherpa"
 
 
 def get(vcfg: dict):

@@ -1,7 +1,9 @@
-# 星魂 SoulStar · 可携带的本地 AI 记忆库
+# 星愿记忆 StarWish · 可携带的本地 AI 记忆库
+
+> 原名「星魂」，自 v0.8.0 起更名为「星愿记忆」。
 
 > **致谢 / 来源声明**：本项目的设计灵感与档案格式来自 **星汐 dsh-xingxi**（<https://github.com/Yuuyuko-uu/dsh-xingxi>，原作者 **Yuuyuko-uu**）。
-> 星魂是独立重写的 Python 程序，没有复制星汐的源代码；它借用了星汐的「记忆卡八章 + 日记 + 原始对话」档案结构、
+> 星愿是独立重写的 Python 程序，没有复制星汐的源代码；它借用了星汐的「记忆卡八章 + 日记 + 原始对话」档案结构、
 > 「一条记忆一颗星、越新越亮、老星只变暗不消失」的星图理念，并能直接导入星汐档案。
 > 相对星汐的改动：独立运行（不依赖 DSH）、SQLite + 中文全文检索、恒定核心记忆与提案审批、按 token 预算分层召回、
 > MCP 服务器、OpenAI 兼容代理、LLM 自动整理、WebDAV 加密备份、3D 星图面板。
@@ -12,11 +14,11 @@
 ![使用中长出的记忆星与融合星](docs/screenshot-map-grown.png)
 ![宇宙之眼](docs/screenshot-eye.png)
 
-星魂把「AI 的记忆」做成一个**放在 U 盘 / 网盘里的文件夹**：换电脑、换模型、换客户端都不丢。
+星愿把「AI 的记忆」做成一个**放在 U 盘 / 网盘里的文件夹**：换电脑、换模型、换客户端都不丢。
 这个文件夹里的 `soul/`（灵魂包）就是 AI 的灵魂——模型只是来来去去的身体。
 
 - **核心记忆（独立模块）**：三段恒定内容（AI身份与名字 / 主人是谁及称呼 / 主人的喜好），每轮都注入，只占几十个 token。**永远不会被自动改写**，但**主人一句话就能改**：面板专属页面、任何 AI 客户端里的 `/核心 …` 指令或「记住，以后叫我X」、MCP `update_core`、REST `/api/core/update`。每次修改都有版本号、前后对比与来源，可撤销、可回到任意版本。
-- **技能自进化（参考 Hermes Agent）**：技能 = AI 的操作手册（怎么做某件事）。会用工具的 AI 做完复杂任务后自己存成技能、发现过时立即热补丁；不会用工具的客户端由星魂后台巡检回看对话，自动沉淀与修补。AI 自建技能过安全扫描，危险的交主人批准；全部可追溯、可回滚，永不硬删除。
+- **技能自进化（参考 Hermes Agent）**：技能 = AI 的操作手册（怎么做某件事）。会用工具的 AI 做完复杂任务后自己存成技能、发现过时立即热补丁；不会用工具的客户端由星愿后台巡检回看对话，自动沉淀与修补。AI 自建技能过安全扫描，危险的交主人批准；全部可追溯、可回滚，永不硬删除。
 - **宇宙之眼（一起看）**：顶栏「👁 宇宙之眼」，让 AI 看你的屏幕、窗口、标签页或摄像头。浏览器在本机挑关键帧，你一开口或打字就立刻带上最新几帧去问，切场景时它会按节奏主动说一句；图片只进当次请求、历史只留文字，看两小时也不会越看越贵；结束后整场观看沉淀成一颗星。支持任意 OpenAI / Anthropic 兼容识图模型，并预留了千问 Qwen3.8-Omni-Flash 视频接口（填 Key 即用）。
 - **星星**：其余所有记忆。每条一颗星，新的亮、旧的暗，被想起会重新变亮；永不硬删除，所有变化写进只追加的事件日志。
 - **省 token 召回**：先看几十 token 的索引，再按预算（默认 600 token）取摘要，需要时才取全文。
@@ -24,31 +26,38 @@
 
 ---
 
-## 一、快速开始（Windows + U 盘）
+## 一、快速开始（Windows 免安装版）
 
-1. 电脑上装好 **Python 3.10 或更新版本**（<https://www.python.org/downloads/>，安装时勾选 *Add Python to PATH*）。
-2. 把整个 `soulstar` 文件夹复制到 U 盘，例如 `E:\soulstar\`。
-3. 双击 **`start.bat`**。
-   - 第一次会在文件夹里创建 `.venv` 并安装依赖（需要联网，约 1~3 分钟）。
-   - 之后会自动打开浏览器：<http://127.0.0.1:7860/>
-4. 在面板右上角点金色的「✦ 核心记忆」进入核心记忆模块（也可直接打开 <http://127.0.0.1:7860/core>），填好三段内容。
-5. 在「设置」里填上游大模型的 Base URL 和 API Key（例如 DeepSeek），就可以让客户端连上星魂了。
+1. 解压完整包，把整个 `星愿记忆` 文件夹放到电脑或 U 盘，例如 `E:\星愿记忆\`。
+2. 双击 **`星愿记忆.exe`**。不需要装 Python，也不用联网装依赖——运行环境（`runtime/`）、全部依赖、内置向量模型和声纹模型都已经在文件夹里。
+   - 打开的是一个独立的桌面窗口（用系统自带的 Edge WebView2），**没有黑色命令窗口**。
+   - **关掉窗口就是退出软件**，后台服务会一起停止，不会留在任务管理器里。
+   - 万一电脑缺 WebView2，会改用 Edge / Chrome 的「应用窗口」；都没有时用默认浏览器打开，页面全部关闭 1 分钟后自动退出。
+   - 已经开着一个星愿时再双击，只会再开一个窗口，不会起第二份服务；7860 端口被别的程序占了会自动换端口。
+3. 点右上角「设置」（再点一次关闭）→「模型服务」→「添加服务商」，选一家、粘贴 API Key、点「检测」，模型列表会自动同步，默认模型也会顺手选好。
+4. 点金色「✦ 核心记忆」填好三段内容。
+5. 聊天客户端把 API 地址改成 `http://127.0.0.1:7860/v1`，记忆就会自动注入。
 
-> 换到另一台电脑：直接插上 U 盘双击 `start.bat`。`.venv` 绑定了原电脑的 Python 路径，脚本检测到失效会自动重建，**灵魂包 `soul/` 不受影响**。
-> macOS / Linux：运行 `./start.sh`。
-> 也可以把文件夹放进坚果云、OneDrive、iCloud 等同步目录；**注意不要在两台电脑上同时运行同一份**（SQLite 文件同时被两端写入可能冲突），同时使用请用 WebDAV 备份/恢复来同步。
+> 运行日志在 `soul/logs/desktop.log`。换电脑直接拷整个文件夹即可，`soul/`（灵魂包）就是全部记忆。
+> macOS / Linux：`./start.sh`（首次自动建 `.venv` 装依赖）；或 `python desktop.py` 以桌面窗口运行，`python run.py` 以浏览器方式运行。
+> 不要在两台电脑上同时运行同一份文件夹，同时使用请用 WebDAV 备份 / 恢复同步。
 
-命令行参数：`python run.py --port 7860 --host 127.0.0.1 --no-browser`
+命令行参数（开发用）：`python run.py --port 7860 --host 127.0.0.1 --no-browser`
 
 ---
 
 ## 二、文件夹结构
 
 ```
-soulstar/
-├── start.bat / start.sh      一键启动（首次自动建 .venv、装依赖、打开浏览器）
-├── mcp.bat / mcp.sh          以 MCP stdio 方式启动（一般由客户端调用，不用手动点）
-├── run.py                    启动器
+starwish/
+├── 星愿记忆.exe              Windows 启动器（免安装版里才有；无命令窗口，关窗即退出）
+├── runtime/                  内置 Python 3.12 + 全部依赖（免安装版里才有）
+├── desktop.py                桌面版入口：后台服务 + 桌面窗口，关窗即停服务
+├── MCP接入.bat / mcp.sh      以 MCP stdio 方式启动（一般由客户端调用，不用手动点）
+├── start.sh                  macOS / Linux 启动
+├── run.py                    浏览器方式启动（开发用）
+├── assets/                   软件图标（starwish.ico / icon-1024.png）
+├── tools/build_windows.py    打出 Windows 免安装版（tools/launcher/ 是 exe 启动器源码）
 ├── mcp_server.py             MCP 服务器（官方 mcp SDK，缺失时用内置极简实现）
 ├── requirements.txt
 ├── app/
@@ -97,7 +106,7 @@ soulstar/
 
 ## 三、各客户端怎么接入
 
-星魂启动后提供三种入口，可以同时使用：
+星愿启动后提供三种入口，可以同时使用：
 
 | 入口 | 地址 / 命令 | 适合 |
 |---|---|---|
@@ -105,7 +114,7 @@ soulstar/
 | MCP（stdio） | `python mcp_server.py` | Claude Desktop、Cursor、Cherry Studio、Hermes Agent 等支持 MCP 的客户端，模型按需调用记忆工具 |
 | REST API | `http://127.0.0.1:7860/api/...` | 自己写脚本、其他 Agent 框架 |
 
-下面路径以 U 盘 `E:\soulstar` 为例，请换成你的实际路径。Windows 的 JSON 里反斜杠要写成 `\\`。
+下面路径以 U 盘 `E:\星愿记忆` 为例，请换成你的实际路径。Windows 的 JSON 里反斜杠要写成 `\\`。
 
 ### 1. Claude Desktop（MCP）
 
@@ -114,9 +123,9 @@ soulstar/
 ```json
 {
   "mcpServers": {
-    "soulstar": {
-      "command": "E:\\soulstar\\.venv\\Scripts\\python.exe",
-      "args": ["E:\\soulstar\\mcp_server.py"]
+    "starwish": {
+      "command": "E:\\星愿记忆\\runtime\\python.exe",
+      "args": ["E:\\星愿记忆\\mcp_server.py"]
     }
   }
 }
@@ -135,9 +144,9 @@ soulstar/
 ```json
 {
   "mcpServers": {
-    "soulstar": {
-      "command": "E:\\soulstar\\.venv\\Scripts\\python.exe",
-      "args": ["E:\\soulstar\\mcp_server.py"]
+    "starwish": {
+      "command": "E:\\星愿记忆\\runtime\\python.exe",
+      "args": ["E:\\星愿记忆\\mcp_server.py"]
     }
   }
 }
@@ -147,8 +156,8 @@ soulstar/
 
 - **代理方式（推荐，全自动注入）**：设置 → 模型服务 → 添加提供商，类型选 *OpenAI*；
   API 地址填 `http://127.0.0.1:7860`（部分版本需要填到 `http://127.0.0.1:7860/v1`），
-  API 密钥填星魂设置里的「代理密钥」（没设置就随便填一个，如 `soulstar`），模型名填上游的模型名（如 `deepseek-chat`）。
-- **MCP 方式**：设置 → MCP 服务器 → 添加，类型 *stdio*，命令填 `E:\soulstar\.venv\Scripts\python.exe`，参数填 `E:\soulstar\mcp_server.py`。
+  API 密钥填星愿设置里的「代理密钥」（没设置就随便填一个，如 `starwish`），模型名填上游的模型名（如 `deepseek-chat`）。
+- **MCP 方式**：设置 → MCP 服务器 → 添加，类型 *stdio*，命令填 `E:\星愿记忆\runtime\python.exe`，参数填 `E:\星愿记忆\mcp_server.py`。
 
 ### 4. Hermes Agent（Nous Research）
 
@@ -157,11 +166,11 @@ soulstar/
 ```yaml
 # 方式一：MCP 工具
 mcp_servers:
-  soulstar:
-    command: "E:/soulstar/.venv/Scripts/python.exe"
-    args: ["E:/soulstar/mcp_server.py"]
+  starwish:
+    command: "E:/星愿记忆/runtime/python.exe"
+    args: ["E:/星愿记忆/mcp_server.py"]
 
-# 方式二：把星魂当作自定义 OpenAI 兼容端点（自动注入记忆）
+# 方式二：把星愿当作自定义 OpenAI 兼容端点（自动注入记忆）
 model:
   provider: custom
   base_url: http://127.0.0.1:7860/v1
@@ -174,21 +183,21 @@ model:
 凡是能填「自定义 OpenAI API 地址」的客户端：
 
 - API 地址 / Base URL：`http://127.0.0.1:7860/v1`
-- API Key：星魂的「代理密钥」（未设置则任意填写）
+- API Key：星愿的「代理密钥」（未设置则任意填写）
 - 模型：上游支持的模型名
 
-星魂收到请求后：取最后一条用户消息 → 召回相关星星（预算内）→ 把核心记忆 + 星星摘要合并进 system 提示 → 转发给上游（支持流式）→（可选）把这轮对话写入 `soul/archive/` 供日后整理。
-响应头 `x-soulstar-recalled` 会列出本轮用到的星星编号。请求头加 `x-soulstar-inject: 0` 可以临时关闭注入。
+星愿收到请求后：取最后一条用户消息 → 召回相关星星（预算内）→ 把核心记忆 + 星星摘要合并进 system 提示 → 转发给上游（支持流式）→（可选）把这轮对话写入 `soul/archive/` 供日后整理。
+响应头 `x-starwish-recalled` 会列出本轮用到的星星编号。请求头加 `x-starwish-inject: 0` 可以临时关闭注入。
 
-### 6. 上游大模型配置示例（面板 → 设置）
+### 6. 模型服务（面板 → 设置 → 模型服务）
 
-| 上游 | Base URL | 模型示例 |
-|---|---|---|
-| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
-| Claude（Anthropic 的 OpenAI 兼容端点） | `https://api.anthropic.com/v1` | `claude-sonnet-4-5` 等 |
-| 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5:7b` |
-| 任意 OpenAI 兼容服务 | 服务商提供的地址 | — |
+设置是一个独立窗口，点顶栏「设置」打开、再点一次关闭（可拖动、可拉大小、Esc 关闭）。
+
+1. **添加服务商**：内置 DeepSeek、阿里云百炼（千问）、千问 MaaS、智谱、Kimi、硅基流动、火山方舟、OpenAI、Anthropic、Gemini、OpenRouter、Ollama 等预设，地址已经填好；其他的选「自定义」。
+2. **填 API 密钥 → 点「检测」**：验证 Key 和地址；地址少了 `/v1` 会自动补上；Key 不对、没权限、地址不通都会直接说明原因。检测通过后自动同步模型。
+3. **同步模型**：从服务商拉取全部可用模型，自动分成「对话 / 识图 / 向量 / 其他」；也可以点「＋」手动添加。每个模型都有「检测」按键，真的发一句话（向量模型发一条 embeddings）看能不能用。
+4. **默认模型**：对话模型（代理转发）、整理模型（可在另一家，选便宜快的）、识图模型（宇宙之眼帧模式）、向量模型（接口档）都从下拉里选，不用手打模型名；每项也能单独检测。
+5. Key 读取时只显示后 4 位；开启「安全 → 主密码」后服务商 Key 也会加密落盘。旧版只填了「上游大模型」的设置会自动显示成一个服务商。
 
 ### 7. REST API 速查
 
@@ -235,7 +244,7 @@ POST /api/import/path | /api/import/upload
 
 ## 四、为什么省 token
 
-传统做法是每轮把整份记忆塞进上下文，记忆越多越贵、越慢、越容易被截断。星魂分三层：
+传统做法是每轮把整份记忆塞进上下文，记忆越多越贵、越慢、越容易被截断。星愿分三层：
 
 | 层 | 内容 | 典型开销 |
 |---|---|---|
@@ -278,7 +287,7 @@ jieba + FTS5 只认字面：记忆里写「羽绒服」，搜「保暖外套」�
 | ② 一键部署 | BGE-M3 int8 ONNX | 约 590MB，1024 维 | 中英等 100+ 语言、长文本更强；默认不装，点「一键部署 BGE-M3」下载，占内存约 1GB |
 | ③ 接口 | Qwen3-Embedding（阿里云百炼 `text-embedding-v4`） | 0 | 单独填 Key；默认地址 `https://dashscope.aliyuncs.com/compatible-mode/v1`，维度默认 1024、一次 10 条；也可填任何 OpenAI 兼容 `/embeddings`（如硅基流动 `Qwen/Qwen3-Embedding-8B`）。按量计费，记忆内容会发给接口方 |
 
-- **运行库**：onnxruntime + tokenizers + numpy（Windows 上合计约 31MB），已写进 `requirements.txt`，`start.bat` 会自动装；不用 PyTorch。
+- **运行库**：onnxruntime + tokenizers + numpy（Windows 上合计约 31MB），已写进 `requirements.txt`，免安装版已预装；不用 PyTorch。
 - **自动退回**：选的档位没准备好（M3 没部署、Key 没填、接口出错）时自动用内置模型；内置也不在时只用字面检索，什么都不会坏。
 - **多模型并存**：每颗星的向量按模型分开存，切换档位不丢旧向量，切回来立刻可用；新档位的向量在后台补齐（接口档存星时不联网，不拖慢存星）。改了星的内容会重算向量。
 - **门槛**：语义这一路只留「够像」且「和最像的那颗差不多」的星，毫不相关的查询不会被硬凑结果；门槛可在 `embed.min_sim` 调。
@@ -305,13 +314,13 @@ jieba + FTS5 只认字面：记忆里写「羽绒服」，搜「保暖外套」�
 
 ![核心记忆模块](docs/screenshot-core.png)
 
-核心记忆是星魂的灵魂。原则只有两条：**自动的永远改不了它；主人一句话就能改它。**
+核心记忆是星愿的灵魂。原则只有两条：**自动的永远改不了它；主人一句话就能改它。**
 
 | 谁 | 能做什么 |
 |---|---|
 | 后台 LLM 整理、导入、AI 自己的推测（`propose_core_change`） | **只能提提案**，等主人批准 |
 | 主人在面板「核心记忆」页面编辑 | 直接生效 |
-| 主人在任何接入星魂代理的客户端里说 `/核心 …` 或「记住，以后叫我X」 | 直接生效（代理密钥 = 主人身份；没设代理密钥时只信任本机） |
+| 主人在任何接入星愿代理的客户端里说 `/核心 …` 或「记住，以后叫我X」 | 直接生效（代理密钥 = 主人身份；没设代理密钥时只信任本机） |
 | MCP `update_core`（AI 必须附上主人原话） | 直接生效；没附原话 → 转提案 |
 | REST `/api/core/update` | 带主人令牌（或本机且未设令牌）→ 直接生效；否则 → 转提案 |
 
@@ -325,10 +334,10 @@ jieba + FTS5 只认字面：记忆里写「羽绒服」，搜「保暖外套」�
 
 **锁（冻结）**：上锁后任何直接修改与回滚都会被拒绝；远程发来的主人指令不会丢，会自动转成提案，解锁后批准即可。
 
-**对话指令速查**（在 ChatGPT 类客户端 / DeepSeek / Hermes 等任何走星魂代理的地方都能用）：
+**对话指令速查**（在 ChatGPT 类客户端 / DeepSeek / Hermes 等任何走星愿代理的地方都能用）：
 
 ```
-/核心                         查看当前核心记忆（星魂直接回复，不消耗模型 token）
+/核心                         查看当前核心记忆（星愿直接回复，不消耗模型 token）
 /核心 主人 九天，称呼天天       替换整段（分区：身份 / 主人 / 喜好）
 /核心 喜好 + 爱喝冰美式         追加一行
 /核心 称呼 = 天天              只改称呼（「名字 = 小星」改 AI 名字；会就地替换原来的写法）
@@ -343,9 +352,9 @@ jieba + FTS5 只认字面：记忆里写「羽绒服」，搜「保暖外套」�
 
 ## 五·附二、技能自进化（参考 Hermes Agent）
 
-> 设计参考 Nous Research 的 [hermes-agent](https://github.com/nousresearch/hermes-agent)（MIT）以及 wbzhang233 的[《HermesAgent 自进化机制》](https://github.com/wbzhang233/VibeBloging)源码解析；星魂是独立的 Python 实现，未复制其代码。
+> 设计参考 Nous Research 的 [hermes-agent](https://github.com/nousresearch/hermes-agent)（MIT）以及 wbzhang233 的[《HermesAgent 自进化机制》](https://github.com/wbzhang233/VibeBloging)源码解析；星愿是独立的 Python 实现，未复制其代码。
 
-星魂把记忆分成三种：**核心记忆**（我是谁，主人亲手定）、**星星**（发生过什么）、**技能**（怎么做某件事，AI 自己写、自己修）。
+星愿把记忆分成三种：**核心记忆**（我是谁，主人亲手定）、**星星**（发生过什么）、**技能**（怎么做某件事，AI 自己写、自己修）。
 
 **技能格式**（与 Hermes / agentskills.io 兼容，可以直接把 Hermes 的技能文件夹拷进 `soul/skills/`）：
 
@@ -369,7 +378,7 @@ tags: [博客, 部署]
 | 引擎 | 谁 | 怎么触发 | 做什么 |
 |---|---|---|---|
 | 前台自觉 | 会用工具的 AI（Claude Desktop / Cursor / Hermes 等 MCP 客户端） | MCP 指令里的 SKILLS_GUIDANCE：复杂任务（5 步以上）做完、修好棘手错误、发现非显而易见的流程 | 调 `skill_manage(create)` 存成技能；用技能时发现过时 → 立即 `patch`。调用后巡检计数器归零 |
-| 后台巡检 | 星魂自己（用设置里的维护模型） | 代理每转发一轮计数 +1，**跨会话累积不重置**，达到阈值（默认 10）且期间没有前台保存 | 守护线程回看最近对话，按「试错 / 绕路 / 主人纠正」决定新建或修补技能；联合巡检顺便提取星星、提出核心提案（核心只提案） |
+| 后台巡检 | 星愿自己（用设置里的维护模型） | 代理每转发一轮计数 +1，**跨会话累积不重置**，达到阈值（默认 10）且期间没有前台保存 | 守护线程回看最近对话，按「试错 / 绕路 / 主人纠正」决定新建或修补技能；联合巡检顺便提取星星、提出核心提案（核心只提案） |
 
 **自修复：** 本轮注入过的技能、被差评（面板 👎、`/技能 差评 名字 原因`、MCP `skill_feedback`）的技能，会连同全文交给下一次巡检，优先用补丁修好。
 **热补丁模糊匹配：** 精确 → 去缩进 → 压缩空白 → 全半角标点归一 → 首尾锚点，AI 记不清原文也能补对；补丁会破坏 SKILL.md 结构时拒绝。
@@ -435,7 +444,7 @@ tags: [博客, 部署]
 
 **怎么认名字（三路线索，思路参考 CineSRD 2026 / 3D-Speaker 多模态分离，独立实现）：**
 1. **台词**：配了转写服务就逐句转写并标上说话人。「我叫库珀」直接提名；每攒 20 句，LLM 读带说话人的台词，从称呼推断名字（A 对 B 说「库珀，你得走了」→ B 可能叫库珀）。
-2. **画面**：你提问时，星魂把说话人表和「最近几秒谁在说话」一起交给视觉模型。它能从字幕、胸牌、别人喊名字或说话人的样子看出是谁，就在回答末尾写一行【认人】标记；这一行**不显示、不朗读**，只用来提名。**不加人脸模型，零体积。**
+2. **画面**：你提问时，星愿把说话人表和「最近几秒谁在说话」一起交给视觉模型。它能从字幕、胸牌、别人喊名字或说话人的样子看出是谁，就在回答末尾写一行【认人】标记；这一行**不显示、不朗读**，只用来提名。**不加人脸模型，零体积。**
 3. **声纹库**：确认过名字的人按片名 / 系列存起来（「第2集」「S01E03」不影响），下次看同一部或同系列，一开口就认出来。
 
 同一个名字被**两路线索（或两次）**提到就自动确认，否则显示「男1（可能是库珀）」。已确认的名字不会被自动线索改掉；名字已被别人确认时只记一票，不抢。主人可以在「片中的人」面板里**改名、✓ 确认、✗ 否决、⇄ 合并、重新聚类、让 AI 认人**。
@@ -455,7 +464,7 @@ tags: [博客, 部署]
 在设置里填好上游 API Key 后：
 
 - 「备份/整理 → 立即整理」或设定「LLM 整理」间隔小时数；
-- 星魂读取 `soul/archive/` 里**还没整理过**的对话，分块交给模型，提取值得长期记住的事实 → 生成星星（与近似旧星自动合并），
+- 星愿读取 `soul/archive/` 里**还没整理过**的对话，分块交给模型，提取值得长期记住的事实 → 生成星星（与近似旧星自动合并），
   并把关于身份 / 主人 / 喜好的稳定信息做成**提案**，等你在面板批准；
 - 整理进度记在 `state.json`，同一段对话不会被重复处理。
 
@@ -482,7 +491,7 @@ tags: [博客, 部署]
 
 ## 八、备份与同步
 
-- **本地快照**：`soul/snapshots/soulstar-时间.zip`，默认每 24 小时一次、保留 10 个；数据库用 SQLite 在线备份接口拷贝，保证一致。
+- **本地快照**：`soul/snapshots/starwish-时间.zip`，默认每 24 小时一次、保留 10 个；数据库用 SQLite 在线备份接口拷贝，保证一致。
 - **WebDAV**（坚果云、Nextcloud、群晖、InfiniCLOUD 等）：设置里填地址、账号、密码（坚果云请用「应用密码」）、远端目录、**备份口令**。
   - 有备份口令：快照用 PBKDF2(SHA-256, 39 万次) 派生密钥 + Fernet 加密后上传（`.zip.enc`）；
   - 没有口令：明文上传，面板会给出警告；
@@ -496,22 +505,21 @@ tags: [博客, 部署]
 
 - 服务默认只监听 `127.0.0.1`，局域网其他设备访问不到。如改成 `0.0.0.0`，请务必设置「代理密钥」，并注意面板本身没有登录密码。
 - API Key、WebDAV 密码、备份口令保存在 `soul/config.json`，**默认是明文**。U 盘丢失 = 密钥泄露。
-  建议在「设置 → 机密加密」里设置主密码：开启后这些字段用 PBKDF2 + Fernet 加密，每次启动需要在面板里解锁（或设置环境变量 `SOULSTAR_MASTER`）。
+  建议在「设置 → 机密加密」里设置主密码：开启后这些字段用 PBKDF2 + Fernet 加密，每次启动需要在面板里解锁（或设置环境变量 `STARWISH_MASTER`）。
 - 备份口令请牢记，忘了就无法解密云端备份。
 
 ---
 
-## 十、打包成单个程序（可选）
-
-不想在每台电脑上装 Python 时，可以用 PyInstaller 打包：
+## 十、打出 Windows 免安装版
 
 ```bash
-pip install pyinstaller
-pyinstaller --name SoulStar --onedir --add-data "web;web" --collect-all jieba --hidden-import uvicorn.logging --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.lifespan.on run.py
+# 可在 Linux 上交叉构建（需要 x86_64-w64-mingw32-gcc / windres），也可在 Windows 上用 MSYS2 构建
+python tools/build_windows.py            # 输出 dist/星愿记忆/
 ```
 
-（macOS / Linux 上 `--add-data` 用冒号：`"web:web"`。）打包后把 `dist/SoulStar/` 整个放到 U 盘即可，`soul/` 会创建在 exe 旁边。
-MCP 服务器可同样打包 `mcp_server.py`。另一种免安装方案是使用 Python 官方的 *embeddable* 版本放进文件夹。
+脚本会：下载 Python 官方 embeddable 3.12（64 位）放进 `runtime/`；按 Windows 平台下载全部依赖的 wheel 并直接解压预装（含 pywebview 桌面窗口、pythonnet、sherpa-onnx 声纹插件）；
+复制程序本体、内置向量模型 bge-small-zh；预先下载宇宙之声的声纹模型；用 `tools/launcher/launcher.c` 编译带图标的 `星愿记忆.exe`（`-mwindows` 无控制台，`pythonw` + `CREATE_NO_WINDOW` 启动 `desktop.py`）。
+只有 BGE-M3（约 590MB）仍是可选的一键部署。
 
 ---
 
@@ -524,6 +532,7 @@ python tests/smoke_test.py
 python tests/eye_test.py         # 宇宙之眼
 python tests/embed_test.py       # 向量模型（语义检索）
 python tests/fusion_test.py      # 星图与星辰融合
+python tests/desktop_test.py     # 改名 / 图标 / 桌面版关窗即停 / 免安装版依赖 / 设置窗口与模型服务
 python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-onnx 和真实模型时会多跑一项真实录音分人）
 ```
 

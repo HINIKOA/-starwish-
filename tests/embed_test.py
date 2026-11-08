@@ -1,4 +1,4 @@
-"""星魂 SoulStar · 向量模型（语义检索）测试。
+"""星愿 StarWish · 向量模型（语义检索）测试。
 
 用法：python tests/embed_test.py
 需要：onnxruntime + tokenizers + numpy，以及内置模型 models/embed/small/（完整包自带）。
@@ -20,11 +20,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-TMP = Path(tempfile.mkdtemp(prefix="soulstar-embed-"))
-os.environ["SOULSTAR_SOUL_DIR"] = str(TMP / "soul")
-os.environ["SOULSTAR_MODELS_DIR"] = str(TMP / "models")
+TMP = Path(tempfile.mkdtemp(prefix="starwish-embed-"))
+os.environ["STARWISH_SOUL_DIR"] = str(TMP / "soul")
+os.environ["STARWISH_MODELS_DIR"] = str(TMP / "models")
 (TMP / "soul").mkdir(parents=True)
-SRC_SMALL = Path(os.environ.get("SOULSTAR_SMALL_SRC") or ROOT / "models" / "embed" / "small")
+SRC_SMALL = Path(os.environ.get("STARWISH_SMALL_SRC") or ROOT / "models" / "embed" / "small")
 (TMP / "models" / "embed").mkdir(parents=True)
 shutil.copytree(SRC_SMALL, TMP / "models" / "embed" / "small")
 
@@ -190,7 +190,7 @@ def main():
     semantic.reset()
 
     print("== 接口与设置页")
-    os.environ["SOULSTAR_NO_EMBED_BOOT"] = "1"
+    os.environ["STARWISH_NO_EMBED_BOOT"] = "1"
     from fastapi.testclient import TestClient
     from app.server import app
     with TestClient(app) as c:
@@ -204,9 +204,9 @@ def main():
         check("测试接口", c.post("/api/embed/test").json().get("dim") == 64)
         c.put("/api/settings", json={"embed": {"provider": "small"}})
         check("统计里报当前向量档位", c.get("/api/stats").json().get("semantic_model") == "small")
-    js = (ROOT / "web" / "app.js").read_text("utf-8")
-    check("设置页有「向量模型」一块：三档 + 一键部署 + 测试接口", all(k in js for k in ("向量模型（语义检索）", "① 内置 bge-small-zh", "② BGE-M3", "③ Qwen3-Embedding", "一键部署 BGE-M3", "/api/embed/test")))
-    check("设置页有「视频交互模型」一块：引擎 / 帧模式 / 千问", all(k in js for k in ("视频交互模型（宇宙之眼）", "eye.engine", "eye.frame_model", "eye.qwen_api_key")))
+    js = (ROOT / "web" / "app.js").read_text("utf-8") + (ROOT / "web" / "settings.js").read_text("utf-8")
+    check("设置页有「向量模型」一块：三档 + 一键部署 + 测试接口", all(k in js for k in ("向量模型（语义检索）", "① 内置 bge-small-zh", "② BGE-M3", "③ 接口", "一键部署 BGE-M3", "/api/embed/test")))
+    check("设置页有「视频交互模型」一块：引擎 / 帧模式 / 千问", all(k in js for k in ("视频交互模型（宇宙之眼）", "eye.engine", "frame_model", "eye.qwen_api_key")))
     req = (ROOT / "requirements.txt").read_text("utf-8")
     check("requirements 里加了 onnxruntime / tokenizers / numpy", all(k in req for k in ("onnxruntime", "tokenizers", "numpy")))
 

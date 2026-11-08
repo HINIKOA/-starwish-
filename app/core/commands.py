@@ -131,7 +131,7 @@ def _parse_natural(text: str) -> dict | None:
 
 def _fmt_core() -> str:
     c = load_core()
-    lines = [f"【星魂·核心记忆】r{c['rev']}{' 🔒已上锁' if c.get('locked') else ''}"]
+    lines = [f"【星愿·核心记忆】r{c['rev']}{' 🔒已上锁' if c.get('locked') else ''}"]
     for k, t in SECTIONS.items():
         lines.append(f"▸{t}：{c['sections'][k]['content'].strip() or '（空）'}")
     return "\n".join(lines)
@@ -153,7 +153,7 @@ def _fmt_history(n: int = 5) -> str:
 def _describe(res: dict) -> str:
     if res.get("proposed"):
         ids = "、".join(f"#{p['id']}" for p in res.get("proposals", []))
-        return f"⚠ {res.get('reason')}：提案 {ids}，请到星魂面板「核心记忆」模块批准。"
+        return f"⚠ {res.get('reason')}：提案 {ids}，请到星愿面板「核心记忆」模块批准。"
     if not res.get("applied"):
         return "核心记忆没有变化（" + (res.get("reason") or "内容相同") + "）。"
     secs = "、".join(SECTIONS[s] for s in res["changed"])

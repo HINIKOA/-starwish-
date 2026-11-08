@@ -78,7 +78,7 @@ def sections_of(core: dict) -> dict:
 
 
 def render_md(core: dict) -> str:
-    lines = ["# 星魂 · 核心记忆", "",
+    lines = ["# 星愿 · 核心记忆", "",
              f"> 版本 r{core.get('rev', 0)}{' · 🔒已上锁' if core.get('locked') else ''}。"
              "本文件由 core.json 自动生成，请在面板「核心记忆」模块或用主人指令修改（直接改此文件不会生效）。", ""]
     for k, title in SECTIONS.items():
@@ -103,7 +103,7 @@ def core_text(core: dict | None = None) -> str:
             parts.append(f"▸{title}：{c}")
     if not parts:
         return ""
-    return "【星魂·核心记忆（恒定）】\n" + "\n".join(parts)
+    return "【星愿·核心记忆（恒定）】\n" + "\n".join(parts)
 
 
 def core_tokens() -> int:

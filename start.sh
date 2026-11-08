@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 星魂 SoulStar 启动脚本（macOS / Linux）。首次运行会在本文件夹内创建 .venv 并安装依赖。
+# 星愿记忆 启动脚本（macOS / Linux）。首次运行会在本文件夹内创建 .venv 并安装依赖。
 # 换电脑后若 .venv 失效（它绑定了原电脑的 Python 路径），会自动重建。
 set -e
 cd "$(dirname "$0")"

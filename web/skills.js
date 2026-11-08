@@ -1,4 +1,4 @@
-// 星魂 SoulStar —— 技能进化模块页面
+// 星愿 StarWish —— 技能进化模块页面
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -170,3 +170,6 @@ $$(".ctabs button").forEach((b) => (b.onclick = () => {
   const h = location.hash.slice(1);
   if (["pending", "log", "settings"].includes(h)) $(`.ctabs [data-tab="${h}"]`).click(); else renderLib();
 })();
+
+// 桌面版心跳：页面全部关闭后，后台服务才会自动退出（仅浏览器兜底模式用到）
+setInterval(() => fetch("/api/ping", { method: "POST" }).catch(() => {}), 15000); fetch("/api/ping", { method: "POST" }).catch(() => {});

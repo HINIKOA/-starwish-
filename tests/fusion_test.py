@@ -1,4 +1,4 @@
-"""星魂 SoulStar · 星图与星辰融合测试。
+"""星愿 StarWish · 星图与星辰融合测试。
 
 用法：python tests/fusion_test.py
 验证：旧灵魂包自动升级、一开始只有主核星辰、按时间区分大小亮度的数据、相似记忆找组、融合（朴素 / LLM）、
@@ -15,8 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-TMP = Path(tempfile.mkdtemp(prefix="soulstar-fuse-"))
-os.environ["SOULSTAR_SOUL_DIR"] = str(TMP / "soul")
+TMP = Path(tempfile.mkdtemp(prefix="starwish-fuse-"))
+os.environ["STARWISH_SOUL_DIR"] = str(TMP / "soul")
 (TMP / "soul").mkdir(parents=True)
 
 from smoke_test import check, RESULTS  # noqa: E402

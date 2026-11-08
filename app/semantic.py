@@ -18,7 +18,7 @@ import httpx
 from . import config
 from .embed import models as emodels
 
-log = logging.getLogger("soulstar.semantic")
+log = logging.getLogger("starwish.semantic")
 
 _engines: dict[str, object] = {}
 _lock = threading.RLock()

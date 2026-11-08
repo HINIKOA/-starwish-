@@ -39,7 +39,7 @@ _jobs: dict[str, dict] = {}
 
 
 def models_root() -> Path:
-    return Path(os.environ.get("SOULSTAR_MODELS_DIR") or (config.APP_DIR / "models")) / "embed"
+    return Path(os.environ.get("STARWISH_MODELS_DIR") or (config.APP_DIR / "models")) / "embed"
 
 
 def model_dir(kind: str) -> Path:
@@ -93,7 +93,7 @@ def local_status(kind: str) -> dict:
 
 
 def _urls(rel: str, ecfg: dict, repo: str) -> list[str]:
-    env = os.environ.get("SOULSTAR_EMBED_MODEL_BASE")
+    env = os.environ.get("STARWISH_EMBED_MODEL_BASE")
     if env:
         return [f"{env.rstrip('/')}/{repo}/resolve/main/{rel}"]
     bases = [ecfg.get("hf_base") or "https://huggingface.co"]
@@ -167,7 +167,7 @@ def _pip(ecfg: dict) -> None:
     if getattr(sys, "frozen", False):
         _job(name, state="error", error="打包版不能在线装 Python 依赖")
         return
-    cmd = os.environ.get("SOULSTAR_EMBED_PIP_CMD")
+    cmd = os.environ.get("STARWISH_EMBED_PIP_CMD")
     args = cmd.split() + missing if cmd else [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", *missing]
     if ecfg.get("pip_index") and not cmd:
         args += ["-i", ecfg["pip_index"]]

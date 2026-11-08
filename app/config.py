@@ -1,4 +1,4 @@
-"""星魂 SoulStar —— 路径与配置。
+"""星愿 StarWish —— 路径与配置。
 
 所有路径都相对于程序所在文件夹，整个文件夹可以放 U 盘 / 网盘同步目录。
 """
@@ -17,7 +17,7 @@ if getattr(sys, "frozen", False):  # PyInstaller 打包后
 else:
     APP_DIR = Path(__file__).resolve().parent.parent
 
-SOUL_DIR = Path(os.environ.get("SOULSTAR_SOUL_DIR") or (APP_DIR / "soul")).resolve()
+SOUL_DIR = Path(os.environ.get("STARWISH_SOUL_DIR") or (APP_DIR / "soul")).resolve()
 WEB_DIR = APP_DIR / "web"
 if not WEB_DIR.exists() and getattr(sys, "_MEIPASS", None):  # PyInstaller 把 web/ 打进包内
     WEB_DIR = Path(sys._MEIPASS) / "web"
@@ -42,6 +42,8 @@ DEFAULT_CONFIG = {
         "api_key": "",
         "model": "gpt-4o-mini",
         "maintenance_model": "",
+        "maint_base_url": "",       # 整理模型在另一个服务商时用（由「默认模型」自动填写）
+        "maint_api_key": "",
         "timeout": 120,
     },
     "proxy": {
@@ -89,7 +91,7 @@ DEFAULT_CONFIG = {
         "url": "",
         "user": "",
         "password": "",
-        "remote_dir": "soulstar",
+        "remote_dir": "starwish",
         "passphrase": "",
         "keep_versions": 10,
     },
@@ -176,6 +178,9 @@ DEFAULT_CONFIG = {
         "pip_index": "",            # pip 镜像（如 https://pypi.tuna.tsinghua.edu.cn/simple）
         "model_base_url": "",       # 自建模型镜像（留空 = sherpa-onnx 官方发布页）
     },
+    # —— 模型服务（v0.8.0）：服务商列表 + 默认模型；保存后自动映射到 llm / eye / embed ——
+    "providers": [],
+    "defaults": {"chat": "", "maintain": "", "vision": "", "embed": ""},
     "server": {"host": "127.0.0.1", "port": 7860, "open_browser": True},
     "secrets_encrypted": False,
     "secrets_salt": "",
@@ -191,10 +196,17 @@ SECRET_FIELDS = [
     ("eye", "qwen_api_key"),
     ("eye", "stt_api_key"),
     ("embed", "api_key"),
+    ("llm", "maint_api_key"),
 ]
 
+
+def _provider_keys(cfg: dict):
+    for p in cfg.get("providers") or []:
+        if isinstance(p, dict):
+            yield p
+
 _lock = threading.RLock()
-_master_passphrase: str | None = os.environ.get("SOULSTAR_MASTER") or None
+_master_passphrase: str | None = os.environ.get("STARWISH_MASTER") or None
 
 
 def ensure_dirs() -> None:
@@ -248,6 +260,10 @@ def _decrypt_all(cfg: dict, passphrase: str) -> dict:
         v = cfg.get(sec, {}).get(key, "")
         if isinstance(v, str) and v.startswith("enc:"):
             cfg[sec][key] = f.decrypt(v[4:].encode()).decode()
+    for p in _provider_keys(cfg):
+        v = p.get("api_key", "")
+        if isinstance(v, str) and v.startswith("enc:"):
+            p["api_key"] = f.decrypt(v[4:].encode()).decode()
     return cfg
 
 
@@ -257,6 +273,10 @@ def _encrypt_all(cfg: dict, passphrase: str) -> dict:
         v = cfg.get(sec, {}).get(key, "")
         if v and not str(v).startswith("enc:"):
             cfg[sec][key] = "enc:" + f.encrypt(str(v).encode()).decode()
+    for p in _provider_keys(cfg):
+        v = p.get("api_key", "")
+        if v and not str(v).startswith("enc:"):
+            p["api_key"] = "enc:" + f.encrypt(str(v).encode()).decode()
     return cfg
 
 
@@ -279,12 +299,49 @@ def load_config() -> dict:
     if cfg.get("secrets_encrypted"):
         if _master_passphrase:
             try:
-                return _decrypt_all(cfg, _master_passphrase)
+                return apply_providers(_decrypt_all(cfg, _master_passphrase))
             except Exception:
                 pass
         for sec, key in SECRET_FIELDS:
             if str(cfg[sec].get(key, "")).startswith("enc:"):
                 cfg[sec][key] = ""
+        for p in _provider_keys(cfg):
+            if str(p.get("api_key", "")).startswith("enc:"):
+                p["api_key"] = ""
+    return apply_providers(cfg)
+
+
+def _migrate_legacy(cfg: dict) -> None:
+    """旧版只填了 llm 的：在设置界面里显示成一个服务商（保存后才真正写入 providers）。"""
+    if not cfg.get("providers") and cfg["llm"].get("api_key") and cfg["llm"].get("base_url"):
+        cfg["providers"] = [{"id": "legacy", "name": "上游大模型（旧设置）", "preset": "custom", "protocol": "openai",
+                             "base_url": cfg["llm"]["base_url"], "api_key": cfg["llm"]["api_key"], "enabled": True,
+                             "models": [{"id": cfg["llm"]["model"], "kind": "chat"}] if cfg["llm"].get("model") else []}]
+        if cfg["llm"].get("model") and not cfg["defaults"].get("chat"):
+            cfg["defaults"]["chat"] = "legacy::" + cfg["llm"]["model"]
+
+
+def apply_providers(cfg: dict) -> dict:
+    """把「模型服务 → 默认模型」映射回各模块原来读取的字段；旧版只填了 llm 的，自动变成一个服务商。"""
+    from . import providers as pv
+
+    chat = pv.resolve(cfg, "chat")
+    if chat:
+        cfg["llm"].update(base_url=chat["base_url"], api_key=chat["api_key"], model=chat["model"])
+    mt = pv.resolve(cfg, "maintain")
+    if mt:
+        same = chat and mt["base_url"] == chat["base_url"] and mt["api_key"] == chat["api_key"]
+        cfg["llm"].update(maintenance_model=mt["model"], maint_base_url="" if same else mt["base_url"],
+                          maint_api_key="" if same else mt["api_key"])
+    elif cfg["defaults"].get("maintain") == "" and chat:
+        cfg["llm"].update(maintenance_model="", maint_base_url="", maint_api_key="")
+    vi = pv.resolve(cfg, "vision")
+    if vi:
+        cfg["eye"].update(frame_base_url=vi["base_url"], frame_api_key=vi["api_key"], frame_model=vi["model"],
+                          frame_protocol=vi["protocol"])
+    em = pv.resolve(cfg, "embed")
+    if em:
+        cfg["embed"].update(api_base_url=em["base_url"], api_key=em["api_key"], api_model=em["model"])
     return cfg
 
 
@@ -304,7 +361,16 @@ def update_config(patch: dict) -> dict:
     cur = load_config()
     raw = load_raw_config()
     # 未解锁时保留原密文，避免把空值写回
-    merged = _deep_merge(cur, patch or {})
+    patch = dict(patch or {})
+    if isinstance(patch.get("providers"), list):   # 列表整体替换：Key 留空 / 掩码时沿用原值
+        old = {p.get("id"): p for p in cur.get("providers") or []}
+        for p in patch["providers"]:
+            p.pop("api_key_set", None)
+            k = p.get("api_key")
+            if k is None or (isinstance(k, str) and k.startswith("****")):
+                p["api_key"] = (old.get(p.get("id")) or {}).get("api_key", "") or (
+                    cur["llm"].get("api_key", "") if p.get("id") == "legacy" else "")
+    merged = _deep_merge(cur, patch)
     if raw.get("secrets_encrypted") and not _master_passphrase:
         raise PermissionError("机密已加密，请先用主密码解锁再保存设置")
     return save_config(merged)
@@ -338,6 +404,12 @@ def masked_config() -> dict:
         rv = raw[sec].get(key, "")
         cfg[sec][key + "_set"] = bool(v or rv)
         cfg[sec][key] = ("****" + v[-4:]) if v and len(v) > 8 else ("****" if (v or rv) else "")
+    _migrate_legacy(cfg)
+    raw_keys = {p.get("id"): p.get("api_key", "") for p in _provider_keys(raw)}
+    for p in _provider_keys(cfg):
+        v = p.get("api_key", "")
+        p["api_key_set"] = bool(v or raw_keys.get(p.get("id")))
+        p["api_key"] = ("****" + v[-4:]) if v and len(v) > 8 else ("****" if p["api_key_set"] else "")
     cfg.pop("secrets_salt", None)
     cfg["secrets_unlocked"] = secrets_unlocked()
     return cfg
