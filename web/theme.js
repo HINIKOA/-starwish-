@@ -5,6 +5,7 @@
   const mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
   let cur = DEF;
   function hexToRgb(h) { const m = /^#?([0-9a-f]{6})$/i.exec(h || ""); if (!m) return [0, 185, 107]; const n = parseInt(m[1], 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+  function linear(channel) { const s = channel / 255; return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; }
   function apply(ui) {
     cur = Object.assign({}, DEF, cur, ui || {});
     const root = document.documentElement;
@@ -12,9 +13,11 @@
     root.dataset.theme = dark ? "dark" : "light";
     root.dataset.themePref = cur.theme;
     const [r, g, b] = hexToRgb(cur.accent);
-    root.style.setProperty("--brand", cur.accent);
+    root.style.setProperty("--brand", `rgb(${r},${g},${b})`);
     root.style.setProperty("--brand-rgb", `${r},${g},${b}`);
     root.style.setProperty("--brand-soft", `rgba(${r},${g},${b},${dark ? 0.18 : 0.12})`);
+    const luminance = 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+    root.style.setProperty("--brand-on", luminance > 0.179 ? "#000" : "#fff");
     const s = Math.max(50, Math.min(200, Number(cur.scale) || 100));
     root.style.zoom = s === 100 ? "" : String(s / 100);   // 缩放：zoom（Chromium / WebView2 支持）
     root.dataset.chatSide = cur.chat_side || "right";

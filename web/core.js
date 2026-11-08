@@ -31,6 +31,12 @@ const SRC = { panel: "面板", api: "API·主人", mcp: "MCP·主人", "proxy-co
   proposal: "批准提案", rollback: "回滚", undo: "撤销", v1: "旧版本", command: "指令" };
 let C = null;
 
+if (new URLSearchParams(location.search).get("from") === "profile") {
+  const back = $(".ctop .back");
+  back.href = "/#settings/profile";
+  back.textContent = "← 返回个人信息";
+}
+
 async function load() {
   C = await api("/api/core");
   renderTop(); renderEdit();

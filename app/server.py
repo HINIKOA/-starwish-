@@ -1380,16 +1380,30 @@ async def api_agent_chat(body: dict, request: Request):
         return {"ok": False, "reply": f"出错了：{e}", "actions": []}
 
 
+def _agent_status(cfg: dict, request: Request) -> dict:
+    from . import context, upstream
+
+    llm = cfg["llm"]
+    ready = context.main_ready(cfg)
+    configured = providers.resolve(cfg, "chat")
+    return {"model": llm["model"] if ready else (configured or {}).get("model", ""), "model_ready": ready,
+            "authorized": is_owner(request), "owner_token_required": bool(cfg["core"].get("owner_token")),
+            "window": context.window(cfg), "compact_at": context.compact_threshold(cfg),
+            "effort": upstream.norm_effort(llm.get("agent_effort")),
+            "efforts": [[k, upstream.EFFORT_LABELS[k]] for k in upstream.EFFORTS]}
+
+
+@app.get("/api/agent/status")
+def api_agent_status(request: Request):
+    return _agent_status(config.load_config(), request)
+
+
 @app.get("/api/agent/history")
 def api_agent_history(request: Request):
     _need_owner(request)
     from . import context
     h = agent.load_history()
-    cfg = config.load_config()
-    from . import upstream
-    return {"history": h[-200:], "tokens": context.total_tokens(h), "window": context.window(cfg),
-            "compact_at": context.compact_threshold(cfg), "effort": upstream.norm_effort(cfg["llm"].get("agent_effort")),
-            "efforts": [[k, upstream.EFFORT_LABELS[k]] for k in upstream.EFFORTS]}
+    return {**_agent_status(config.load_config(), request), "history": h[-200:], "tokens": context.total_tokens(h)}
 
 
 @app.delete("/api/agent/history")

@@ -263,8 +263,9 @@ def api_tests():
     U, B = f"http://127.0.0.1:{up}", f"http://127.0.0.1:{port}"
     env = {**os.environ, "STARWISH_SOUL_DIR": str(soul), "STARWISH_MODELS_DIR": str(mdir), "STARWISH_VOICE_BACKEND": "fake",
            "STARWISH_VOICE_MODEL_BASE": U + "/rel", "PYTHONIOENCODING": "utf-8"}
-    srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
-                           env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with (TMP / "server.log").open("wb") as log:
+        srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
+                               env=env, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT)
     c = httpx.Client(base_url=B, timeout=60)
     try:
         print("== 宇宙之声 · 启动")

@@ -226,6 +226,17 @@ def main():
     check("未解锁时服务商 Key 为空，不泄露密文", config.load_config()["providers"][0]["api_key"] == "")
     config.set_master_passphrase("pw123")
     c.post("/api/secrets/decrypt")
+    # 模拟旧版保存过运行时映射。清空默认项后不能继续调用旧模型。
+    config.save_config(config.load_config())
+    s2["providers"][0]["models"][0]["enabled"] = False
+    c.put("/api/settings", json={"providers": s2["providers"], "defaults": {"chat": "", "maintain": "", "vision": "", "embed": ""}})
+    cleared = config.load_config()
+    check("取消选用后仍保留模型和服务商密钥", cleared["providers"][0]["models"][0]["enabled"] is False
+          and cleared["providers"][0]["api_key"] == KEY)
+    check("清空默认项后不再使用旧版落盘的模型密钥", not cleared["llm"]["api_key"] and not cleared["llm"]["maint_api_key"]
+          and not cleared["eye"]["frame_api_key"] and not cleared["embed"]["api_key"])
+    cleared["defaults"]["chat"] = "ds::deepseek-chat"
+    check("显式取消选用的模型不能解析为默认模型", providers.resolve(cleared, "chat") is None)
     # 旧版只有 llm 的：界面里显示为一个服务商
     (TMP / "soul" / "config.json").write_text('{"llm":{"base_url":"%s/v1","api_key":"%s","model":"deepseek-chat"}}' % (UP, KEY), "utf-8")
     m = c.get("/api/settings").json()

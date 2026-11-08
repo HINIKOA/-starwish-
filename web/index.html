@@ -12,7 +12,8 @@
 <div id="stage"></div>
 <div id="vignette"></div>
 
-<header id="topbar">
+<header id="mapChrome">
+<div id="topbar">
   <div class="brand"><img class="app-icon" src="/static/icons/icon-192.png" alt=""> 星愿记忆 <small>StarWish</small></div>
   <div class="searchbox">
     <input id="search" type="search" placeholder="搜索记忆（不命中的星会变暗）" autocomplete="off">
@@ -29,9 +30,17 @@
     <button data-panel="settings">设置</button>
     <button data-panel="events">日志</button>
   </nav>
+</div>
+<div class="map-meta">
+  <div id="stats" class="stats"></div>
+  <div class="map-legend" aria-label="星图图例">
+    <span><i class="legend-core" aria-hidden="true"></i>星系核</span>
+    <span><i class="legend-system" aria-hidden="true"></i>恒星系</span>
+    <span><i class="legend-orbit" aria-hidden="true"></i>行星系</span>
+    <span><i class="legend-planet" aria-hidden="true"></i>星球</span>
+  </div>
+</div>
 </header>
-
-<div id="stats" class="stats"></div>
 
 <footer id="timeline">
   <span class="tl-label">时间线</span>
@@ -41,7 +50,7 @@
   <label class="tl-check"><input type="checkbox" id="autoRotate" checked> 缓慢旋转</label>
 </footer>
 
-<div id="emptyHint" class="hidden">现在只有一颗主核星辰——它装着 AI 是谁、你是谁、你的喜好。<br>和 AI 聊天、导入记忆或一起看片之后，新的记忆星会一颗颗长出来；越新的越大越亮，相似的记忆会融合进化。</div>
+<div id="emptyHint" class="hidden">现在只有星系核，它装着 AI 是谁、你是谁、你的喜好。<br>新增的记忆会成为星球，分类后归入对应的恒星系和行星系。</div>
 <div id="tooltip" class="hidden"></div>
 <aside id="drawer" class="hidden">
   <button id="drawerClose" title="关闭">×</button>

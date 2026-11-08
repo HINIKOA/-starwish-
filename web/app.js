@@ -20,7 +20,9 @@ async function api(path, opts = {}) {
   try { data = await r.json(); } catch { data = null; }
   if (!r.ok) {
     const msg = (data && (data.detail || data.error)) || `HTTP ${r.status}`;
-    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    const error = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    error.status = r.status;
+    throw error;
   }
   return data;
 }
@@ -50,42 +52,52 @@ const S = {
   three: null, renderer: null, scene: null, camera: null, points: null, corePoints: null,
   stars: [], idToIdx: new Map(), positions: null, baseBright: null,
   searchSet: null, cutoff: Infinity, hovered: -1, selected: -1,
-  cam: { theta: 0.6, phi: 1.05, dist: 120, target: [0, 0, 0] },
+  cam: { theta: 0.6, phi: 0.82, dist: 55, target: [0, 0, 0] },
   targetGoal: null, autoRotate: true, lastInteract: 0, minT: 0, maxT: 0, core: null,
 };
 
 const hash = (s) => { let h = 2166136261; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
 const rnd = (seed) => { let x = seed || 1; return () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return ((x >>> 0) % 100000) / 100000; }; };
+const systemHue = (name) => name ? (hash(name) % 360) / 360 : 0.62;
 
 // ---------------- 着色器 ----------------
 const VERT = `
 attribute float aSize; attribute float aBright; attribute float aHi; attribute float aPhase; attribute vec3 aColor;
-uniform float uPR; uniform float uTime;
+uniform float uPR; uniform float uTime; uniform bool uPlanet;
 varying vec3 vColor; varying float vAlpha; varying float vHi;
 void main(){
   vec4 mv = modelViewMatrix * vec4(position,1.0);
   float tw = 0.88 + 0.12*sin(uTime*1.3 + aPhase);
   vAlpha = aBright * tw; vColor = aColor; vHi = aHi;
   float s = aSize * (1.0 + aHi*1.4) * (0.55 + aBright*0.9);
-  gl_PointSize = s * uPR * (420.0 / max(1.0, -mv.z));
+  float pixels = s * (420.0 / max(1.0, -mv.z));
+  gl_PointSize = uPR * (uPlanet ? clamp(pixels * 0.52, 3.0, 18.0) : pixels);
   gl_Position = projectionMatrix * mv;
 }`;
 const FRAG = `
 varying vec3 vColor; varying float vAlpha; varying float vHi;
+uniform bool uPlanet;
 void main(){
   vec2 c = gl_PointCoord - 0.5; float d = length(c);
   if (d > 0.5) discard;
+  if (uPlanet) {
+    float disc = 1.0 - smoothstep(0.38, 0.49, d);
+    float light = clamp(0.64 - c.x * 0.85 + c.y * 0.65, 0.25, 1.0);
+    vec3 col = mix(vColor * light, vec3(1.0), vHi * 0.35);
+    gl_FragColor = vec4(col, disc * min(1.0, vAlpha * 1.25));
+    return;
+  }
   float glow = smoothstep(0.5, 0.0, d);
   float core = smoothstep(0.14, 0.0, d);
   vec3 col = mix(vColor, vec3(1.0), core*0.8 + vHi*0.3);
   gl_FragColor = vec4(col*(glow*0.9+core), (glow*0.75+core) * vAlpha);
 }`;
 
-function makeMaterial(THREE) {
+function makeMaterial(THREE, planet = false) {
   return new THREE.ShaderMaterial({
     vertexShader: VERT, fragmentShader: FRAG, transparent: true, depthWrite: false,
     blending: THREE.AdditiveBlending,
-    uniforms: { uPR: { value: Math.min(2, window.devicePixelRatio || 1) }, uTime: { value: 0 } },
+    uniforms: { uPR: { value: Math.min(2, window.devicePixelRatio || 1) }, uTime: { value: 0 }, uPlanet: { value: planet } },
   });
 }
 
@@ -93,19 +105,24 @@ function initScene(THREE) {
   const el = $("#stage");
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-  renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.setClearColor(0x03040a, 1);
   el.appendChild(renderer.domElement);
   const scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x03040a, 0.0035);
-  const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 3000);
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 3000);
   Object.assign(S, { renderer, scene, camera });
 
   // 一开始只有主核星辰：不再铺背景星尘，星空随记忆一颗颗长出来
-  window.addEventListener("resize", () => {
-    camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
-  });
+  const fitCanvas = () => {
+    const { width, height } = el.getBoundingClientRect();
+    if (!width || !height) return;
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    renderer.setSize(width, height, false);
+    if (!S.userZoomed) S.cam.dist = overviewDistance(S.galaxy?.systems || []);
+  };
+  fitCanvas();
+  new ResizeObserver(fitCanvas).observe(el);
   bindControls(renderer.domElement);
 }
 
@@ -141,7 +158,6 @@ function buildStars(THREE, list) {
   const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n),
     br = new Float32Array(n), hi = new Float32Array(n), ph = new Float32Array(n);
   const base = new Float32Array(n), final = new Float32Array(n * 3);
-  const tagHue = new Map();
   const c = new THREE.Color();
   const now = Date.now() / 1000;
   S.anims = []; const ghosts = [];
@@ -159,8 +175,7 @@ function buildStars(THREE, list) {
     const gp = S.galaxy?.pos?.[id];              // v0.11.0：银河系布局（恒星系绕星系核、行星系聚在恒星系旁、星球绕行星系）
     const p = gp ? [gp[0], gp[1], gp[2]] : [Math.cos(ang) * R, (rr() - 0.5) * (1.5 + R * 0.12), Math.sin(ang) * R];
     final.set(p, i * 3); pos.set(p, i * 3);
-    if (!tagHue.has(tag)) tagHue.set(tag, tag ? (hash(tag) % 360) / 360 : 0.62);
-    c.setHSL(tagHue.get(tag), tag ? 0.55 : 0.35, 0.72);
+    c.setHSL(systemHue(tag), tag ? 0.55 : 0.35, 0.72);
     if (gen > 0) c.lerp(new THREE.Color(0.86, 0.8, 1.0), Math.min(0.7, 0.35 + gen * 0.15));
     col.set([c.r, c.g, c.b], i * 3);
     const ageDays = Math.max(0, (now - created) / 86400);
@@ -189,23 +204,26 @@ function buildStars(THREE, list) {
   g.setAttribute("aHi", new THREE.BufferAttribute(hi, 1));
   g.setAttribute("aPhase", new THREE.BufferAttribute(ph, 1));
   g.computeBoundingSphere();
-  S.points = new THREE.Points(g, makeMaterial(THREE));
+  S.points = new THREE.Points(g, makeMaterial(THREE, true));
   S.scene.add(S.points);
   S.positions = final; S.baseBright = base;
   S.knownIds = new Set(list.map((x) => x[0]));
   S.prevPos = new Map(list.map((x, i) => [x[0], [final[i * 3], final[i * 3 + 1], final[i * 3 + 2]]]));
   // 被吸收的成员：旧位置也记着，后面再融合时还能从它们那里飞过来
   if (n) { S.minT = list[0][1]; S.maxT = list[n - 1][1]; }
-  if (first && !S.userZoomed) S.cam.dist = 45 + 75 * Math.min(1, n / 300);  // 星少时镜头拉近
-  const sysList = (S.galaxy && S.galaxy.systems) || [];
-  if (first && !S.userZoomed && sysList.length) {   // 银河系布局：镜头退到能看见全部恒星系
-    const ext = Math.max(...sysList.map((x) => Math.hypot(x.center[0], x.center[2]) + x.radius));
-    S.cam.dist = Math.max(55, Math.min(240, ext * 1.15));
-  }
+  const sysList = S.galaxy?.systems || [];
+  if ((first || !prevPos.size) && !S.userZoomed) S.cam.dist = overviewDistance(sysList);
   buildGhosts(THREE, ghosts);
-  buildLabels(THREE, (S.galaxy && S.galaxy.systems) || []);
+  buildSystems(THREE, sysList);
   $("#emptyHint").classList.toggle("hidden", n > 0);
   applyFilters();
+}
+
+function overviewDistance(systems) {
+  const extent = systems.reduce((max, s) => Math.max(max, Math.hypot(...s.center) + s.radius), 0);
+  const aspect = S.camera?.aspect || window.innerWidth / window.innerHeight;
+  const fit = 1.53 / Math.min(1, aspect);
+  return Math.min(600, Math.max(55, extent * fit));
 }
 
 // 融合动画：被吸收的星从原位置飞向新星，然后新星一闪
@@ -284,17 +302,19 @@ function bindControls(dom) {
 
 function pick(e) {
   const THREE = S.three;
-  const mouse = new THREE.Vector2((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1);
+  const view = S.renderer.domElement.getBoundingClientRect();
+  const mouse = new THREE.Vector2((e.clientX - view.left) / view.width * 2 - 1, 1 - (e.clientY - view.top) / view.height * 2);
   const rc = new THREE.Raycaster();
   rc.setFromCamera(mouse, S.camera);
   rc.params.Points.threshold = Math.max(0.6, S.cam.dist * 0.012);
-  const objs = [S.points, S.corePoints].filter(Boolean);
+  const objs = [S.points, S.corePoints, ...(S.systemNodes || [])].filter(Boolean);
   let best = null;
   for (const hit of rc.intersectObjects(objs, false)) {
     const isCore = hit.object.userData.isCore;
-    if (!isCore && (!visible(hit.index) || (S.searchSet && !S.searchSet.has(S.stars[hit.index][0])))) continue;
+    const node = hit.object.userData.nodes?.[hit.index];
+    if (!isCore && !node && (!visible(hit.index) || (S.searchSet && !S.searchSet.has(S.stars[hit.index][0])))) continue;
     const score = hit.distanceToRay / Math.max(1, hit.distance) - (isCore ? 0.01 : 0);
-    if (!best || score < best.score) best = { ...hit, isCore, score };
+    if (!best || score < best.score) best = { ...hit, isCore, node, score };
   }
   return best;
 }
@@ -309,13 +329,20 @@ function onHover(e) {
   else if (h.isCore) {
     S.hovered = -1;
     const secs = ["identity", "owner", "preferences"];
-    tt.innerHTML = `<b>✦ 主核星辰 · 核心记忆</b>` + secs.map((k, i) => { const txt = S.core ? S.core.sections[k].content : "";
+    tt.innerHTML = `<b>✦ 星系核 · 核心记忆</b>` + secs.map((k, i) => { const txt = S.core ? S.core.sections[k].content : "";
       return `<div><span class="meta">${CORE_TITLES[i]}：</span>${esc((txt || "（空）").slice(0, 60))}</div>`; }).join("") + `<div class="meta">点击打开核心记忆模块</div>`;
+    showTip(e); $("#stage").style.cursor = "pointer";
+  } else if (h.node) {
+    S.hovered = -1;
+    const n = h.node;
+    tt.innerHTML = `<b>${n.major ? "行星系" : "恒星系"} · ${esc(n.name)}</b>`
+      + `<div class="meta">${n.major ? esc(n.major) + " / " : ""}${n.count} 颗星球 · 点击聚焦</div>`;
     showTip(e); $("#stage").style.cursor = "pointer";
   } else {
     S.hovered = h.index;
     const s = S.stars[h.index];
-    tt.innerHTML = `<div>${esc(s[5])}</div><div class="meta">#${s[0]} · ${fmtDay(s[1])}${s[4] ? " · " + esc(s[4]) : ""} · 亮度 ${s[2].toFixed(2)}</div>`;
+    const path = S.galaxy?.cat?.[s[0]]?.filter(Boolean).join(" / ");
+    tt.innerHTML = `<div>${esc(s[5])}</div><div class="meta">星球 #${s[0]}${path ? " · " + esc(path) : ""} · ${fmtDay(s[1])}</div>`;
     showTip(e); $("#stage").style.cursor = "pointer";
   }
   if (prev !== S.hovered) applyFilters();
@@ -323,13 +350,20 @@ function onHover(e) {
 function showTip(e) {
   const tt = $("#tooltip");
   tt.classList.remove("hidden");
-  tt.style.left = Math.min(window.innerWidth - 340, e.clientX + 14) + "px";
-  tt.style.top = e.clientY + 14 + "px";
+  tt.style.left = Math.max(6, Math.min(window.innerWidth - tt.offsetWidth - 6, e.clientX + 14)) + "px";
+  tt.style.top = Math.min(window.innerHeight - tt.offsetHeight - 6, e.clientY + 14) + "px";
 }
 function onClick(e) {
   const h = pick(e);
   if (!h) return;
   if (h.isCore) openPanel("core");
+  else if (h.node) {
+    $("#tooltip").classList.add("hidden");
+    S.targetGoal = h.node.center;
+    S.cam.dist = h.node.major ? 23 : Math.max(33, h.node.radius * 2.7);
+    S.userZoomed = true;
+    closeDrawer();
+  }
   else openStar(S.stars[h.index][0]);
 }
 
@@ -354,6 +388,7 @@ function animate(t) {
   const { theta, phi, dist, target } = S.cam;
   S.camera.position.set(target[0] + dist * Math.sin(phi) * Math.cos(theta), target[1] + dist * Math.cos(phi), target[2] + dist * Math.sin(phi) * Math.sin(theta));
   S.camera.lookAt(target[0], target[1], target[2]);
+  for (const label of S.minorLabels || []) label.visible = S.camera.position.distanceToSquared(label.position) < 75 ** 2;
   stepAnims(performance.now());
   for (const p of [S.points, S.corePoints, S.ghostPoints]) if (p) p.material.uniforms.uTime.value = t / 1000;
   S.renderer.render(S.scene, S.camera);
@@ -367,29 +402,89 @@ function textSprite(THREE, text, big) {
   const w = Math.ceil(ctx.measureText(text).width) + 24;
   cv.width = w; cv.height = fs + 20;
   ctx.font = `${big ? 600 : 400} ${fs}px "PingFang SC","Microsoft YaHei",sans-serif`;
-  ctx.fillStyle = big ? "rgba(255,226,160,0.95)" : "rgba(200,210,255,0.8)";
+  ctx.fillStyle = big ? "rgba(255,226,160,0.98)" : "rgba(207,222,250,0.93)";
   ctx.shadowColor = "rgba(0,0,0,0.8)"; ctx.shadowBlur = 8;
   ctx.fillText(text, 12, fs + 4);
   const tex = new THREE.CanvasTexture(cv);
-  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false }));
-  const k = big ? 0.05 : 0.034;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false, sizeAttenuation: false, fog: false }));
+  const k = big ? 0.00049 : 0.00046;
   sp.scale.set(cv.width * k, cv.height * k, 1);
+  sp.center.set(0.5, big ? -0.48 : -0.3);
   return sp;
 }
-function buildLabels(THREE, systems) {
-  if (S.labels) { S.scene.remove(S.labels); S.labels.traverse((o) => { o.material?.map?.dispose(); o.material?.dispose(); }); }
-  S.labels = new THREE.Group();
+
+function nodeTexture(THREE, major) {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = 64;
+  const ctx = cv.getContext("2d"), x = 32;
+  if (major) {
+    const glow = ctx.createRadialGradient(x, x, 1, x, x, 31);
+    glow.addColorStop(0, "#fff"); glow.addColorStop(0.25, "rgba(255,255,255,.72)"); glow.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const angle = i * Math.PI / 4, r = i % 2 ? 5 : 21;
+      ctx.lineTo(x + Math.cos(angle) * r, x + Math.sin(angle) * r);
+    }
+    ctx.closePath(); ctx.fill();
+  } else {
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.arc(x, x, 22, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,.55)";
+    ctx.beginPath(); ctx.arc(x, x, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  return new THREE.CanvasTexture(cv);
+}
+
+function systemLayer(THREE, nodes, major) {
+  const g = new THREE.BufferGeometry(), colors = [], positions = [], color = new THREE.Color();
+  for (const node of nodes) {
+    color.setHSL(systemHue(node.major || node.name), major ? 0.67 : 0.42, major ? 0.78 : 0.66);
+    colors.push(color.r, color.g, color.b);
+    positions.push(...node.center);
+  }
+  g.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  g.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.PointsMaterial({ map: nodeTexture(THREE, major), size: major ? 32 : 13, fog: false,
+    sizeAttenuation: false, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+  const layer = new THREE.Points(g, mat);
+  layer.userData.nodes = nodes;
+  return layer;
+}
+
+function buildSystems(THREE, systems) {
+  if (S.systemGroup) {
+    S.scene.remove(S.systemGroup);
+    S.systemGroup.traverse((o) => { if (!o.isSprite) o.geometry?.dispose(); o.material?.map?.dispose(); o.material?.dispose(); });
+  }
+  S.systemGroup = new THREE.Group();
+  S.systemNodes = [];
+  S.minorLabels = [];
+  const minors = [], links = [];
   for (const sys of systems) {
     const a = textSprite(THREE, `${sys.name} · ${sys.count}`, true);
-    a.position.set(sys.center[0], sys.center[1] + 4 + Math.min(10, sys.radius * 0.4), sys.center[2]);
-    S.labels.add(a);
+    a.position.set(...sys.center);
+    S.systemGroup.add(a);
     for (const mn of sys.minors || []) {
       const b = textSprite(THREE, mn.name, false);
-      b.position.set(mn.center[0], mn.center[1] + 2.4, mn.center[2]);
-      S.labels.add(b);
+      b.position.set(...mn.center);
+      S.systemGroup.add(b);
+      S.minorLabels.push(b);
+      minors.push({ ...mn, major: sys.name });
+      links.push(...sys.center, ...mn.center);
     }
   }
-  S.scene.add(S.labels);
+  if (systems.length) S.systemNodes.push(systemLayer(THREE, systems, true));
+  if (minors.length) S.systemNodes.push(systemLayer(THREE, minors, false));
+  if (links.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(links, 3));
+    S.systemGroup.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: 0x91abd8, transparent: true, opacity: 0.3, depthWrite: false, fog: false })));
+  }
+  if (S.systemNodes.length) S.systemGroup.add(...S.systemNodes);
+  S.scene.add(S.systemGroup);
 }
 
 async function loadMap() {
@@ -397,7 +492,7 @@ async function loadMap() {
   S.core = core;
   S.galaxy = m.galaxy || null;
   const sig = m.stars.map((x) => x[0]).join(",") + "|" + (core.rev ?? "") + "|" + Math.floor(Date.now() / 3600000) + "|" +
-    ((m.galaxy && m.galaxy.systems) || []).map((x) => x.name + x.count + (x.minors || []).map((y) => y.name + y.count).join("/")).join(",");
+    JSON.stringify(m.galaxy?.cat || {});
   if (S.three && sig === S.mapSig) { updateTimelineText(); return; }   // 没有变化就不重建
   S.mapSig = sig;
   if (S.three) { buildCore(S.three); buildStars(S.three, m.stars); }
@@ -406,8 +501,10 @@ async function loadMap() {
 }
 async function loadStats() {
   const s = await api("/api/stats");
+  const systems = S.galaxy?.systems || [];
   const chips = [
-    ["星星", s.total], ["今日新增", "+" + s.today], ["核心", s.core_tokens + " tok"], ["技能", (s.skills ? s.skills.total : 0)],
+    ["星球", s.total], ["恒星系", systems.length], ["行星系", systems.reduce((n, sys) => n + (sys.minors?.length || 0), 0)],
+    ["今日新增", "+" + s.today], ["核心", s.core_tokens + " tok"], ["技能", (s.skills ? s.skills.total : 0)],
     ["每轮注入约", s.est_tokens_per_turn + " tok"],
     ["检索", (s.jieba ? "jieba" : "二元组") + (s.fts ? "+FTS5" : "") + (s.semantic ? "+语义·" + ({ small: "bge-small", m3: "BGE-M3", api: "Qwen3" }[s.semantic_model] || "") : "")],
   ];
@@ -451,7 +548,7 @@ function updateTimelineText() {
   applyFilters();
 }
 $("#tlSlider").addEventListener("input", updateTimelineText);
-$("#resetView").addEventListener("click", () => { S.cam = { theta: 0.6, phi: 1.05, dist: 120, target: [0, 0, 0] }; S.targetGoal = null; S.selected = -1; applyFilters(); });
+$("#resetView").addEventListener("click", () => { S.cam = { theta: 0.6, phi: 0.82, dist: overviewDistance(S.galaxy?.systems || []), target: [0, 0, 0] }; S.targetGoal = null; S.userZoomed = false; S.selected = -1; applyFilters(); });
 $("#autoRotate").addEventListener("change", (e) => (S.autoRotate = e.target.checked));
 
 // ---------------- 抽屉面板 ----------------
@@ -470,7 +567,7 @@ async function openStar(id) {
   const i = S.idToIdx.get(id); if (i !== undefined) { S.selected = i; applyFilters(); }
   const del = !!s.deleted_at;
   openDrawer(`
-    <h2>星 #${s.id} ${del ? '<span class="warn">（已隐藏）</span>' : ""}</h2>
+    <h2>星球 #${s.id} ${del ? '<span class="warn">（已隐藏）</span>' : ""}</h2>
     <div class="bright-bar"><i style="width:${Math.min(100, (s.brightness / 1.5) * 100)}%"></i></div>
     <div class="kv">
       <span>亮度</span><span>${s.brightness.toFixed(3)}（手动增益 ×${s.boost.toFixed(2)}）</span>
@@ -478,6 +575,8 @@ async function openStar(id) {
       <span>最近召回</span><span>${fmtDate(s.last_recalled_at)}</span>
       <span>召回次数</span><span>${s.recall_count}</span>
       <span>来源</span><span>${esc(s.source || "—")}</span>
+      <span>恒星系</span><span>${esc(s.cat_major || "未分类")}</span>
+      <span>行星系</span><span>${esc(s.cat_minor || "—")}</span>
       ${s.generation ? `<span>进化</span><span>第 ${s.generation} 代融合星 · 由 ${s.fused_from.length} 颗相似记忆归纳而成</span>` : ""}
     </div>
     ${s.members && s.members.length ? `<h3>融合前的记忆</h3>${s.members.map((m) => `<div class="card"><div class="meta">#${m.id} · ${fmtDay(m.created_at)}${m.generation ? ` · 第 ${m.generation} 代` : ""}</div>${esc(m.summary)}</div>`).join("")}
@@ -677,6 +776,13 @@ async function panelEvents() {
 
 // ---------------- 启动 ----------------
 (async function main() {
+  const chrome = $("#mapChrome"), timeline = $("#timeline"), root = document.documentElement;
+  const measure = new ResizeObserver(() => {
+    if (chrome) root.style.setProperty("--map-chrome-bottom", `${chrome.offsetTop + chrome.offsetHeight}px`);
+    root.style.setProperty("--map-timeline-height", `${timeline.offsetHeight}px`);
+  });
+  if (chrome) measure.observe(chrome);
+  measure.observe(timeline);
   initSettings({ api, toast, esc, safe, refresh, embedPanel });
   initDrawers({ api, toast, esc, safe, refresh });
   if (location.hash.startsWith("#settings")) toggleSettings(true, location.hash.slice(10));   // 例如 #settings/data/webdav

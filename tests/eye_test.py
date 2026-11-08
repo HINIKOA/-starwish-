@@ -116,8 +116,9 @@ def main():
     env = {**os.environ, "STARWISH_SOUL_DIR": str(soul), "PYTHONIOENCODING": "utf-8"}
     up, port = free_port(), free_port()
     mock = start_mock(up)
-    srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
-                           env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with (tmp / "server.log").open("wb") as log:
+        srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
+                               env=env, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT)
     B, U = f"http://127.0.0.1:{port}", f"http://127.0.0.1:{up}"
     c = httpx.Client(base_url=B, timeout=60)
     try:
@@ -134,6 +135,8 @@ def main():
         js = c.get("/static/eye.js").text
         check("前端：屏幕 / 摄像头采集 + 变化检测 + 拼分镜图", all(k in js for k in ("getDisplayMedia", "getUserMedia", "sampleOnce", "composeGrid")))
         check("前端：语音打断与回声守卫、红色正在看标记", all(k in js for k in ("stopSpeaking", "回声守卫", "liveBadge")))
+        check("前端：主人验证、采集能力检查与非空设置状态",
+              all(k in js for k in ("eyeOwnerToken", "X-StarWish-Owner", "isSecureContext", "renderActiveTab")))
 
         print("== 引擎解析（含千问预留接口）")
         s0 = c.get("/api/eye/status").json()

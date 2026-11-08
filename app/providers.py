@@ -2,7 +2,7 @@
 
 只填 Key，地址用预设；同步模型后从下拉里选，不用手打模型名。每个服务商和每个模型都能「检测」。
 配置里：
-  providers: [{id, name, preset, protocol, base_url, api_key, enabled, models: [{id, kind}]}]
+  providers: [{id, name, preset, protocol, base_url, api_key, enabled, models: [{id, kind, enabled}]}]
   defaults:  {chat, maintain, vision, embed}，值为 "服务商id::模型id"
 保存时由 config.apply_providers() 把默认模型映射回 llm / eye / embed 旧字段，其他模块无需改动。
 """
@@ -171,10 +171,12 @@ def find(cfg: dict, pid: str) -> dict | None:
 
 
 def resolve(cfg: dict, role: str) -> dict | None:
-    """默认模型 → {base_url, api_key, protocol, model}；服务商被关闭或不存在时返回 None。"""
+    """默认模型 → {base_url, api_key, protocol, model}；服务商或模型被停用时返回 None。"""
     pid, model = split_ref((cfg.get("defaults") or {}).get(role, ""))
     p = find(cfg, pid)
     if not p or not p.get("enabled", True) or not model:
+        return None
+    if any(m.get("id") == model and m.get("enabled") is False for m in p.get("models") or []):
         return None
     return {"base_url": norm_base(p.get("base_url", "")), "api_key": p.get("api_key", ""),
             "protocol": p.get("protocol", "openai"), "model": model, "provider": p.get("name", pid)}

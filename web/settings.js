@@ -11,7 +11,10 @@ let selId = "";
 let provFilter = "";
 let modelFilter = "";
 let saveTimer = null;
+let providerSave = Promise.resolve();
+let providerResizeObserver;
 let navFilter = "";
+let navSearchOpen = false;
 
 const GROUPS = [
   ["基础", [["profile", "☺", "个人信息"], ["providers", "☁", "模型服务"], ["defaults", "◎", "默认模型"], ["embed", "✶", "本地模型"]]],
@@ -24,10 +27,10 @@ const SUBS = {
 };
 const KIND = { chat: "对话", vision: "识图", embedding: "向量", other: "其他" };
 const ROLES = [
-  ["chat", "对话模型（主模型）", "对话抽屉、整理星系用它；代理转发给聊天客户端时默认也用它", ["chat", "vision"]],
+  ["chat", "对话模型", "对话抽屉、整理星系用它；代理转发给聊天客户端时默认也用它", ["chat", "vision"]],
   ["maintain", "整理模型", "对话监控、后台整理、融合归纳、技能巡检用；留空 = 和对话模型相同。建议选便宜快速的", ["chat", "vision"]],
   ["vision", "识图模型", "宇宙之眼「通用帧模式」看屏幕 / 摄像头时用，必须支持图片输入", ["vision", "chat"]],
-  ["embed", "向量模型（接口档）", "向量模型选「③ 接口」时用；内置 bge-small 不需要它", ["embedding"]],
+  ["embed", "向量模型", "向量模型选「③ 接口」时用；内置 bge-small 不需要它", ["embedding"]],
 ];
 
 const $ = (s) => document.querySelector(s);
@@ -54,7 +57,14 @@ export function initSettings(ctx) {
 }
 
 export function settingsOpen() { return !$("#setWin").classList.contains("hidden"); }
-export function closeSettings() { $("#setWin").classList.add("hidden"); document.body.classList.remove("in-settings"); document.querySelector('[data-panel="settings"]')?.classList.remove("on"); }
+export function closeSettings() {
+  $("#setWin").classList.add("hidden");
+  document.body.classList.remove("in-settings");
+  document.querySelector('[data-panel="settings"]')?.classList.remove("on");
+  navFilter = "";
+  navSearchOpen = false;
+  if (/^#settings(?:\/|$)/.test(location.hash)) history.replaceState(history.state, "", location.pathname + location.search);
+}
 export async function toggleSettings(force, which) {
   const open = force ?? !settingsOpen();
   if (!open) return closeSettings();
@@ -66,26 +76,48 @@ export async function toggleSettings(force, which) {
 }
 
 async function reload() {
+  if (saveTimer) await C.safe(saveProviders);
+  await providerSave.catch(() => {});
   const [c, p] = await Promise.all([C.safe(() => C.api("/api/settings")), presets.length ? presets : C.safe(() => C.api("/api/providers/presets"))]);
   if (!c) return;
   cfg = c; presets = p || [];
+  const defaults = new Set(Object.values(cfg.defaults));
+  for (const provider of cfg.providers) {
+    for (const model of provider.models || []) model.enabled ??= defaults.has(modelRef(provider, model));
+  }
   if (!selId && cfg.providers.length) selId = cfg.providers[0].id;
   $("#swTip").innerHTML = cfg.secrets_encrypted ? (cfg.secrets_unlocked ? "机密已加密 · 已解锁" : '<span class="warn">机密已加密，尚未解锁</span>') : "";
   renderNav(); render();
 }
 
 function renderNav() {
-  const f = navFilter.trim();
-  $("#swNav").innerHTML = `<div class="sv-navhead"><b>设置</b><button class="sv-ico" id="svFind" title="搜索设置">⌕</button></div>
-    <input id="svSearch" class="sv-search ${f || $("#svSearch")?.dataset.open ? "" : "hidden"}" placeholder="搜索设置…" value="${E(f)}">
-    ${GROUPS.map(([g, items], gi) => {
-      const its = items.filter(([, , t]) => !f || t.includes(f) || g.includes(f));
-      if (!its.length) return "";
-      return `${gi ? `<div class="sv-group">${g}</div>` : ""}${its.map(([k, i, t]) => `<button data-p="${k}" class="sv-item ${k === page ? "on" : ""}"><span class="sv-i">${i}</span>${t}</button>`).join("")}`;
-    }).join("")}`;
-  $("#swNav").querySelectorAll(".sv-item").forEach((b) => (b.onclick = () => { page = b.dataset.p; renderNav(); render(); }));
-  $("#svFind").onclick = () => { const s = $("#svSearch"); s.classList.toggle("hidden"); s.dataset.open = s.classList.contains("hidden") ? "" : "1"; s.focus(); };
-  $("#svSearch").oninput = (e) => { navFilter = e.target.value; const pos = e.target.selectionStart; renderNav(); const s = $("#svSearch"); s.classList.remove("hidden"); s.focus(); s.setSelectionRange(pos, pos); };
+  $("#swNav").innerHTML = `<div class="sv-navhead"><b>设置</b><button class="sv-ico" id="svFind" title="搜索设置" aria-controls="svSearch" aria-expanded="${navSearchOpen}">⌕</button></div>
+    <input id="svSearch" class="sv-search ${navSearchOpen ? "" : "hidden"}" type="search" autocomplete="off" ${navSearchOpen ? "" : "disabled"} placeholder="搜索设置…" value="${E(navFilter)}">
+    <div id="svNavItems"></div>`;
+  renderNavItems();
+  $("#svFind").onclick = () => {
+    navSearchOpen = !navSearchOpen;
+    if (!navSearchOpen) navFilter = "";
+    renderNav();
+    $(navSearchOpen ? "#svSearch" : "#svFind").focus();
+  };
+  $("#svSearch").oninput = (e) => {
+    if (!navSearchOpen || document.activeElement !== e.target) return;
+    navFilter = e.target.value;
+    renderNavItems();
+  };
+}
+
+function renderNavItems() {
+  const f = navSearchOpen ? navFilter.trim() : "", list = $("#svNavItems");
+  list.innerHTML = GROUPS.map(([g, items], gi) => {
+    const its = items.filter(([, , t]) => !f || t.includes(f) || g.includes(f));
+    if (!its.length) return "";
+    return `${gi ? `<div class="sv-group">${g}</div>` : ""}${its.map(([k, i, t]) => `<button data-p="${k}" class="sv-item ${k === page ? "on" : ""}"><span class="sv-i">${i}</span>${t}</button>`).join("")}`;
+  }).join("");
+  list.querySelectorAll(".sv-item").forEach((b) => (b.onclick = () => {
+    page = b.dataset.p; navSearchOpen = false; navFilter = ""; renderNav(); render();
+  }));
 }
 
 function renderSub() {
@@ -103,6 +135,7 @@ function render() { renderSub(); renderMain(); }
 
 function renderMain() {
   const m = $("#swMain");
+  providerResizeObserver?.disconnect();
   m.className = "sv-main" + (page === "providers" ? " three" : "");
   m.scrollTop = 0;
   ({ profile: pageProfile, providers: pageProviders, defaults: pageDefaults, embed: pageEmbed, mcp: pageMcp, skills: pageSkills,
@@ -127,6 +160,7 @@ async function savePatch(patch) {
   cfg = await C.api("/api/settings", { method: "PUT", body: patch });
   flash("已自动保存");
   if (patch.ui) window.StarTheme?.apply(cfg.ui);
+  if (patch.llm || patch.core) window.dispatchEvent(new Event("starwish-agent-config"));
   return cfg;
 }
 function bindAuto(m) {
@@ -154,24 +188,66 @@ function queueSave(delay = 500) {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => C.safe(saveProviders), delay);
 }
-async function saveProviders() {
+function saveProviders() {
   clearTimeout(saveTimer); saveTimer = null;
   const providers = cfg.providers.map(({ api_key_set, ...p }) => p);
-  const r = await C.api("/api/settings", { method: "PUT", body: { providers, defaults: cfg.defaults } });
-  const byId = new Map(r.providers.map((x) => [x.id, x]));
-  cfg.providers.forEach((x) => { const y = byId.get(x.id); if (y) { x.api_key = y.api_key; x.api_key_set = y.api_key_set; } });
-  const { providers: _p, defaults: _d, ...rest } = r; Object.assign(cfg, rest);
-  flash("已自动保存");
+  const body = JSON.stringify({ providers, defaults: cfg.defaults });
+  providerSave = providerSave.catch(() => {}).then(async () => {
+    const r = await C.api("/api/settings", { method: "PUT", body: JSON.parse(body) });
+    const saved = new Map(r.providers.map((p) => [p.id, p]));
+    for (const p of providers) {
+      const current = cfg.providers.find((x) => x.id === p.id), result = saved.get(p.id);
+      if (current?.api_key === p.api_key && result) {
+        current.api_key = result.api_key;
+        current.api_key_set = result.api_key_set;
+      }
+    }
+    const { providers: _p, defaults: _d, ...rest } = r; Object.assign(cfg, rest);
+    flash("已自动保存");
+    window.dispatchEvent(new Event("starwish-agent-config"));
+  });
+  return providerSave;
 }
 
 // ———————————————— 模型服务 ————————————————
 function cur() { return cfg.providers.find((p) => p.id === selId); }
 function presetOf(p) { return presets.find((x) => x.preset === p.preset) || {}; }
+const modelRef = (p, m) => p.id + "::" + m.id;
+
+const PRIORITY_MODEL_FAMILIES = [
+  ["OpenAI / GPT", /^(?:openai|gpt|chatgpt|o[1-9]|codex|text-embedding-3)(?:[-._]|$)/i],
+  ["DeepSeek", /^deepseek/i],
+  ["阿里 / Qwen", /^(?:qwen|alibaba|dashscope|tongyi)(?:[-._\d]|$)/i],
+  ["Anthropic / Claude", /^(?:anthropic|claude)(?:[-._]|$)/i],
+  ["小米 / MiMo", /^(?:xiaomi|mimo)(?:[-._\d]|$)/i],
+  ["智谱 / GLM", /^(?:z-ai|zai-org|zhipu|glm|chatglm)(?:[-._\d]|$)/i],
+];
+const MODEL_FAMILY_RANK = new Map(PRIORITY_MODEL_FAMILIES.map(([name], index) => [name, index]));
+const MODEL_FAMILIES = [
+  ...PRIORITY_MODEL_FAMILIES,
+  ["Google / Gemini", /^(?:google|gemini|gemma)(?:[-._\d]|$)/i],
+  ["MiniMax", /^minimax/i],
+  ["月之暗面 / Kimi", /^(?:moonshot|kimi)(?:[-._\d]|$)/i],
+  ["Meta / Llama", /^(?:meta|llama)(?:[-._\d]|$)/i],
+  ["Mistral", /^(?:mistral|mixtral|codestral|ministral|pixtral|devstral)/i],
+  ["字节 / 豆包", /^(?:bytedance|doubao|seed|volcengine)(?:[-._\d]|$)/i],
+  ["xAI / Grok", /^(?:xai|grok)(?:[-._\d]|$)/i],
+];
+const expandedModelGroups = new Set();
+
+function modelFamily(id) {
+  const parts = id.split("/");
+  for (const part of [...parts].reverse()) {
+    const family = MODEL_FAMILIES.find(([, pattern]) => pattern.test(part));
+    if (family) return family[0];
+  }
+  return parts.length > 1 ? parts[0] : "其他厂商";
+}
 
 function pageProviders(m) {
   const list = cfg.providers.filter((p) => !provFilter || (p.name + p.base_url).toLowerCase().includes(provFilter.toLowerCase()));
   m.innerHTML = `
-    <div class="sw-col">
+    <div class="sw-col" id="pvListPane">
       <input id="pvSearch" type="search" placeholder="搜索模型平台…" value="${E(provFilter)}">
       <div class="pv-list">${list.map((p) => `<div class="pv-item ${p.id === selId ? "on" : ""}" data-id="${E(p.id)}">
           <span class="pv-logo">${E((p.name || "?").slice(0, 1))}</span><span class="pv-name">${E(p.name)}</span>
@@ -179,11 +255,76 @@ function pageProviders(m) {
         || '<div class="sw-empty">还没有服务商。点下方「添加服务商」，选一家、填上 Key 就行。</div>'}</div>
       <button class="pv-add" id="pvAdd">＋ 添加服务商</button>
     </div>
+    <div id="pvResize" class="pv-resize" role="separator" tabindex="0" aria-orientation="vertical"
+      aria-label="服务商列表宽度" aria-controls="pvListPane"
+      title="拖动调节宽度；也可按左右方向键，双击恢复默认"></div>
     <div class="sw-detail" id="pvDetail"></div>`;
+  bindProviderResize(m);
   $("#pvSearch").oninput = (e) => { provFilter = e.target.value; const pos = e.target.selectionStart; pageProviders(m); const s = $("#pvSearch"); s.focus(); s.setSelectionRange(pos, pos); };
   m.querySelectorAll(".pv-item").forEach((el) => (el.onclick = () => { selId = el.dataset.id; modelFilter = ""; pageProviders(m); }));
   $("#pvAdd").onclick = () => addPicker();
   detail();
+}
+
+function bindProviderResize(m) {
+  const pane = $("#pvListPane"), handle = $("#pvResize"), key = "starwish.providerPaneWidth";
+  try {
+    const saved = Number(localStorage.getItem(key));
+    if (saved > 0 && Number.isFinite(saved)) m.style.setProperty("--pv-col-width", `${saved}px`);
+  } catch {}
+
+  const limits = getComputedStyle(m);
+  const px = (name) => parseFloat(limits.getPropertyValue(name));
+  const min = px("--pv-col-min");
+  const max = () => Math.max(min, Math.min(px("--pv-col-max"), m.clientWidth - px("--pv-handle-width") - px("--pv-detail-min")));
+  const width = () => Math.round(pane.getBoundingClientRect().width);
+  const describe = () => {
+    if (!handle.getClientRects().length) return;
+    handle.setAttribute("aria-valuemin", min);
+    handle.setAttribute("aria-valuemax", max());
+    handle.setAttribute("aria-valuenow", width());
+  };
+  const resize = (value) => {
+    const next = Math.round(Math.max(min, Math.min(max(), value)));
+    m.style.setProperty("--pv-col-width", `${next}px`);
+    describe();
+  };
+  const remember = () => { try { localStorage.setItem(key, String(width())); } catch {} };
+
+  let drag;
+  handle.onpointerdown = (e) => {
+    if (e.button !== 0 || drag) return;
+    e.preventDefault();
+    handle.focus({ preventScroll: true });
+    handle.setPointerCapture(e.pointerId);
+    drag = { id: e.pointerId, x: e.clientX, width: width() };
+    m.classList.add("pv-resizing");
+  };
+  handle.onpointermove = (e) => {
+    if (drag?.id === e.pointerId) resize(drag.width + e.clientX - drag.x);
+  };
+  handle.onlostpointercapture = (e) => {
+    if (drag?.id !== e.pointerId) return;
+    if (width() !== drag.width) remember();
+    drag = null;
+    m.classList.remove("pv-resizing");
+  };
+  handle.onkeydown = (e) => {
+    const step = e.shiftKey ? 32 : 8;
+    const values = { ArrowLeft: width() - step, ArrowRight: width() + step, Home: min, End: max() };
+    if (!Object.hasOwn(values, e.key)) return;
+    e.preventDefault();
+    resize(values[e.key]); remember();
+  };
+  handle.ondblclick = () => {
+    m.style.removeProperty("--pv-col-width");
+    try { localStorage.removeItem(key); } catch {}
+    describe();
+  };
+  providerResizeObserver?.disconnect();
+  providerResizeObserver = new ResizeObserver(describe);
+  providerResizeObserver.observe(m);
+  describe();
 }
 
 function addPicker() {
@@ -198,7 +339,8 @@ function addPicker() {
 }
 
 function endpointPreview(p) {
-  const b = (p.base_url || "").replace(/\/+$/, "");
+  const b = (p.base_url || "").trim().replace(/\/+$/, "")
+    .replace(/\/(?:chat\/completions|completions|embeddings|models|messages|responses)$/, "");
   if (!b) return "填写后这里会显示实际请求的地址";
   if (p.protocol === "anthropic") return `${b}${/\/v1$/.test(b) ? "" : "/v1"}/messages`;
   if (p.protocol === "responses") return `${b}/responses`;
@@ -209,13 +351,9 @@ function detail() {
   const d = $("#pvDetail"), p = cur();
   if (!p) { d.innerHTML = '<div class="sw-empty big">← 选择或添加一个服务商</div>'; return; }
   const ps = presetOf(p);
-  const groups = {};
-  (p.models || []).filter((x) => !modelFilter || x.id.toLowerCase().includes(modelFilter.toLowerCase()))
-    .forEach((x) => (groups[x.kind || "chat"] = groups[x.kind || "chat"] || []).push(x));
-  const isDef = (mid) => ROLES.filter(([r]) => cfg.defaults[r] === `${p.id}::${mid}`).map(([, t]) => t.replace(/（.*）/, ""));
   d.innerHTML = `
     <div class="pv-top"><input class="pv-title" id="pvName" value="${E(p.name)}" title="点击改名">
-      <select id="pvProto" title="接口格式：Chat Completions / Anthropic Messages / OpenAI Responses"><option value="openai" ${!["anthropic", "responses"].includes(p.protocol) ? "selected" : ""}>OpenAI 兼容（Chat）</option><option value="responses" ${p.protocol === "responses" ? "selected" : ""}>OpenAI Responses</option><option value="anthropic" ${p.protocol === "anthropic" ? "selected" : ""}>Anthropic</option></select>
+      <select id="pvProto" title="接口格式：Chat Completions / Anthropic Messages / OpenAI Responses"><option value="openai" ${!["anthropic", "responses"].includes(p.protocol) ? "selected" : ""}>OpenAI 兼容（Chat）</option><option value="responses" ${p.protocol === "responses" ? "selected" : ""}>OpenAI Responses</option><option value="anthropic" ${p.protocol === "anthropic" ? "selected" : ""}>Anthropic Messages（原生）</option></select>
       <label class="switch" title="启用 / 关闭"><input type="checkbox" id="pvOn" ${p.enabled ? "checked" : ""}><span></span></label>
       <button class="icon danger" id="pvDel" title="删除这个服务商">🗑</button></div>
     <div class="f-label">API 密钥 ${ps.key_url ? `<a href="${E(ps.key_url)}" target="_blank" rel="noopener">获取密钥 ↗</a>` : ""}</div>
@@ -225,18 +363,10 @@ function detail() {
     <div class="f-row"><input id="pvBase" value="${E(p.base_url)}" placeholder="https://…/v1"></div>
     <div class="f-hint">预览：<code id="pvPrev">${E(endpointPreview(p))}</code></div>
     <div id="pvMsg" class="pv-msg hidden"></div>
-    <div class="pv-mhead"><b>模型</b><span class="muted">${(p.models || []).length} 个</span>
+    <div class="pv-mhead"><b>模型</b><span class="muted" id="pvMCount"></span>
       <input id="pvMSearch" type="search" placeholder="筛选模型" value="${E(modelFilter)}">
       <button id="pvSync">⟳ 同步模型</button><button class="icon" id="pvMAdd" title="手动添加">＋</button></div>
-    ${(p.models || []).length ? Object.entries(groups).sort(([a], [b]) => Object.keys(KIND).indexOf(a) - Object.keys(KIND).indexOf(b)).map(([k, arr]) => `
-      <details class="mgroup" open><summary>${KIND[k] || k} <span class="muted">${arr.length}</span></summary>
-      ${arr.map((x) => `<div class="mrow" data-m="${E(x.id)}"><span class="mname" title="${E(x.id)}">${E(x.id)}</span>
-        ${isDef(x.id).map((t) => `<span class="tag on">${E(t)}</span>`).join("")}
-        <select class="mkind" title="类型">${Object.entries(KIND).map(([v, t]) => `<option value="${v}" ${v === (x.kind || "chat") ? "selected" : ""}>${t}</option>`).join("")}</select>
-        <select class="mdef" title="设为默认"><option value="">设为默认…</option>${ROLES.map(([r, t]) => `<option value="${r}">${t}</option>`).join("")}</select>
-        <button class="mchk" title="发一句话试试">检测</button><button class="icon mdel" title="移除">−</button>
-        <span class="mres"></span></div>`).join("")}</details>`).join("")
-      : `<div class="sw-empty">还没有模型。填好 Key 后点「同步模型」，会自动从服务商拉取全部可用模型。</div>`}`;
+    <div id="pvModels"></div>`;
 
   $("#pvName").onchange = (e) => { p.name = e.target.value.trim() || p.name; queueSave(0); setTimeout(() => pageProviders($("#swMain")), 200); };
   $("#pvProto").onchange = (e) => { p.protocol = e.target.value; $("#pvPrev").textContent = endpointPreview(p); queueSave(); };
@@ -250,17 +380,75 @@ function detail() {
   $("#pvKey").onchange = (e) => { const v = e.target.value.trim(); if (v) { p.api_key = v; p.api_key_set = true; queueSave(0); } };
   $("#pvBase").oninput = (e) => { p.base_url = e.target.value.trim(); $("#pvPrev").textContent = endpointPreview(p); queueSave(800); };
   if ($("#pvReset")) $("#pvReset").onclick = (e) => { e.preventDefault(); p.base_url = ps.base_url; queueSave(0); detail(); };
-  $("#pvMSearch").oninput = (e) => { modelFilter = e.target.value; const pos = e.target.selectionStart; detail(); const s = $("#pvMSearch"); s.focus(); s.setSelectionRange(pos, pos); };
+  $("#pvMSearch").oninput = (e) => { modelFilter = e.target.value; renderModelList(p); };
   $("#pvCheck").onclick = () => checkProvider(p);
   $("#pvSync").onclick = () => syncModels(p);
   $("#pvMAdd").onclick = () => { const id = (prompt("模型 ID（和服务商文档里写的一致）") || "").trim(); if (!id) return;
-    if (!(p.models || []).some((x) => x.id === id)) { p.models = [...(p.models || []), { id, kind: guessKind(id) }]; queueSave(0); detail(); } };
-  d.querySelectorAll(".mrow").forEach((row) => {
-    const mid = row.dataset.m, mm = p.models.find((x) => x.id === mid);
-    row.querySelector(".mkind").onchange = (e) => { mm.kind = e.target.value; queueSave(); };
-    row.querySelector(".mdef").onchange = (e) => { if (!e.target.value) return; cfg.defaults[e.target.value] = `${p.id}::${mid}`;
-      C.safe(saveProviders).then(() => { C.toast(`已设为默认${ROLES.find(([r]) => r === e.target.value)[1]}：${mid}`); detail(); C.refresh?.(); }); };
-    row.querySelector(".mdel").onclick = () => { p.models = p.models.filter((x) => x.id !== mid); queueSave(0); detail(); };
+    if (!(p.models || []).some((x) => x.id === id)) {
+      p.models = [...(p.models || []), { id, kind: guessKind(id), manual: true, enabled: false }];
+      queueSave(0); renderModelList(p);
+    } };
+  renderModelList(p);
+}
+
+function renderModelList(p) {
+  const list = $("#pvModels"), models = p.models || [], groups = new Map();
+  const query = modelFilter.trim().toLowerCase();
+  if (!list.dataset.filtered) {
+    expandedModelGroups.clear();
+    for (const group of list.querySelectorAll(".mgroup[open]")) expandedModelGroups.add(group.dataset.family);
+  }
+  list.dataset.filtered = query ? "1" : "";
+  for (const m of models) {
+    const family = modelFamily(m.id);
+    if (!m.id.toLowerCase().includes(query) && !family.toLowerCase().includes(query)) continue;
+    if (!groups.has(family)) groups.set(family, []);
+    groups.get(family).push(m);
+  }
+  $("#pvMCount").textContent = `${models.length} 个 · 已选 ${models.filter((m) => m.enabled).length} 个`;
+  const tags = (m) => ROLES.filter(([r]) => cfg.defaults[r] === modelRef(p, m))
+    .map(([, t]) => `<span class="tag on">${E(t)}</span>`).join("");
+  const rank = (name) => MODEL_FAMILY_RANK.get(name) ?? MODEL_FAMILY_RANK.size;
+  list.innerHTML = [...groups].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b, "zh-CN")).map(([family, arr]) => `
+    <details class="mgroup" data-family="${E(family)}" ${query || expandedModelGroups.has(family) ? "open" : ""}>
+      <summary>${E(family)} <span class="muted">${arr.length}</span></summary>
+      ${arr.map((m) => {
+        const roles = ROLES.filter(([, , , kinds]) => kinds.includes(m.kind || "chat"));
+        const action = m.enabled ? "取消选用" : "选用";
+        return `<div class="mrow" data-m="${E(m.id)}"><span class="mname" title="${E(m.id)}">${E(m.id)}</span>
+          ${tags(m)}
+          <select class="mkind" title="类型">${Object.entries(KIND).map(([v, t]) => `<option value="${v}" ${v === (m.kind || "chat") ? "selected" : ""}>${t}</option>`).join("")}</select>
+          <select class="mdef" title="${m.enabled ? "设为默认" : "先点＋选用模型"}" aria-label="设为默认" ${m.enabled && p.enabled && roles.length ? "" : "disabled"}>
+            <option value="">--</option>${roles.map(([r, t]) => `<option value="${r}">${t}</option>`).join("")}</select>
+          <button class="mchk" title="发一句话试试">检测</button>
+          <button class="icon mtoggle" type="button" aria-label="选用 ${E(m.id)}" aria-pressed="${!!m.enabled}" title="${action}">${m.enabled ? "−" : "＋"}</button>
+          <span class="mres"></span></div>`;
+      }).join("")}</details>`).join("") || `<div class="sw-empty">${models.length ? "没有匹配的模型。" : "还没有模型。填好 Key 后点「同步模型」，再点＋选用。"} </div>`;
+
+  const changed = () => C.safe(async () => { await saveProviders(); C.refresh?.(); });
+  list.querySelectorAll(".mrow").forEach((row) => {
+    const mid = row.dataset.m, mm = models.find((x) => x.id === mid), ref = modelRef(p, mm);
+    const update = (selector) => {
+      renderModelList(p);
+      [...list.querySelectorAll(".mrow")].find((el) => el.dataset.m === mid)?.querySelector(selector)?.focus();
+      changed();
+    };
+    row.querySelector(".mkind").onchange = (e) => {
+      mm.kind = e.target.value;
+      for (const [r, , , kinds] of ROLES) if (cfg.defaults[r] === ref && !kinds.includes(mm.kind)) cfg.defaults[r] = "";
+      update(".mkind");
+    };
+    row.querySelector(".mdef").onchange = (e) => {
+      const role = e.target.value;
+      if (!role) return;
+      cfg.defaults[role] = ref;
+      update(".mdef");
+    };
+    row.querySelector(".mtoggle").onclick = () => {
+      mm.enabled = !mm.enabled;
+      if (!mm.enabled) for (const [r] of ROLES) if (cfg.defaults[r] === ref) cfg.defaults[r] = "";
+      update(".mtoggle");
+    };
     row.querySelector(".mchk").onclick = async (e) => {
       const res = row.querySelector(".mres"), btn = e.target; btn.disabled = true; res.className = "mres"; res.textContent = "检测中…";
       try { await flushKey(p); const r = await C.api("/api/providers/check", { method: "POST", body: { id: p.id, model: mid, kind: mm.kind } });
@@ -271,7 +459,7 @@ function detail() {
   });
 }
 
-async function flushKey(p) { if (saveTimer) await saveProviders(); }
+async function flushKey() { if (saveTimer) await saveProviders(); else await providerSave; }
 
 function say(ok, html) { const el = $("#pvMsg"); if (!el) return; el.className = "pv-msg " + (ok ? "ok" : "bad"); el.innerHTML = html; }
 
@@ -295,14 +483,16 @@ async function syncModels(p, quiet = false) {
     await saveProviders();
     const r = await C.api("/api/providers/models", { method: "POST", body: { id: p.id } });
     const old = new Map((p.models || []).map((x) => [x.id, x]));
-    p.models = r.models.filter((x) => x.kind !== "other" || old.has(x.id)).map((x) => old.get(x.id) || x);
+    const catalog = new Map(r.models.filter((x) => x.kind !== "other" || old.has(x.id))
+      .map((x) => [x.id, old.get(x.id) || { ...x, enabled: false }]));
+    for (const m of old.values()) if (m.manual || m.enabled) if (!catalog.has(m.id)) catalog.set(m.id, m);
+    p.models = [...catalog.values()];
     if (r.fixed_base_url) p.base_url = r.fixed_base_url;
-    // 还没有对话 / 向量默认模型时，顺手挑一个，省得再去「默认模型」里选
-    const pickFirst = (role, kinds) => { if (!cfg.defaults[role]) { const m = p.models.find((x) => kinds.includes(x.kind)); if (m) cfg.defaults[role] = `${p.id}::${m.id}`; } };
-    pickFirst("chat", ["chat", "vision"]); pickFirst("vision", ["vision"]); pickFirst("embed", ["embedding"]);
     await saveProviders();
-    detail();
-    say(true, `✓ 已同步 ${p.models.length} 个模型${r.fixed_base_url ? `（地址已自动补上 /v1）` : ""}。在模型右侧「设为默认…」里选，或到「默认模型」统一设置。`);
+    if (cur() !== p || !$("#pvModels")) return;
+    if (r.fixed_base_url) { $("#pvBase").value = p.base_url; $("#pvPrev").textContent = endpointPreview(p); }
+    renderModelList(p);
+    say(true, `✓ 已同步 ${catalog.size} 个模型。点「＋」选用后，再按需设为默认。`);
   } catch (e) { if (!quiet) say(false, "✗ 同步失败：" + E(e.message)); else say(false, "✗ Key 有效，但拉取模型列表失败：" + E(e.message) + "。可以点「＋」手动添加模型。"); }
   if ($("#pvSync")) { $("#pvSync").disabled = false; $("#pvSync").textContent = "⟳ 同步模型"; }
 }
@@ -317,13 +507,13 @@ function guessKind(id) {
 function pageDefaults(m) {
   const opts = (kinds, val) => {
     const groups = cfg.providers.filter((p) => p.enabled).map((p) => {
-      const ms = (p.models || []).filter((x) => kinds.includes(x.kind || "chat"));
+      const ms = (p.models || []).filter((x) => x.enabled && kinds.includes(x.kind || "chat"));
       return ms.length ? `<optgroup label="${E(p.name)}">${ms.map((x) => `<option value="${E(p.id + "::" + x.id)}" ${val === p.id + "::" + x.id ? "selected" : ""}>${E(x.id)}</option>`).join("")}</optgroup>` : "";
     }).join("");
     const missing = val && !groups.includes(`value="${E(val)}"`) ? `<option value="${E(val)}" selected>（已失效）${E(val.split("::")[1] || val)}</option>` : "";
-    return `<option value="">${kinds.includes("embedding") ? "不使用" : "未选择"}</option>${missing}${groups}`;
+    return `<option value="">--</option>${missing}${groups}`;
   };
-  m.innerHTML = `<div class="sv-card"><div class="sv-card-h">默认模型</div><div class="sv-help" style="margin-top:-4px">从已同步的模型里选，不用手打模型名。下拉里没有想要的？先到「模型服务」同步或手动添加。</div>
+  m.innerHTML = `<div class="sv-card"><div class="sv-card-h">默认模型</div><div class="sv-help" style="margin-top:-4px">从已选用的模型里设置默认项。下拉里没有想要的？先到「模型服务」点＋选用。</div>
     ${ROLES.map(([r, t, desc, kinds]) => `<div class="def-row"><div><b>${t}</b><div class="muted">${desc}</div></div>
       <div class="f-row"><select data-role="${r}">${opts(kinds, cfg.defaults[r] || "")}</select><button data-chk="${r}">检测</button></div>
       <div class="mres" id="dr-${r}"></div></div>`).join("")}
@@ -357,20 +547,52 @@ function contextCard() {
 }
 
 // ———————————————— 个人信息（主人 + 安全） ————————————————
-async function pageProfile(m) {
-  const core = await C.safe(() => C.api("/api/core")) || {};
-  const owner = core.sections?.owner?.content || "";
-  m.innerHTML = card("主人", row("关于主人（核心记忆 · 第二段）", `<a class="sv-link" href="/core">去核心记忆编辑 ↗</a>`,
-      owner ? E(owner).slice(0, 160).replace(/\n/g, "<br>") : "还没有写。和 AI 聊天时说「记住，以后叫我…」也会记进来。") +
+function pageProfile(m) {
+  const encrypted = cfg.secrets_encrypted, locked = encrypted && !cfg.secrets_unlocked;
+  const securityState = locked ? "需要解锁" : encrypted ? "已加密 · 已解锁" : "未启用";
+  const access = `<form class="f-row" id="mAccess">
+    <input id="master" class="sv-in w-m" type="password" aria-label="主密码" placeholder="主密码"
+      autocomplete="${locked ? "off" : "new-password"}" required>
+    <button class="${locked ? "primary" : ""}" type="submit">${locked ? "解锁" : "启用加密"}</button>
+  </form>`;
+  m.innerHTML = card("主人", row("关于主人（核心记忆 · 第二段）", `<a class="sv-link" href="/core?from=profile">去核心记忆编辑 ↗</a>`,
+      '<span id="profileOwner">正在加载主人信息…</span>') +
     row("主人令牌", inp("core.owner_token", "secret", "", "w-m"), "远程（不在本机）调用 API / 云服务器同步时用它证明是你；本机访问不需要。")) +
-    card("安全", `<div class="sv-help" style="margin:0 0 8px">用主密码加密 API Key、WebDAV 密码、备份口令。启用后每次启动需在这里解锁（或设置环境变量 STARWISH_MASTER）。</div>
-      ${row("状态", cfg.secrets_encrypted ? (cfg.secrets_unlocked ? '<span class="okc">已加密 · 已解锁</span>' : '<span class="warn">已加密 · 尚未解锁</span>') : '<span class="muted">明文保存在 soul/config.json</span>')}
-      ${row("主密码", `<input id="master" class="sv-in w-m" type="password" placeholder="主密码">${cfg.secrets_encrypted ? '<button id="mUnlock" class="primary">解锁</button><button class="danger" id="mOff">关闭加密</button>' : '<button id="mOn" class="primary">启用加密</button>'}`)}`);
+    `<details class="sv-card sv-security" ${locked ? "open" : ""}>
+      <summary class="sv-card-h">高级安全 <span class="sv-security-state ${locked ? "warn" : encrypted ? "okc" : "muted"}">${securityState}</span></summary>
+      <div class="sv-security-body">
+        <div class="sv-help">${locked ? "输入主密码后，已保存的密钥和口令才可用。"
+          : "可选：用主密码保护保存在本机的 API Key、WebDAV 密码、主人令牌和备份口令。启用后每次启动需要解锁（也可设置 STARWISH_MASTER）。"}</div>
+        ${locked || !encrypted ? row("主密码", access)
+          : row("凭据加密", '<button type="button" class="danger" id="mOff">关闭加密</button>')}
+      </div>
+    </details>`;
   bindAuto(m);
-  const go = (path, body, msg) => C.safe(async () => { await C.api(path, { method: "POST", body }); C.toast(msg); reload(); });
-  if ($("#mOn")) $("#mOn").onclick = () => go("/api/secrets/encrypt", { passphrase: $("#master").value }, "已启用加密");
-  if ($("#mUnlock")) $("#mUnlock").onclick = () => go("/api/secrets/unlock", { passphrase: $("#master").value }, "已解锁");
-  if ($("#mOff")) $("#mOff").onclick = () => confirm("关闭加密后机密将以明文保存，确认？") && go("/api/secrets/decrypt", {}, "已关闭加密");
+  const go = (path, body, msg) => C.safe(async () => {
+    await C.api(path, { method: "POST", body }); C.toast(msg); await reload();
+    window.dispatchEvent(new Event("starwish-agent-config"));
+  });
+  const form = m.querySelector("#mAccess");
+  if (form) form.onsubmit = async (e) => {
+    e.preventDefault();
+    const submit = form.querySelector("button");
+    submit.disabled = true;
+    try {
+      await go(locked ? "/api/secrets/unlock" : "/api/secrets/encrypt",
+        { passphrase: form.querySelector("#master").value }, locked ? "已解锁" : "已启用加密");
+    } finally {
+      submit.disabled = false;
+    }
+  };
+  const off = m.querySelector("#mOff");
+  if (off) off.onclick = () => confirm("关闭加密后机密将以明文保存，确认？") && go("/api/secrets/decrypt", {}, "已关闭加密");
+  const preview = m.querySelector("#profileOwner");
+  C.safe(() => C.api("/api/core")).then((core) => {
+    if (!preview.isConnected) return;
+    const owner = core?.sections?.owner?.content || "";
+    if (owner) preview.innerHTML = E(owner.slice(0, 160)).replace(/\n/g, "<br>");
+    else preview.textContent = core ? "还没有写。和 AI 聊天时说「记住，以后叫我…」也会记进来。" : "暂时无法读取主人信息。";
+  });
 }
 
 // ———————————————— 本地模型（向量） ————————————————
@@ -501,12 +723,16 @@ function pageAppearance(m) {
       <div class="sv-sep"></div>` +
     row("主题颜色", `<div class="swatches">${ACCENTS.map(([c, n]) => `<button class="sw ${ui.accent?.toUpperCase() === c ? "on" : ""}" data-c="${c}" title="${n}" style="background:${c}"></button>`).join("")}
       <label class="sw custom" title="自定义颜色" style="background:${E(ui.accent || "#00B96B")}"><input type="color" id="accPick" value="${E(ui.accent || "#00B96B")}"></label>
-      <input class="sv-in w-s mono" id="accHex" value="${E(ui.accent || "#00B96B")}" maxlength="7"></div>`)) +
+      <input class="sv-in w-s mono" id="accHex" value="${E(ui.accent || "#00B96B")}" maxlength="7"></div>`,
+      "用于选中项、主要按钮和星图控件，不改变浅色或深色背景。")) +
     card("显示", row("缩放", `<div class="zoomer"><button id="zm">−</button><span id="zv">${ui.scale || 100}%</span><button id="zp">＋</button></div>`) +
       row("对话抽屉位置", seg("ui.chat_side", [["left", "左侧"], ["right", "右侧"]])) +
       row("任务列表位置", seg("ui.task_side", [["left", "左侧"], ["right", "右侧"]])));
   bindAuto(m);
-  const setUi = (patch) => C.safe(async () => { await savePatch({ ui: patch }); pageAppearance(m); });
+  const setUi = (patch) => C.safe(async () => {
+    await savePatch({ ui: patch });
+    if (page === "appearance" && settingsOpen()) pageAppearance(m);
+  });
   m.querySelectorAll("[data-th]").forEach((b) => (b.onclick = () => setUi({ theme: b.dataset.th })));
   m.querySelectorAll(".sw[data-c]").forEach((b) => (b.onclick = () => setUi({ accent: b.dataset.c })));
   $("#accPick").onchange = (e) => setUi({ accent: e.target.value.toUpperCase() });

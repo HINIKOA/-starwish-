@@ -10,7 +10,7 @@
 <link rel="stylesheet" href="/static/core.css">
 <link rel="stylesheet" href="/static/eye.css">
 </head>
-<body class="page">
+<body class="page eye-page">
 <div class="sky"></div>
 <header class="ctop">
   <a class="back" href="/">← 星图</a>
@@ -32,27 +32,34 @@
       <div class="stagecol">
         <div class="srcbar">
           <input id="title" placeholder="在看什么？（例如：星际穿越）" maxlength="60">
-          <button data-src="screen" class="primary">🖥 共享屏幕 / 窗口</button>
-          <button data-src="tab">🗂 标签页（含声音）</button>
-          <button data-src="camera">📷 摄像头</button>
+          <button data-src="screen" class="primary" disabled>共享屏幕 / 窗口</button>
+          <button data-src="tab" disabled>标签页（可含声音）</button>
+          <button data-src="camera" disabled>摄像头</button>
           <button id="stopBtn" class="danger hidden">■ 停止并存成星星</button>
         </div>
         <div id="eyeStage" class="eyestage">
           <video id="video" autoplay muted playsinline></video>
           <div id="crop" class="crop hidden"></div>
-          <div id="placeholder" class="ph">还没开始看。<br>选上面一个画面来源，浏览器会弹窗让你挑选要共享的内容。<br><small>画面只在你的电脑里处理，默认不保存。</small></div>
+          <div id="placeholder" class="ph">还没开始看。<br>选上面一个画面来源，再在浏览器里确认共享。<br><small>只在问答时发送选中的关键帧，默认不保存画面。</small></div>
         </div>
+        <p id="captureHint" class="capture-hint hidden" role="status"></p>
         <div class="tools">
-          <button id="regionBtn" title="拖动框出只想让 AI 看的区域，省 token">⬚ 框选区域</button>
-          <button id="fullBtn" class="hidden">全画面</button>
-          <button id="voiceBtn" class="voicebtn" title="宇宙之声：分辨片中每个说话人，看着看着就知道他们叫什么">🌌 宇宙之声 <b id="voiceState">关</b></button>
-          <label class="sw"><input type="checkbox" id="micChk"> 🎙 语音对话</label>
-          <label class="sw"><input type="checkbox" id="ttsChk"> 🔊 朗读</label>
-          <select id="paceSel" title="主动吐槽的节奏">
-            <option value="off">不主动说话</option><option value="calm">安静（30 秒）</option>
-            <option value="normal">陪看（15 秒）</option><option value="chatty">话痨（8 秒）</option>
-          </select>
-          <span class="meter" title="画面变化分（切场景时会跳高）"><i id="meterBar"></i></span>
+          <div class="eye-toolgroup" role="group" aria-label="画面工具">
+            <button id="regionBtn" title="拖动框出只想让 AI 看的区域，省 token" disabled>框选区域</button>
+            <button id="fullBtn" class="hidden">全画面</button>
+          </div>
+          <div class="eye-toolgroup" role="group" aria-label="声音工具">
+            <button id="voiceBtn" class="voicebtn" title="宇宙之声：分辨片中每个说话人" disabled>宇宙之声 <b id="voiceState">关</b></button>
+            <label class="eye-toggle"><input type="checkbox" id="micChk" disabled>语音对话</label>
+            <label class="eye-toggle"><input type="checkbox" id="ttsChk" disabled>朗读</label>
+          </div>
+          <label class="eye-pace">陪看节奏
+            <select id="paceSel" disabled>
+              <option value="off">不主动说话</option><option value="calm">安静（30 秒）</option>
+              <option value="normal">陪看（15 秒）</option><option value="chatty">话痨（8 秒）</option>
+            </select>
+          </label>
+          <div class="eye-activity"><span>画面变化</span><span class="meter" title="画面变化分（切场景时会跳高）"><i id="meterBar"></i></span></div>
         </div>
         <div class="filmstrip" id="strip"></div>
         <div id="cast" class="cast hidden"></div>
@@ -60,8 +67,8 @@
       <div class="chatcol">
         <div id="log" class="elog"><div class="empty">开始观看后，直接说话或打字就能问它。按 <b>H</b> 问「现在这个画面怎么样」。</div></div>
         <div class="cmdbox">
-          <input id="ask" placeholder="问它点什么…（回车发送）" autocomplete="off">
-          <button id="askBtn" class="primary">发送</button>
+          <input id="ask" placeholder="问它点什么…（回车发送）" autocomplete="off" disabled>
+          <button id="askBtn" class="primary" disabled>发送</button>
         </div>
         <div class="stat" id="stat"></div>
       </div>

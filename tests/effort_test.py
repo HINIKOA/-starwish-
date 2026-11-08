@@ -161,6 +161,8 @@ def main():
     c = TestClient(app)
     cfg = config.load_config()
     check("默认配置 llm.agent_effort = default", cfg["llm"].get("agent_effort") == "default")
+    status = c.get("/api/agent/status").json()
+    check("未配置对话模型时不显示内置占位模型", status["model"] == "" and not status["model_ready"])
     got = []
 
     def fake(messages, cfg, tools=None, temperature=0.2, effort=None):
@@ -203,10 +205,22 @@ def main():
     am = [m for m in calls[-1] if m.get("role") == "assistant" and m.get("tool_calls")]
     check("工具调用轮：思考块随助手消息带回下一轮", am and am[-1].get("thinking_blocks", [{}])[0].get("signature") == "S")
 
+    c.put("/api/settings", json={"core": {"owner_token": "fixture-owner-token"}, "llm": {"model": "gpt-fixture"}})
+    status = c.get("/api/agent/status").json()
+    check("需要令牌时仍返回模型与思考等级，不返回历史或用量",
+          status["model"] == "gpt-fixture" and status["effort"] == "medium" and len(status["efforts"]) == 8
+          and status["owner_token_required"] and not status["authorized"] and "history" not in status and "tokens" not in status)
+    check("无令牌不能读取或清空历史，也不能发送对话",
+          c.get("/api/agent/history").status_code == 403 and c.delete("/api/agent/history").status_code == 403
+          and c.post("/api/agent/chat", json={"text": "未验证"}).status_code == 403)
+    verified = c.get("/api/agent/history", headers={"X-StarWish-Owner": "fixture-owner-token"}).json()
+    check("验证主人令牌后才返回对话历史", verified["authorized"] and bool(verified["history"]))
+
     print("== 6. 界面")
     js = (ROOT / "web" / "drawers.js").read_text("utf-8")
     st = (ROOT / "web" / "settings.js").read_text("utf-8")
     check("对话抽屉标题栏有思考等级下拉", 'id="chatEffort"' in js and "agent_effort" in js)
+    check("对话抽屉从独立状态接口显示模型", 'id="chatModel"' in js and '"/api/agent/status"' in js)
     check("设置 → 默认模型 有「思考等级」卡片", "function effortCard" in st and 'sel("llm.agent_effort"' in st)
     check("前后端档位一致", all(f'["{k}"' in st for k in upstream.EFFORTS))
 

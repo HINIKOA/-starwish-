@@ -4,12 +4,23 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtDate = (t) => (t ? new Date(t * 1000).toLocaleString("zh-CN", { hour12: false }) : "—");
-async function api(path, opts = {}) {
+let ownerToken = "";
+function eyeFetch(path, opts = {}, token = ownerToken) {
+  const headers = new Headers(opts.headers);
+  if (token) headers.set("X-StarWish-Owner", token);
+  return fetch(path, { ...opts, headers });
+}
+
+async function api(path, opts = {}, token = ownerToken) {
   const o = { ...opts, headers: { ...(opts.headers || {}) } };
   if (o.body && typeof o.body !== "string" && !(o.body instanceof FormData)) { o.body = JSON.stringify(o.body); o.headers["Content-Type"] = "application/json"; }
-  const r = await fetch(path, o);
+  const r = await eyeFetch(path, o, token);
   let d = null; try { d = await r.json(); } catch { d = null; }
-  if (!r.ok) throw new Error((d && (d.detail || d.message)) || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const err = new Error((d && (d.detail || d.message)) || `HTTP ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return d;
 }
 let tt;
@@ -18,8 +29,10 @@ async function safe(fn) { try { return await fn(); } catch (e) { toast(e.message
 
 // ---------------- 状态 ----------------
 let ST = null;               // /api/eye/status
+let statusError = null, activeTab = "watch";
 let S = null;                // 当前观看会话
 let media = null;            // MediaStream
+let starting = false, stopping = false;
 let sampleTimer = null, liveTimer = null;
 const video = $("#video");
 const small = document.createElement("canvas"); small.width = 64; small.height = 36;
@@ -126,40 +139,111 @@ async function buildFrames() {
 }
 
 // ---------------- 采集 ----------------
+function captureIssue(src) {
+  if (!window.isSecureContext) return "当前地址不支持媒体采集。请使用 HTTPS，或在运行星愿的电脑上打开本机地址。";
+  const method = src === "camera" ? "getUserMedia" : "getDisplayMedia";
+  if (typeof navigator.mediaDevices?.[method] !== "function") return src === "camera"
+    ? "当前浏览器不支持摄像头采集，请试用 Chrome 或 Edge。"
+    : "当前浏览器不支持屏幕共享，请用 Chrome 或 Edge 打开此地址。";
+  return "";
+}
+
+function updateCaptureControls() {
+  $$("[data-src]").forEach((b) => {
+    const issue = captureIssue(b.dataset.src);
+    b.disabled = !ST || starting || stopping || !!media || !!issue;
+    b.title = issue || (!ST ? "请先完成页面上方的主人验证" : media ? "请先停止当前观看" : "");
+  });
+  for (const id of ["voiceBtn", "micChk", "ttsChk", "paceSel"]) $("#" + id).disabled = !ST;
+  $("#regionBtn").disabled = !media;
+  $("#ask").disabled = $("#askBtn").disabled = !S;
+}
+
+function captureHint(message) {
+  const el = $("#captureHint");
+  el.textContent = message;
+  el.classList.toggle("hidden", !message);
+}
+
+function captureError(err) {
+  const messages = {
+    NotAllowedError: "未获得采集权限，可能取消了选择或被浏览器拦截。请重试并确认共享；内置浏览器无法弹窗时，可用 Chrome 或 Edge。",
+    InvalidStateError: "请让这个标签页保持在前台，再直接点击共享按钮。",
+    NotReadableError: "系统无法读取选中的来源。请检查系统权限，或选择另一个窗口。",
+    NotFoundError: "没有找到可用的画面来源。请检查摄像头，或改选屏幕、窗口和标签页。",
+  };
+  return messages[err.name] || err.message || "无法开始观看，请重试。";
+}
+
 async function startCapture(src) {
-  if (media) await stopCapture(false);
+  if (!ST || media || starting || stopping) return;
+  const issue = captureIssue(src);
+  if (issue) { captureHint(issue); return; }
+  starting = true;
+  const engine = ST.engine;
+  updateCaptureControls();
+  captureHint("");
+  let picked = null;
   try {
-    if (src === "camera") media = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
-    else media = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 12 }, audio: true, preferCurrentTab: false, selfBrowserSurface: "exclude", surfaceSwitching: "include" });
-  } catch (e) { toast("没有拿到画面：" + (e.message || e.name), true); media = null; return; }
-  video.srcObject = media; await video.play().catch(() => {});
-  media.getVideoTracks()[0].addEventListener("ended", () => stopCapture(true));
-  S = await safe(() => api("/api/eye/session/start", { method: "POST", body: { title: $("#title").value, source: src, engine: ST.engine } }));
-  if (!S) { await stopCapture(false); return; }
+    if (src === "camera") picked = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+    else picked = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 12, ...(src === "tab" ? { displaySurface: "browser" } : {}) },
+      audio: true, preferCurrentTab: false, selfBrowserSurface: "exclude", surfaceSwitching: "include",
+    });
+    const track = picked.getVideoTracks()[0];
+    if (!track || track.readyState !== "live") throw new Error("共享来源已关闭，请重新选择。");
+    const session = await api("/api/eye/session/start", { method: "POST", body: { title: $("#title").value, source: src, engine } });
+    if (track.readyState !== "live") {
+      await api(`/api/eye/session/${session.id}/end`, { method: "POST", body: { make_star: false } });
+      throw new Error("共享已停止，请重新选择。");
+    }
+    media = picked; S = session;
+    track.addEventListener("ended", () => stopCapture(true), { once: true });
+    video.srcObject = media;
+    video.play().catch(() => {});
+    if (src === "tab" && !media.getAudioTracks().length) captureHint("已共享画面，但没有音频。需要声音时，请重新选择浏览器标签页，并勾选「共享音频」。");
+  } catch (err) {
+    picked?.getTracks().forEach((t) => t.stop());
+    captureHint(captureError(err));
+    if (err.status === 403) await connectEye();
+    return;
+  } finally {
+    starting = false;
+    updateCaptureControls();
+  }
   keys = []; prev = null; integ = 0;
   $("#placeholder").classList.add("hidden"); $("#stopBtn").classList.remove("hidden"); $("#liveBadge").classList.remove("hidden");
   sampleTimer = setInterval(sampleOnce, 1000 / SAMPLE_FPS);
   const t0 = Date.now();
   liveTimer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("#liveTime").textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`; renderStrip(); }, 1000);
-  sys(`开始一起看「${S.title}」。画面只在本机处理，${CFG().save_frames ? "已按设置保存画面" : "不保存画面"}，只记文字日记。`);
-  if (voiceOn()) startVoice(src); else startSubtitles();
+  sys(`开始一起看「${S.title}」。问答时会发送选中的关键帧；${CFG().save_frames ? "已开启本地画面保存" : "默认只保存文字日记"}。`);
+  if (voiceOn()) safe(() => startVoice(src)); else startSubtitles();
   if ($("#micChk").checked) startMic();
 }
 async function stopCapture(makeStar = true) {
+  if (stopping) return;
+  stopping = true;
   clearInterval(sampleTimer); clearInterval(liveTimer); sampleTimer = liveTimer = null;
-  stopSubtitles(); stopVoice();
+  stopSubtitles(); stopVoice(); stopMic();
   if (ctrl) ctrl.abort();
-  speechSynthesis.cancel();
+  stopSpeaking();
   if (media) media.getTracks().forEach((t) => t.stop());
   media = null; video.srcObject = null;
+  crop = null; prev = null;
+  $("#crop").classList.add("hidden"); $("#fullBtn").classList.add("hidden");
+  $("#eyeStage").classList.remove("selecting");
+  captureHint(captureIssue("screen"));
   $("#placeholder").classList.remove("hidden"); $("#stopBtn").classList.add("hidden"); $("#liveBadge").classList.add("hidden");
   if (S) {
     const sid = S.id; S = null;
+    updateCaptureControls();
     const r = await safe(() => api(`/api/eye/session/${sid}/end`, { method: "POST", body: makeStar ? {} : { make_star: false } }));
     if (r) sys(r.star ? `已停止。这次观看沉淀成了一颗星 #${r.star.id}：${r.star.summary}` : "已停止，画面已全部丢弃。");
     if (r && r.voice && r.voice.cast) sys(`🌌 这次认识了：${r.voice.cast}${r.voice.saved ? `（已存进声纹库，下次看这部或同系列会直接认出）` : ""}`);
-    loadStatus();
+    await safe(loadStatus);
   }
+  stopping = false;
+  updateCaptureControls();
 }
 
 // ---------------- 问答（开口即问，流式） ----------------
@@ -181,7 +265,7 @@ async function ask(text, mode = "user") {
   let el = null, out = "", audio = [];
   try {
     const frames = await buildFrames();
-    const r = await fetch("/api/eye/ask", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" },
+    const r = await eyeFetch("/api/eye/ask", { method: "POST", signal: ctrl.signal, headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session: S.id, text, frames, mode }) });
     if ((r.headers.get("content-type") || "").includes("application/json")) {
       const d = await r.json();
@@ -218,8 +302,8 @@ function onSceneCut() { if (S && (CFG().pace || "normal") !== "off" && $("#paceS
 
 // ---------------- 朗读（浏览器 TTS）与回声守卫 ----------------
 let spokenText = "", pcmCtx = null, pcmEnd = 0;
-const speaking = () => speechSynthesis.speaking || (pcmCtx && pcmCtx.currentTime < pcmEnd);
-function stopSpeaking() { speechSynthesis.cancel(); if (pcmCtx) { pcmCtx.close(); pcmCtx = null; pcmEnd = 0; } }
+const speaking = () => window.speechSynthesis?.speaking || (pcmCtx && pcmCtx.currentTime < pcmEnd);
+function stopSpeaking() { window.speechSynthesis?.cancel(); if (pcmCtx) { pcmCtx.close(); pcmCtx = null; pcmEnd = 0; } }
 function speak(text) {
   if (!$("#ttsChk").checked || !text || !("speechSynthesis" in window)) return;
   spokenText = text;
@@ -298,16 +382,90 @@ function setupRegion() {
 }
 
 // ---------------- 状态、日记、设置 ----------------
-async function loadStatus() {
-  ST = await api("/api/eye/status");
+async function loadStatus(token = ownerToken) {
+  ST = await api("/api/eye/status", {}, token);
+  ownerToken = token;
+  statusError = null;
   await loadVoice();
   const e = ST.engines[ST.engine]; const c = CFG();
   $("#emeta").innerHTML = `<span class="chip">引擎 <b>${esc(e.title)}</b></span><span class="chip">模型 <b>${esc(e.model || "未设置")}</b></span>
     <span class="chip">今天 <b>${ST.usage.tokens}</b> tok · <b>${ST.usage.requests}</b> 次</span>${e.ready ? "" : '<span class="chip warn">未配置</span>'}`;
-  $("#intro").innerHTML = `宇宙之眼让 AI <b>和你一起看</b>：屏幕、窗口、标签页或摄像头。浏览器在本机算画面变化，只挑<b>切场景</b>和<b>动作累积</b>的关键帧；
-    你一开口或打字就<b>立刻</b>带上最新几帧去问，画面切换时它也会按节奏主动说一句。图片只进当次请求，历史只留文字日记，<b>越看越贵</b>的问题不存在；
-    结束后整场观看会沉淀成一颗星。${e.ready ? "" : "<br><b style='color:var(--danger)'>先到「设置」里填好模型的地址、Key 和模型名。</b>"}`;
+  $("#intro").innerHTML = `选择要共享的屏幕、窗口、标签页或摄像头。浏览器会从画面中挑选关键帧，问答时把选中的帧发给配置的识图模型，默认只保存文字日记。
+    ${e.ready ? "" : '<br><b class="warn">可以预览画面；要让 AI 看图，请先配置识图模型。</b>'}`;
   $("#paceSel").value = c.pace || "normal"; $("#ttsChk").checked = c.tts !== false;
+  updateCaptureControls();
+  if (!media) captureHint(captureIssue("screen") || captureIssue("camera"));
+}
+
+function needsOwner(err) { return err?.status === 403 && err.message.includes("只对主人开放"); }
+
+function renderStatusError(err) {
+  const intro = $("#intro");
+  if (needsOwner(err) && window.isSecureContext) {
+    intro.innerHTML = `<b>请验证主人身份</b><div class="note">已设置主人令牌时，即使在本机也需要验证。请输入设置里的主人令牌，不是模型 API Key。</div>
+      <form class="eye-auth" id="eyeAuth">
+        <input id="eyeOwnerToken" type="password" aria-label="主人令牌" placeholder="主人令牌" autocomplete="off" required>
+        <button class="primary" type="submit">验证并解锁</button>
+        <div class="eye-auth-status" role="status"></div>
+      </form>
+      <div class="note">验证仅在当前页面有效；未设置令牌时，仅允许本机访问。</div>`;
+    const form = $("#eyeAuth");
+    form.onsubmit = async (ev) => {
+      ev.preventDefault();
+      const input = form.querySelector("input"), button = form.querySelector("button");
+      const token = input.value.trim();
+      if (!token) return;
+      button.disabled = true;
+      try {
+        await loadStatus(token);
+        await renderActiveTab();
+      } catch (error) {
+        if (form.isConnected) form.querySelector('[role="status"]').textContent =
+          needsOwner(error) ? "主人令牌未通过验证。请检查令牌；未设置令牌时请在本机打开。" : error.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+    return;
+  }
+  const message = needsOwner(err) ? "请在 HTTPS 或本机地址打开页面后，再验证主人身份。" : err.message;
+  intro.innerHTML = `<b class="warn">${esc(message)}</b> <button id="eyeRetry" type="button">重试</button>`;
+  $("#eyeRetry").onclick = connectEye;
+}
+
+async function connectEye() {
+  try {
+    await loadStatus();
+  } catch (err) {
+    ST = null; statusError = err;
+    if (needsOwner(err)) ownerToken = "";
+    renderStatusError(err);
+    captureHint(captureIssue("screen"));
+    updateCaptureControls();
+  }
+  await renderActiveTab();
+}
+
+async function renderActiveTab() {
+  if (activeTab === "watch") return;
+  const pane = $("#tab-" + activeTab);
+  if (!ST) {
+    const auth = needsOwner(statusError);
+    pane.innerHTML = `<div class="eye-tab-message">${auth ? "验证主人身份后即可查看此页。" : esc(statusError?.message || "正在加载宇宙之眼…")}
+      ${$("#eyeAuth") ? '<br><button type="button">去验证</button>' : ""}</div>`;
+    const button = pane.querySelector("button");
+    if (button) button.onclick = () => $("#eyeOwnerToken").focus();
+    return;
+  }
+  try {
+    if (activeTab === "settings") renderSettings();
+    else {
+      pane.innerHTML = '<div class="eye-tab-message">正在加载…</div>';
+      await (activeTab === "diary" ? renderDiary() : renderVoices());
+    }
+  } catch (err) {
+    pane.innerHTML = `<div class="eye-tab-message" role="status">加载失败：${esc(err.message)}</div>`;
+  }
 }
 async function renderDiary() {
   const list = await api("/api/eye/sessions?limit=50");
@@ -325,7 +483,9 @@ async function renderDiary() {
 }
 const F = (k, label, type = "text", extra = "") => { const v = CFG()[k]; return type === "checkbox"
   ? `<label class="chk"><input type="checkbox" data-k="${k}" ${v ? "checked" : ""}> ${label}</label>`
-  : `<div><label>${label}</label><input data-k="${k}" type="${type}" value="${esc(v ?? "")}" ${extra}></div>`; };
+  : `<div><label for="eye-${k}">${label}</label><input id="eye-${k}" data-k="${k}" type="${type}" ${type === "password"
+    ? `autocomplete="new-password" placeholder="${CFG()[k + "_set"] ? "已设置（留空不修改）" : "未设置"}"`
+    : `value="${esc(v ?? "")}"`} ${extra}></div>`; };
 const SEL = (k, label, opts) => `<div><label>${label}</label><select data-k="${k}">${opts.map(([v, t]) => `<option value="${v}" ${String(CFG()[k]) === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>`;
 function renderSettings() {
   const E = ST.engines, pre = ST.preflight || {};
@@ -366,6 +526,7 @@ function renderSettings() {
   $("#saveEye").onclick = () => safe(async () => {
     const patch = {};
     $$("#tab-settings [data-k]").forEach((el) => { const k = el.dataset.k;
+      if (el.type === "password" && !el.value) return;
       patch[k] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value || 0) : el.value; });
     const vpatch = {};
     $$("#tab-settings [data-v]").forEach((el) => { const k = el.dataset.v;
@@ -378,11 +539,10 @@ function renderSettings() {
 
 // ---------------- 绑定 ----------------
 $$(".ctabs button").forEach((b) => b.onclick = () => {
+  activeTab = b.dataset.tab;
   $$(".ctabs button").forEach((x) => x.classList.toggle("on", x === b));
   $$(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== "tab-" + b.dataset.tab));
-  if (b.dataset.tab === "diary") safe(renderDiary);
-  if (b.dataset.tab === "settings") renderSettings();
-  if (b.dataset.tab === "voices") safe(renderVoices);
+  renderActiveTab();
 });
 $$("[data-src]").forEach((b) => b.onclick = () => startCapture(b.dataset.src));
 $("#stopBtn").onclick = () => stopCapture(true);
@@ -398,9 +558,11 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "h" || e.key === "H") ask("你看现在这个画面怎么样？", "user");
   if (e.key === "Escape" && media) stopCapture(true);
 });
-window.addEventListener("beforeunload", () => { if (S) navigator.sendBeacon(`/api/eye/session/${S.id}/end`, new Blob(["{}"], { type: "application/json" })); });
+window.addEventListener("pagehide", () => {
+  if (S) eyeFetch(`/api/eye/session/${S.id}/end`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: "{}", keepalive: true }).catch(() => {});
+});
 setupRegion();
-loadStatus().catch((e) => { $("#intro").innerHTML = `<b style="color:var(--danger)">${esc(e.message)}</b>`; $$("[data-src]").forEach((b) => (b.disabled = true)); });
 
 
 // ================= 宇宙之声：声纹分人 + 三路线索认名字 =================
@@ -493,7 +655,7 @@ async function sendVoice(pcm, t0) {
   vQueue++;
   const sid = S.id;
   try {
-    const r = await fetch(`/api/voice/session/${sid}/audio?sr=16000&t0=${t0.toFixed(2)}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: pcm.buffer });
+    const r = await eyeFetch(`/api/voice/session/${sid}/audio?sr=16000&t0=${t0.toFixed(2)}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: pcm.buffer });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { $("#stat").textContent = "🌌 " + (d.detail || `HTTP ${r.status}`); return; }
     for (const l of d.lines) if (l.text) { const el = addMsg("sub", ""); el.querySelector(".b").innerHTML = `<span class="who" style="color:${l.color}">${esc(l.display)}</span>${esc(l.text)}`; }
@@ -584,4 +746,5 @@ function bindVoiceSettings() {
 }
 
 // 桌面版心跳：页面全部关闭后，后台服务才会自动退出（仅浏览器兜底模式用到）
+connectEye();
 setInterval(() => fetch("/api/ping", { method: "POST" }).catch(() => {}), 15000); fetch("/api/ping", { method: "POST" }).catch(() => {});

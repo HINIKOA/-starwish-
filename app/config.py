@@ -340,13 +340,13 @@ def load_raw_config() -> dict:
         return _deep_merge(DEFAULT_CONFIG, data)
 
 
-def load_config() -> dict:
-    """返回可直接使用的配置（机密字段已解密；若加密且未解锁则置空）。"""
+def _load_settings() -> dict:
+    """读取未应用默认模型映射的设置，供保存配置使用。"""
     cfg = load_raw_config()
     if cfg.get("secrets_encrypted"):
         if _master_passphrase:
             try:
-                return apply_providers(_decrypt_all(cfg, _master_passphrase))
+                return _decrypt_all(cfg, _master_passphrase)
             except Exception:
                 pass
         for sec, key in SECRET_FIELDS:
@@ -355,7 +355,12 @@ def load_config() -> dict:
         for p in _provider_keys(cfg):
             if str(p.get("api_key", "")).startswith("enc:"):
                 p["api_key"] = ""
-    return apply_providers(cfg)
+    return cfg
+
+
+def load_config() -> dict:
+    """返回可直接使用的配置（机密字段已解密；若加密且未解锁则置空）。"""
+    return apply_providers(_load_settings())
 
 
 def _migrate_legacy(cfg: dict) -> None:
@@ -407,7 +412,7 @@ def save_config(new_cfg: dict) -> dict:
 
 
 def update_config(patch: dict) -> dict:
-    cur = load_config()
+    cur = _load_settings()
     raw = load_raw_config()
     # 未解锁时保留原密文，避免把空值写回
     patch = dict(patch or {})
@@ -420,6 +425,18 @@ def update_config(patch: dict) -> dict:
                 p["api_key"] = (old.get(p.get("id")) or {}).get("api_key", "") or (
                     cur["llm"].get("api_key", "") if p.get("id") == "legacy" else "")
     merged = _deep_merge(cur, patch)
+    # 旧版曾把运行时映射写回配置；清除默认项时不能继续调用残留的模型。
+    fields = {
+        "chat": ("llm", ("base_url", "api_key", "model", "protocol")),
+        "maintain": ("llm", ("maintenance_model", "maint_base_url", "maint_api_key", "maint_protocol")),
+        "vision": ("eye", ("frame_base_url", "frame_api_key", "frame_model", "frame_protocol")),
+        "embed": ("embed", ("api_base_url", "api_key", "api_model")),
+    }
+    for role, (section, keys) in fields.items():
+        if cur["defaults"].get(role) and not merged["defaults"].get(role):
+            for key in keys:
+                if key not in (patch.get(section) or {}):
+                    merged[section][key] = DEFAULT_CONFIG[section][key]
     if raw.get("secrets_encrypted") and not _master_passphrase:
         raise PermissionError("机密已加密，请先用主密码解锁再保存设置")
     return save_config(merged)
@@ -427,7 +444,7 @@ def update_config(patch: dict) -> dict:
 
 def enable_secret_encryption(passphrase: str) -> None:
     with _lock:
-        cfg = load_config()
+        cfg = _load_settings()
         if not passphrase:
             raise ValueError("主密码不能为空")
         cfg["secrets_encrypted"] = True
@@ -440,7 +457,7 @@ def disable_secret_encryption() -> None:
     with _lock:
         if not secrets_unlocked():
             raise PermissionError("请先解锁")
-        cfg = load_config()
+        cfg = _load_settings()
         cfg["secrets_encrypted"] = False
         _atomic_write_json(CONFIG_PATH, cfg)
 
