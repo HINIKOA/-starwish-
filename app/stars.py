@@ -14,7 +14,8 @@ from .db import (estimate_tokens, fts_query, get_conn, jaccard, log_event,
 from . import db as _db
 
 FIELDS = ("id", "content", "summary", "tags", "created_at", "updated_at", "last_recalled_at",
-          "recall_count", "importance", "boost", "source", "session", "deleted_at", "fused_into", "generation", "fused_from")
+          "recall_count", "importance", "boost", "source", "session", "deleted_at", "fused_into", "generation", "fused_from",
+          "cat_major", "cat_minor")
 
 
 def _hash(content: str) -> str:
@@ -247,13 +248,15 @@ def star_map() -> dict:
     now = time.time()
     with get_conn() as c:
         rows = c.execute("SELECT * FROM stars WHERE deleted_at IS NULL AND fused_into IS NULL ORDER BY created_at").fetchall()
-        out = []
+        out, cats = [], []
         for r in rows:
             tags = json.loads(r["tags"] or "[]")
             ff = json.loads(r["fused_from"]) if r["fused_from"] else []
             out.append([r["id"], int(r["created_at"]), brightness(r, now, cfg), r["importance"],
                         tags[0] if tags else "", (r["summary"] or "")[:48], int(r["generation"] or 0), ff])
-    return {"stars": out, "now": int(now)}
+            cats.append((r["id"], r["cat_major"] or "", r["cat_minor"] or "", int(r["created_at"])))
+    from . import galaxy
+    return {"stars": out, "now": int(now), "galaxy": galaxy.layout(cats)}
 
 
 # ---------------- 检索与召回 ----------------

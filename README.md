@@ -461,6 +461,23 @@ tags: [博客, 部署]
 
 ---
 
+## 五·附五、对话监控、银河系星图与两个抽屉（v0.11.0）
+
+**对话监控**（设置 → 对话监控）：不用改客户端的 API 地址，星愿直接读它们写在本机的对话记录——
+Claude Code（`~/.claude/projects`）、Qoder（`~/.qoder/projects`、`~/.qoder-cn/projects`）、WorkBuddy（`~/.workbuddy/projects`、`~/.workbuddy-ai/projects`）、CodeBuddy（`~/.codebuddy/projects`）、Codex（`~/.codex/sessions`）、OpenCode（`~/.local/share/opencode/opencode.db`，只读）、DeepSeek Harness（实验性，需填路径）。Windows 上 `~` 即 `%USERPROFILE%`，每个客户端都可覆盖路径。
+
+- 只看文件大小 / 修改时间（默认 3 秒一次），一个工作线程排队处理，几乎不占资源；读到哪记在 `soul/watch/offsets.json`，关着软件时聊的下次打开补上。
+- 每轮结束后，监控 AI（整理模型，**不带上下文**，只看这一轮）判断：普通偏好 / 事实 → 星星；重要偏好 → 核心提案；多轮任务 → 「未闭环」碎片，做完合并成一个可复用任务（适合就存成技能）。
+- 「钩子」开关：在客户端里装一个「本轮结束」提醒（`星愿记忆.exe --notify <客户端>`），捕获更及时；改配置前自动备份，关掉开关干净卸载。不装也行，轮询同样能捕获。
+
+**银河系星图**：核心记忆是星系核；主模型（默认对话模型，上下文 400,000 tokens）把记忆分成大类（恒星系，如 体育、代码）和小类（行星系，如 代码 > 环境配置），内容相同的融合、同类的放在一起；星图按分类摆放并画出名字。设置 → 通用 → 「整理星系」，或在对话抽屉里说「整理星系」。
+
+**对话抽屉**（主页浮动面板）：直接说「把关于足球的星归到体育」「记住我喜欢乌龙茶」「立即归纳」。有上下文，累计到 380,000 tokens 自动压缩旧历史。
+
+**任务抽屉**（默认左侧）：星愿自己的任务（归纳、整理、指令、备份、压缩）和各客户端捕获的任务；完成绿、进行中 / 未闭环橙、失败红。
+
+![抽屉](docs/screenshot-drawers.png)
+
 ## 六、LLM 自动整理（可选）
 
 在设置里填好上游 API Key 后：
@@ -492,6 +509,10 @@ tags: [博客, 部署]
 ---
 
 ## 八、备份与同步
+
+v0.11.0 起在「设置 → 数据」：数据目录（打开目录、日志保留期、清除缓存、重置数据）与三种存储——**本地**文件夹、**WebDAV**（加密；每天 03:00 北京时间**增量**上传，只传有变化的记忆；关着软件错过了，下次打开补上）、**云服务器**（把另一个星愿部署在你自己的服务器上，填地址 + 主人令牌即可双向同步，接口 `GET/POST /api/sync/delta`）。同步来的核心记忆只会变成提案。
+
+![数据](docs/screenshot-settings-data.png)
 
 - **本地快照**：`soul/snapshots/starwish-时间.zip`，默认每 24 小时一次、保留 10 个；数据库用 SQLite 在线备份接口拷贝，保证一致。
 - **WebDAV**（坚果云、Nextcloud、群晖、InfiniCLOUD 等）：设置里填地址、账号、密码（坚果云请用「应用密码」）、远端目录、**备份口令**。
@@ -535,6 +556,8 @@ python tests/eye_test.py         # 宇宙之眼
 python tests/embed_test.py       # 向量模型（语义检索）
 python tests/fusion_test.py      # 星图与星辰融合
 python tests/desktop_test.py     # 改名 / 图标 / 桌面版关窗即停 / 免安装版依赖 / 设置窗口与模型服务
+python tests/upstream_test.py    # 上游接口格式
+python tests/watch_test.py       # 对话监控 / 钩子 / 抽屉 / 星系整理 / 上下文压缩 / 数据同步
 python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-onnx 和真实模型时会多跑一项真实录音分人）
 ```
 

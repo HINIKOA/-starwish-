@@ -1,5 +1,23 @@
 # 更新记录
 
+## v0.11.0（2026-11-08）对话监控、银河系星图、对话 / 任务抽屉、数据同步、设置重做
+- **对话监控**（`app/watch/`）：不经过代理，直接读各 AI 客户端写在本机的对话记录。只 stat 轮询（默认 3 秒）+ 单个工作线程，偏移量存 `soul/watch/offsets.json`，关着软件时聊的下次打开补上；第一次启用从现在开始，不回灌历史。
+  - 监控 AI 不带上下文：每次只看新的一轮（+ 该会话的未闭环任务摘要），严格 JSON `{"items":[{kind,text,category,importance,task_key,task_status}]}`；用「整理模型」，按服务商协议调用。琐碎轮跳过；没配整理模型时不推进偏移；单轮连续失败 3 次跳过。
+  - 核心记忆规则不变：重要偏好（重要度 ≥ 4）→ 核心提案；普通偏好 / 事实 → 普通星（来源 `watch:<客户端>`）。
+  - 任务：按 客户端 + 会话 + 任务 存碎片（标签「未闭环」）；闭环时合并成一个完整可复用的任务（适合就存成技能，否则带「任务」标签的星）；失败标红；主人可在任务抽屉里手动标记。
+  - 客户端：Claude Code、Qoder、WorkBuddy、CodeBuddy、Codex、OpenCode（SQLite 只读）、DeepSeek Harness（实验性）。
+  - 「本轮结束」钩子（设置里一键装 / 卸，先备份、幂等、干净卸载）：Claude 类 `settings.json` 的 Stop 钩子、Codex `config.toml` 顶层 `notify`、OpenCode 插件 `~/.config/opencode/plugins/starwish.js`；dsh 用官方 `dsh-hooks-claude-code` 桥接。钩子命令 `星愿记忆.exe --notify <客户端>`：服务在就 POST `/api/watch/notify`，不在就写 `soul/watch/inbox.jsonl`，永远 0 退出不阻塞；两个启动器对 `--notify` 继承标准输入输出、不显示进度窗。
+- **银河系星图**：星系核 = 核心记忆，恒星系 = 大类，行星系 = 小类，星球 = 一条记忆。`stars` 新增 `cat_major / cat_minor / uid`（旧库自动升级）。主模型（默认对话模型，默认 400,000 tokens 上下文）负责融合相同的星、给星分类、合并重复类别；位置由分类推出（`app/galaxy.py`，可复现），星图画出恒星系 / 行星系名字；新旧决定大小亮度不变。对话监控出新星后自动排队整理。
+- **对话抽屉**：主页可拖动、可调大小、可收起、记住位置的浮动面板，用自然语言指挥 AI 管理星愿（搜索、增改删星、改核心——面板是主人通道、提提案、看技能、立即归纳、整理星系、开关监控、看状态）。有上下文（`soul/agent/chat.json`）；没配模型时支持 `/状态 /归纳 /整理 /搜索 /清空`。
+- **自动压缩**：有上下文的地方（对话抽屉、主模型整理）累计到 380,000 tokens（`llm.compact_tokens`，可配）自动把较早历史压成摘要 + 保留最近几轮，记日志并显示在任务抽屉。
+- **任务抽屉**（默认左侧）：「星愿」页列出对话归纳、整理星系、对话指令、备份、上下文压缩、记忆整理；「客户端任务」页列出捕获的任务。完成绿、进行中 / 未闭环橙、失败红，每 4 秒刷新。`/api/tasks`。
+- **数据**（`app/datasync.py`）：数据目录（打开目录 / 日志、日志保留期——启动清理一次之后每 12 小时、清除缓存、重置数据——先自动快照）；存储只做三种：本地文件夹、WebDAV（加密）、云服务器（自己服务器上的星愿，`GET/POST /api/sync/delta`，主人令牌）；坚果云 / S3 显示「即将支持」。WebDAV 每天 03:00（北京时间）**增量**上传（只传水位线之后新增 / 修改 / 隐藏的星），关窗错过了下次启动补一次，每次进任务抽屉。同步来的核心记忆只变成提案。
+- **设置重做**（仿 Cherry Studio）：整页视图 + 「← 返回」；左栏分组导航（基础 / 工具 / 偏好，可搜索），「数据」有子导航；右侧圆角卡片，改了就自动保存。新增「对话监控」「外观」「数据」页；默认模型页可设上下文窗口与压缩阈值。
+- **外观**：主题 浅色 / 深色 / 系统、主题颜色（绿 #00B96B 默认、红、橙、蓝、紫 + 自定义）、缩放、对话抽屉 / 任务列表位置；`web/theme.js` 所有页面生效（星图画面保持夜空）。
+- 新增 `tests/watch_test.py` 140 项；截图 `docs/screenshot-drawers.png`、`docs/screenshot-settings-appearance.png`、`docs/screenshot-settings-data.png`。
+- **格式核实情况**：Codex rollout 与 notify、Claude Code Stop 钩子输入、CodeBuddy 钩子、OpenCode 1.x 表结构已对照官方文档 / 源码；Claude Code JSONL 行结构按通行格式；Qoder（按 Claude 同款处理）、WorkBuddy 内容细节、OpenCode 2.x `session_message` 内容与插件加载、dsh 事件名**未核实**（解析全部容错；dsh 标为实验性，`.jsonl.zstd` 需装 zstandard）。
+- 已知局限：融合关系（哪颗并进了哪颗）不跨设备同步；MCP 的 `log_turn` 未做（轮询 + 钩子已覆盖）。
+
 ## v0.10.0（2026-11-08）上游接口格式：新增 OpenAI Responses，补上 Anthropic 漏洞
 - 新增 `app/upstream.py`：内部统一用 Chat Completions 格式，按服务商选的格式转换——OpenAI 兼容（`/chat/completions`，原样转发）、Anthropic（`/v1/messages`，x-api-key）、OpenAI Responses（`/responses`，`store:false`）。
 - 转换覆盖：system / instructions、图片（data URL 与网址）、工具定义与 tool_choice、工具调用与工具结果、temperature（Anthropic 自动限制在 0~1）/ top_p / max_tokens / stop、流式（含工具参数逐段拼接、字节被切碎也能拼回）、用量、思考内容 → `reasoning_content`、结束原因；上游错误转成 OpenAI 错误格式。

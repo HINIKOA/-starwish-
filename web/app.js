@@ -2,6 +2,7 @@
 // 设计灵感来自 dsh-xingxi（作者 Yuuyuko-uu）：越新的星越亮，老星只是变暗、不会消失。
 
 import { initSettings, toggleSettings } from "./settings.js";
+import { initDrawers } from "./drawers.js";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -145,7 +146,9 @@ function buildStars(THREE, list) {
   const now = Date.now() / 1000;
   S.anims = []; const ghosts = [];
   list.forEach((s, i) => {
-    const [id, created, bright, imp, tag, , gen = 0, fused = []] = s;
+    const [id, created, bright, imp, tag0, , gen = 0, fused = []] = s;
+    const gcat = S.galaxy?.cat?.[id];
+    const tag = gcat ? gcat[0] : tag0;          // v0.11.0：颜色按恒星系（大类）
     S.idToIdx.set(id, i);
     const f = n > 1 ? (n - 1 - i) / (n - 1) : 0; // 0 = 最新，1 = 最老
     const rr = rnd(hash(id) + 1);
@@ -153,7 +156,8 @@ function buildStars(THREE, list) {
     const R = 7 + spread * Math.sqrt(f) + rr() * 3;
     const arms = 5, arm = tag ? hash(tag) % arms : arms - 1;
     const ang = (arm / arms) * Math.PI * 2 + R * 0.075 + (rr() - 0.5) * 0.7;
-    const p = [Math.cos(ang) * R, (rr() - 0.5) * (1.5 + R * 0.12), Math.sin(ang) * R];
+    const gp = S.galaxy?.pos?.[id];              // v0.11.0：银河系布局（恒星系绕星系核、行星系聚在恒星系旁、星球绕行星系）
+    const p = gp ? [gp[0], gp[1], gp[2]] : [Math.cos(ang) * R, (rr() - 0.5) * (1.5 + R * 0.12), Math.sin(ang) * R];
     final.set(p, i * 3); pos.set(p, i * 3);
     if (!tagHue.has(tag)) tagHue.set(tag, tag ? (hash(tag) % 360) / 360 : 0.62);
     c.setHSL(tagHue.get(tag), tag ? 0.55 : 0.35, 0.72);
@@ -193,7 +197,13 @@ function buildStars(THREE, list) {
   // 被吸收的成员：旧位置也记着，后面再融合时还能从它们那里飞过来
   if (n) { S.minT = list[0][1]; S.maxT = list[n - 1][1]; }
   if (first && !S.userZoomed) S.cam.dist = 45 + 75 * Math.min(1, n / 300);  // 星少时镜头拉近
+  const sysList = (S.galaxy && S.galaxy.systems) || [];
+  if (first && !S.userZoomed && sysList.length) {   // 银河系布局：镜头退到能看见全部恒星系
+    const ext = Math.max(...sysList.map((x) => Math.hypot(x.center[0], x.center[2]) + x.radius));
+    S.cam.dist = Math.max(55, Math.min(240, ext * 1.15));
+  }
   buildGhosts(THREE, ghosts);
+  buildLabels(THREE, (S.galaxy && S.galaxy.systems) || []);
   $("#emptyHint").classList.toggle("hidden", n > 0);
   applyFilters();
 }
@@ -350,10 +360,44 @@ function animate(t) {
 }
 
 // ---------------- 数据加载 ----------------
+// ---------------- 恒星系 / 行星系名字（v0.11.0） ----------------
+function textSprite(THREE, text, big) {
+  const cv = document.createElement("canvas"), ctx = cv.getContext("2d"), fs = big ? 44 : 30;
+  ctx.font = `${big ? 600 : 400} ${fs}px "PingFang SC","Microsoft YaHei",sans-serif`;
+  const w = Math.ceil(ctx.measureText(text).width) + 24;
+  cv.width = w; cv.height = fs + 20;
+  ctx.font = `${big ? 600 : 400} ${fs}px "PingFang SC","Microsoft YaHei",sans-serif`;
+  ctx.fillStyle = big ? "rgba(255,226,160,0.95)" : "rgba(200,210,255,0.8)";
+  ctx.shadowColor = "rgba(0,0,0,0.8)"; ctx.shadowBlur = 8;
+  ctx.fillText(text, 12, fs + 4);
+  const tex = new THREE.CanvasTexture(cv);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false }));
+  const k = big ? 0.05 : 0.034;
+  sp.scale.set(cv.width * k, cv.height * k, 1);
+  return sp;
+}
+function buildLabels(THREE, systems) {
+  if (S.labels) { S.scene.remove(S.labels); S.labels.traverse((o) => { o.material?.map?.dispose(); o.material?.dispose(); }); }
+  S.labels = new THREE.Group();
+  for (const sys of systems) {
+    const a = textSprite(THREE, `${sys.name} · ${sys.count}`, true);
+    a.position.set(sys.center[0], sys.center[1] + 4 + Math.min(10, sys.radius * 0.4), sys.center[2]);
+    S.labels.add(a);
+    for (const mn of sys.minors || []) {
+      const b = textSprite(THREE, mn.name, false);
+      b.position.set(mn.center[0], mn.center[1] + 2.4, mn.center[2]);
+      S.labels.add(b);
+    }
+  }
+  S.scene.add(S.labels);
+}
+
 async function loadMap() {
   const [m, core] = await Promise.all([api("/api/stars/map"), api("/api/core")]);
   S.core = core;
-  const sig = m.stars.map((x) => x[0]).join(",") + "|" + (core.rev ?? "") + "|" + Math.floor(Date.now() / 3600000);
+  S.galaxy = m.galaxy || null;
+  const sig = m.stars.map((x) => x[0]).join(",") + "|" + (core.rev ?? "") + "|" + Math.floor(Date.now() / 3600000) + "|" +
+    ((m.galaxy && m.galaxy.systems) || []).map((x) => x.name + x.count + (x.minors || []).map((y) => y.name + y.count).join("/")).join(",");
   if (S.three && sig === S.mapSig) { updateTimelineText(); return; }   // 没有变化就不重建
   S.mapSig = sig;
   if (S.three) { buildCore(S.three); buildStars(S.three, m.stars); }
@@ -634,6 +678,8 @@ async function panelEvents() {
 // ---------------- 启动 ----------------
 (async function main() {
   initSettings({ api, toast, esc, safe, refresh, embedPanel });
+  initDrawers({ api, toast, esc, safe, refresh });
+  if (location.hash.startsWith("#settings")) toggleSettings(true, location.hash.slice(10));   // 例如 #settings/data/webdav
   const THREE = await loadThree();
   if (THREE) { S.three = THREE; initScene(THREE); requestAnimationFrame(animate); }
   else $("#noThree").classList.remove("hidden");

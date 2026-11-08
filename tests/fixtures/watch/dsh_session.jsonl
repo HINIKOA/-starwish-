@@ -1,0 +1,4 @@
+{"type": "session", "version": 4, "id": "dsh-sess-0001", "cwd": "/home/u/dsh", "createdAt": 1794100000000}
+{"type": "user/message", "seq": 0, "time": 1794100001000, "data": {"content": [{"type": "text", "text": "把日志级别默认改成 info"}]}}
+{"type": "text-chunks", "seq0": 1, "time0": 1794100002000, "data": {"turn": 1, "step": 1, "index": 0, "dt": [1, 1], "texts": ["已改", "成 info", "。"]}}
+{"type": "agent/turn-end", "seq": 4, "time": 1794100003000, "data": {"reason": "completed"}}

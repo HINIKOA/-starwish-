@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import logging
 import time
@@ -16,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import __version__, archive, config, core, evolve, eye, fusion, importers, maintenance, providers, semantic, stars, sync, voice
+from . import __version__, agent, archive, datasync, jobs, organize, config, core, evolve, eye, fusion, importers, maintenance, providers, semantic, stars, sync, voice
 from .embed import models as embed_models
 from .db import init_db, log_event, read_events
 from .proxy import router as proxy_router
@@ -39,12 +40,18 @@ async def scheduler_loop():
 
             if due("last_consolidate_t", sch.get("consolidate_hours")) and maintenance.llm_ready(cfg):
                 config.update_state(last_consolidate_t=now)
-                await run_in_threadpool(maintenance.consolidate)
+                await run_in_threadpool(_consolidate_job)
             if cfg["memory"].get("fuse_auto", True):
                 try:
                     await run_in_threadpool(fusion.auto_fuse, cfg)
                 except Exception as e:  # noqa: BLE001
                     log_event("star_fuse_error", error=str(e)[:200])
+            try:   # 每天 03:00（北京时间）WebDAV 增量 / 云服务器同步
+                await run_in_threadpool(datasync.run_daily)
+            except Exception as e:  # noqa: BLE001
+                log_event("daily_error", error=str(e)[:200])
+            if now - float(st.get("last_log_clean") or 0) >= 12 * 3600:
+                await run_in_threadpool(datasync.clean_logs)
             if due("last_snapshot", sch.get("snapshot_hours")):
                 await run_in_threadpool(sync.local_snapshot)
             if due("last_backup_try", sch.get("backup_hours")) and cfg["webdav"].get("url"):
@@ -80,9 +87,27 @@ async def lifespan(app: FastAPI):
     core.load_core()
     log_event("server_start", version=__version__)
     _embed_boot()
+    try:
+        jobs.fail_stale()
+    except Exception as e:  # noqa: BLE001
+        log.warning("jobs: %s", e)
+    from .watch import watcher as _watcher
+    if not os.environ.get("STARWISH_NO_WATCH"):
+        _watcher.get().start()           # 对话监控：只活在服务进程里，关窗即停
     task = asyncio.create_task(scheduler_loop())
+
+    def _boot_data():   # 启动时：清理过期日志；关窗期间错过的 03:00 备份补上
+        try:
+            datasync.clean_logs()
+            datasync.run_daily(catch_up=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning("启动补跑失败：%s", e)
+    if not os.environ.get("STARWISH_NO_DAILY"):
+        import threading as _th
+        _th.Thread(target=_boot_data, daemon=True, name="starwish-boot-data").start()
     yield
     task.cancel()
+    _watcher.get().stop()
 
 
 app = FastAPI(title="星愿 StarWish", version=__version__, lifespan=lifespan)
@@ -107,6 +132,11 @@ async def _nf(_, e):
 @app.exception_handler(evolve.skills.SkillError)
 async def _skill_err(_, e):
     return JSONResponse({"detail": str(e)}, status_code=400)
+
+
+@app.exception_handler(FileNotFoundError)
+async def _fnf(_, e):
+    return JSONResponse({"detail": str(e)}, status_code=404)
 
 
 @app.exception_handler(ValueError)
@@ -588,14 +618,24 @@ def post_archive(a: ArchiveIn):
     return {"file": archive.append_messages(a.messages, a.session, a.source)}
 
 
+def _consolidate_job():
+    with jobs.run("maintenance", "整理归档对话") as j:
+        r = maintenance.consolidate()
+        j["detail"] = r.get("reason") or f"新增 {r.get('added', 0)}，合并 {r.get('merged', 0)}，提案 {r.get('proposals', 0)}"
+        if r.get("errors"):
+            j["status"] = "failed"
+        return r
+
+
 @app.post("/api/maintenance/consolidate")
 async def api_consolidate(background: bool = True):
     if not maintenance.llm_ready():
         return {"ok": False, "skipped": True, "reason": "未配置 LLM API Key，跳过整理（其他功能不受影响）"}
     if background:
-        maintenance.consolidate_async()
+        import threading as _th
+        _th.Thread(target=_consolidate_job, daemon=True).start()
         return {"ok": True, "started": True}
-    return await run_in_threadpool(maintenance.consolidate)
+    return await run_in_threadpool(_consolidate_job)
 
 
 @app.get("/api/maintenance/status")
@@ -1229,6 +1269,263 @@ def voice_library_delete(key: str, request: Request):
     if not voice.registry.library_delete(key):
         raise HTTPException(404, "声纹库里没有这一部")
     return voice.registry.library_public()
+
+
+# ---------------- 对话监控 / 任务 / 对话抽屉 / 星系整理（v0.11.0） ----------------
+def _need_owner(request: Request) -> None:
+    if not is_owner(request):
+        raise HTTPException(403, "只有主人可以这样做")
+
+
+def _watch_status() -> dict:
+    from .watch import adapters, hooks, watcher
+    cfg = config.load_config()
+    w = cfg.get("watch") or {}
+    wt = watcher.get()
+    st = wt.public()
+    clients = []
+    for cid, meta in adapters.CLIENTS.items():
+        cc = (w.get("clients") or {}).get(cid) or {}
+        rts = adapters.roots(cid, cc)
+        clients.append({"id": cid, "title": meta["title"], "enabled": bool(cc.get("enabled")), "hook": bool(cc.get("hook")),
+                        "hook_installed": hooks.installed(cid), "hook_target": hooks.target(cid), "path": cc.get("path", ""),
+                        "roots": [str(r) for r in rts], "exists": any(r.exists() for r in rts),
+                        "experimental": bool(meta.get("experimental")), "verified": meta.get("verified", ""),
+                        "hook_command": hooks.command_str(cid),
+                        "stats": st["clients"].get(cid) or {"files": sum(1 for v in wt.state.files.values() if v.get("c") == cid)}})
+    return {"enabled": bool(w.get("enabled", True)), "llm_ready": maintenance.llm_ready(cfg), "status": st, "clients": clients}
+
+
+@app.get("/api/watch/status")
+def watch_status():
+    return _watch_status()
+
+
+@app.post("/api/watch/notify")
+def watch_notify(body: dict):
+    """客户端「本轮结束」提醒（钩子 / --notify 调用）。只会去读该客户端自己目录下的记录文件。"""
+    from .watch import watcher
+    body = body or {}
+    client = str(body.get("client") or "")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {k: v for k, v in body.items() if k != "client"}
+    return watcher.get().notify(client, payload)
+
+
+@app.post("/api/watch/process")
+async def watch_process(request: Request):
+    _need_owner(request)
+    from .watch import watcher
+    return await run_in_threadpool(watcher.get().process_now)
+
+
+@app.post("/api/watch/client/{cid}")
+def watch_client(cid: str, body: dict, request: Request):
+    """开关某客户端的监控 / 安装或卸载钩子 / 路径覆盖。"""
+    _need_owner(request)
+    from .watch import adapters, hooks
+    if cid not in adapters.CLIENTS:
+        raise HTTPException(404, "不认识的客户端")
+    body = body or {}
+    patch: dict = {}
+    out: dict = {}
+    if "enabled" in body:
+        patch["enabled"] = bool(body["enabled"])
+    if "path" in body:
+        patch["path"] = str(body["path"] or "").strip()
+    if "hook" in body:
+        want = bool(body["hook"])
+        r = hooks.install(cid) if want else hooks.uninstall(cid)
+        out["hook_result"] = r
+        if r.get("manual"):
+            want = False
+        patch["hook"] = want and hooks.installed(cid)
+        log_event("watch_hook", client=cid, install=want, path=r.get("path"))
+    if patch:
+        config.update_config({"watch": {"clients": {cid: patch}}})
+    if "watch_enabled" in body:
+        config.update_config({"watch": {"enabled": bool(body["watch_enabled"])}})
+    return {**_watch_status(), **out}
+
+
+@app.get("/api/tasks")
+def api_tasks(limit: int = 60):
+    from .watch import store
+    return {"jobs": jobs.list_jobs(limit), "client_tasks": store.list_tasks(limit), "counts": store.counts()}
+
+
+@app.get("/api/tasks/client/{tid}")
+def api_task_get(tid: int):
+    from .watch import store
+    t = store.get_task(tid)
+    if not t:
+        raise HTTPException(404, "任务不存在")
+    return t
+
+
+@app.post("/api/tasks/client/{tid}")
+async def api_task_status(tid: int, body: dict, request: Request):
+    _need_owner(request)
+    from .watch import extract
+    return await run_in_threadpool(extract.set_status, tid, str((body or {}).get("status") or ""))
+
+
+@app.post("/api/agent/chat")
+async def api_agent_chat(body: dict, request: Request):
+    _need_owner(request)
+    try:
+        return await run_in_threadpool(agent.chat, str((body or {}).get("text") or ""))
+    except ValueError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reply": f"出错了：{e}", "actions": []}
+
+
+@app.get("/api/agent/history")
+def api_agent_history(request: Request):
+    _need_owner(request)
+    from . import context
+    h = agent.load_history()
+    cfg = config.load_config()
+    return {"history": h[-200:], "tokens": context.total_tokens(h), "window": context.window(cfg),
+            "compact_at": context.compact_threshold(cfg)}
+
+
+@app.delete("/api/agent/history")
+def api_agent_history_clear(request: Request):
+    _need_owner(request)
+    agent.clear_history()
+    return {"ok": True}
+
+
+@app.post("/api/organize")
+async def api_organize(request: Request, background: bool = True):
+    _need_owner(request)
+    if background:
+        return {"ok": True, "queued": organize.schedule(delay=0.1)}
+    return await run_in_threadpool(organize.run_job, "整理星系（手动）")
+
+
+@app.get("/api/organize/categories")
+def api_categories():
+    return {"categories": organize.categories(), "last": config.load_state().get("last_organize")}
+
+
+@app.post("/api/stars/{sid}/category")
+def api_star_category(sid: int, body: dict):
+    organize.set_category(sid, str((body or {}).get("major") or ""), str((body or {}).get("minor") or ""))
+    return stars.get_star(sid)
+
+
+# ---------------- 数据：目录 / 缓存 / 重置 / 备份与恢复 / 增量同步（v0.11.0） ----------------
+@app.get("/api/sync/delta")
+def sync_delta_get(request: Request, since: float = 0):
+    """云服务器接口：导出水位线之后的变化（主人令牌）。"""
+    _need_owner(request)
+    return datasync.export_delta(since)
+
+
+@app.post("/api/sync/delta")
+def sync_delta_post(body: dict, request: Request):
+    """云服务器接口：合并另一台设备推来的变化（主人令牌）。核心记忆只会变成提案。"""
+    _need_owner(request)
+    return datasync.import_delta(body, source="cloud-push")
+
+
+@app.get("/api/data/info")
+def data_info():
+    return datasync.info()
+
+
+@app.post("/api/data/open")
+def data_open(body: dict, request: Request):
+    _need_owner(request)
+    return {"path": datasync.open_folder(str((body or {}).get("which") or "soul"))}
+
+
+@app.post("/api/data/clean_logs")
+def data_clean_logs(request: Request):
+    _need_owner(request)
+    return {"removed": datasync.clean_logs()}
+
+
+@app.post("/api/data/clear_cache")
+def data_clear_cache(request: Request):
+    _need_owner(request)
+    return {"freed": datasync.clear_cache()}
+
+
+@app.post("/api/data/reset")
+def data_reset(body: dict, request: Request):
+    _need_owner(request)
+    if (body or {}).get("confirm") != "重置":
+        raise HTTPException(428, "请输入「重置」确认")
+    return datasync.reset_data()
+
+
+@app.get("/api/data/backups")
+async def data_backups(target: str = "local"):
+    if target == "local":
+        return {"items": datasync.local_list(), "dir": str(datasync.local_dir())}
+    if target == "webdav":
+        try:
+            return {"items": await run_in_threadpool(sync.webdav_list)}
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, str(e))
+    raise HTTPException(400, "未知的存储")
+
+
+@app.post("/api/data/backup")
+async def data_backup(body: dict, request: Request):
+    _need_owner(request)
+    target = str((body or {}).get("target") or "local")
+    fn, title = {"local": (datasync.local_backup, "本地备份"), "webdav": (sync.webdav_backup, "WebDAV 完整备份"),
+                 "webdav_delta": (datasync.webdav_incremental, "WebDAV 增量备份"),
+                 "cloud": (datasync.cloud_sync, "云服务器同步")}.get(target, (None, ""))
+    if not fn:
+        raise HTTPException(400, "未知的存储")
+
+    def go():
+        with jobs.run("backup", title + "（手动）") as j:
+            r = fn()
+            j["detail"] = json.dumps(r, ensure_ascii=False)[:500]
+            return r
+    try:
+        return await run_in_threadpool(go)
+    except (ValueError, FileNotFoundError, PermissionError):
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e))
+
+
+@app.post("/api/data/restore")
+async def data_restore(body: dict, request: Request):
+    _need_owner(request)
+    body = body or {}
+    target, name, pw = str(body.get("target") or "local"), str(body.get("name") or ""), str(body.get("passphrase") or "")
+    if not body.get("confirm"):
+        raise HTTPException(428, "恢复会覆盖当前数据（会先自动做一次快照），请确认")
+    try:
+        if target == "local":
+            return await run_in_threadpool(datasync.local_restore, name, pw)
+        if target == "webdav":
+            return await run_in_threadpool(sync.webdav_restore, name, pw or None)
+        if target == "webdav_delta":
+            return await run_in_threadpool(datasync.webdav_pull_deltas)
+        if target == "cloud":
+            return await run_in_threadpool(datasync.cloud_pull)
+    except (ValueError, FileNotFoundError):
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, str(e))
+    raise HTTPException(400, "未知的存储")
+
+
+@app.post("/api/data/cloud/check")
+async def data_cloud_check(body: dict):
+    try:
+        return await run_in_threadpool(datasync.cloud_check, str((body or {}).get("url") or ""), str((body or {}).get("token") or ""))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"连不上云服务器：{e}")
 
 
 # ---------------- 静态面板 ----------------

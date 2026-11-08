@@ -11,6 +11,7 @@
  *   4. 记忆数据放在 exe 旁边的 soul\ 文件夹（STARWISH_SOUL_DIR），随 U 盘带走。
  *   5. 无命令窗口运行 runtime\pythonw.exe desktop.py；关窗口即退出。
  *      参数 --mcp：以 stdio 方式运行 MCP 服务（继承标准输入输出），供 Claude / Cursor 等调用。
+ *      参数 --notify <客户端>：AI 客户端「本轮结束」钩子；继承标准输入输出、不显示进度窗，立刻退出。
  */
 #ifndef UNICODE
 #define UNICODE
@@ -160,6 +161,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
     if (slash) *slash = 0;
 
     int mcp = args && wcsstr(args, L"--mcp") != NULL;
+    int notify = args && wcsstr(args, L"--notify") != NULL;
+    int console = mcp || notify;   /* 需要标准输入输出的模式 */
 
     /* 1. 读尾部 + 映射负载 */
     HANDLE f = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
@@ -190,7 +193,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
         HANDLE map = CreateFileMappingW(f, NULL, PAGE_READONLY, 0, 0, NULL);
         const unsigned char *view = map ? (const unsigned char *)MapViewOfFile(map, FILE_MAP_READ, 0, 0, 0) : NULL;
         if (!view) { CloseHandle(f); fail(L"内存不足，无法准备运行环境。"); return 4; }
-        if (!mcp) show_progress(inst);
+        if (!console) show_progress(inst);
         wchar_t b2[MAX_PATH * 2]; wcscpy(b2, base); mkdirs(b2);
         rmtree(tmp); rmtree(target);
         wchar_t t2[MAX_PATH * 2]; wcscpy(t2, tmp); mkdirs(t2);
@@ -213,7 +216,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
 
     /* 3. 启动 */
     wchar_t py[MAX_PATH * 2], script[MAX_PATH * 2], soul[MAX_PATH * 2], cmd[MAX_PATH * 8];
-    _snwprintf(py, MAX_PATH * 2, mcp ? L"%ls\\runtime\\python.exe" : L"%ls\\runtime\\pythonw.exe", target);
+    _snwprintf(py, MAX_PATH * 2, console ? L"%ls\\runtime\\python.exe" : L"%ls\\runtime\\pythonw.exe", target);
     _snwprintf(script, MAX_PATH * 2, mcp ? L"%ls\\mcp_server.py" : L"%ls\\desktop.py", target);
     _snwprintf(soul, MAX_PATH * 2, L"%ls\\soul", dir);
     if (GetEnvironmentVariableW(L"STARWISH_SOUL_DIR", NULL, 0) == 0)
@@ -231,7 +234,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
     ZeroMemory(&si, sizeof si); si.cb = sizeof si;
     ZeroMemory(&pi, sizeof pi);
     BOOL inherit = FALSE;
-    if (mcp) { /* 把客户端给的管道原样交给 Python */
+    if (console) { /* 把客户端给的管道原样交给 Python（MCP 的标准输入输出 / 钩子 JSON） */
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
         si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);

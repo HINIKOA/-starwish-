@@ -5,6 +5,8 @@
 - 没有 WebView2 时退回 Edge / Chrome 的「应用模式」窗口，关掉它同样会停止服务；
   两者都没有时用默认浏览器打开，并靠页面心跳判断：页面全部关闭 60 秒后自动退出。
 - 已有一个星愿在运行时，不再起第二份服务，只把窗口再打开一次。
+- `--notify <客户端>`（v0.11.0）：各 AI 客户端「本轮结束」钩子调用；把提醒交给正在运行的星愿（没开就记进 inbox），
+  立刻 0 退出，不开窗口、不启动服务。
 """
 from __future__ import annotations
 
@@ -175,6 +177,7 @@ def main():
         if not svc.start(port):
             _fatal("本地服务没有启动成功，详情见 soul/logs/desktop.log")
             return
+        config.update_state(run_port=port, run_pid=os.getpid())   # 钩子 --notify 按这个端口找服务
     try:
         if os.environ.get("STARWISH_DESKTOP_MODE") == "browser":
             _browser_with_heartbeat(url)
@@ -183,6 +186,10 @@ def main():
     finally:
         if svc:
             svc.stop()
+            try:
+                config.update_state(run_port=0, run_pid=0)
+            except Exception:  # noqa: BLE001
+                pass
     os._exit(0)
 
 
@@ -198,4 +205,7 @@ def _fatal(msg: str):
 
 
 if __name__ == "__main__":
+    if "--notify" in sys.argv:          # 钩子调用：读 JSON、交给服务、立刻退出
+        from app.watch import notify
+        sys.exit(notify.main(sys.argv[1:]))
     main()

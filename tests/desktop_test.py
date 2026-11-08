@@ -159,10 +159,10 @@ def main():
     print("== 5/6. 设置窗口与模型服务")
     js = (ROOT / "web" / "settings.js").read_text("utf-8")
     app_js = (ROOT / "web" / "app.js").read_text("utf-8")
-    check("设置是独立窗口，点「设置」开 / 关", "toggleSettings" in app_js and "settingsOpen" in js and 'className = "setwin' in js)
-    check("窗口可拖动、Esc 关闭", "function drag(" in js and '"Escape"' in js)
-    check("左侧分区：模型服务 / 默认模型 / 向量 / 视频 / 接入 / 记忆 / 备份 / 安全 / 关于",
-          all(k in js for k in ("模型服务", "默认模型", "向量模型", "视频交互模型", "接入与代理", "记忆与星辰", "备份与同步", "安全", "关于")))
+    check("设置是整页视图（v0.11.0），点「设置」开、← 返回关", "toggleSettings" in app_js and "settingsOpen" in js and 'className = "setview' in js and "← 返回" in js)
+    check("Esc 返回", '"Escape"' in js)
+    check("左侧分组导航：基础 / 工具 / 偏好，含模型服务 / 默认模型 / 本地模型 / MCP / 对话监控 / 宇宙之眼 / 外观 / 数据 / 核心记忆 / 关于",
+          all(k in js for k in ("基础", "工具", "偏好", "模型服务", "默认模型", "本地模型", "MCP", "对话监控", "宇宙之眼", "外观", "数据", "安全", "核心记忆", "关于")))
     check("服务商页：搜索、添加服务商、Key 显示/隐藏、检测、同步模型、手动添加",
           all(k in js for k in ("搜索模型平台", "添加服务商", "pvEye", ">检测<", "同步模型", "手动添加")))
     pres = c.get("/api/providers/presets").json()

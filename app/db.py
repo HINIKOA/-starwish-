@@ -85,10 +85,14 @@ def init_db() -> None:
             conn.executescript(SCHEMA)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(stars)").fetchall()}
             for col, ddl in (("fused_into", "INTEGER"), ("generation", "INTEGER NOT NULL DEFAULT 0"),
-                             ("fused_from", "TEXT NOT NULL DEFAULT ''")):
-                if col not in cols:  # v0.6.0：星辰融合（旧灵魂包自动升级）
+                             ("fused_from", "TEXT NOT NULL DEFAULT ''"),
+                             ("cat_major", "TEXT NOT NULL DEFAULT ''"), ("cat_minor", "TEXT NOT NULL DEFAULT ''"),
+                             ("uid", "TEXT NOT NULL DEFAULT ''")):
+                if col not in cols:  # v0.6.0 星辰融合 / v0.11.0 星系分类（旧灵魂包自动升级）
                     conn.execute(f"ALTER TABLE stars ADD COLUMN {col} {ddl}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_fused ON stars(fused_into)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_cat ON stars(cat_major, cat_minor)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_uid ON stars(uid)")
             pk = [r[1] for r in conn.execute("PRAGMA table_info(embeddings)").fetchall() if r[5]]
             if pk == ["star_id"]:  # v0.7.0：每颗星可以同时存多种向量模型（切换档位不丢旧向量）
                 conn.executescript(

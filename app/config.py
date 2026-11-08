@@ -47,6 +47,9 @@ DEFAULT_CONFIG = {
         "protocol": "openai",       # openai / anthropic / responses（由「默认模型」所在服务商自动填写）
         "maint_protocol": "",       # 整理模型在另一个服务商时的协议
         "timeout": 120,
+        "context_tokens": 400000,   # 主模型（对话模型）的上下文窗口：整理星系、对话抽屉按它分配预算
+        "maint_context_tokens": 400000,  # 整理模型的上下文窗口（对话监控不带上下文，只看一轮）
+        "compact_tokens": 380000,   # 有上下文的地方（对话抽屉、主模型整理）累计到这么多就自动压缩旧历史
     },
     "proxy": {
         "inject": True,
@@ -180,6 +183,46 @@ DEFAULT_CONFIG = {
         "pip_index": "",            # pip 镜像（如 https://pypi.tuna.tsinghua.edu.cn/simple）
         "model_base_url": "",       # 自建模型镜像（留空 = sherpa-onnx 官方发布页）
     },
+    "watch": {                      # 对话监控（v0.11.0）：直接读各客户端写在本机的对话记录，不经过代理
+        "enabled": True,            # 总开关
+        "poll_sec": 3,              # 每隔几秒看一眼文件大小 / 修改时间（只 stat，不读内容）
+        "rescan_sec": 60,           # 每隔多久重新列一次目录找新会话
+        "idle_sec": 45,             # 文件静止多久算这一轮说完了（装了钩子会更快）
+        "hot_days": 3,              # 只盯最近几天动过的会话
+        "min_turn_chars": 12,       # 太短的寒暄直接跳过，不花模型调用
+        "max_turn_chars": 4000,     # 一轮最多给模型看多少字（长的保留头尾）
+        "core_importance": 4,       # 偏好重要度达到多少转成「核心提案」（自动通道绝不直接改核心）
+        "skill_on_close": True,     # 任务闭环时，可复用的流程存成技能
+        "backfill_existing": False, # 第一次启用时是否回读最近几天的旧对话（默认从现在开始）
+        "organize_after": True,     # 归纳出新星后，排队让主模型整理星系
+        "clients": {                # 每个客户端：enabled 监控 / hook 是否装了钩子 / path 路径覆盖（多个用 ; 分隔）
+            "claude": {"enabled": True, "hook": False, "path": ""},
+            "qoder": {"enabled": True, "hook": False, "path": ""},
+            "workbuddy": {"enabled": True, "hook": False, "path": ""},
+            "codebuddy": {"enabled": False, "hook": False, "path": ""},
+            "codex": {"enabled": True, "hook": False, "path": ""},
+            "opencode": {"enabled": True, "hook": False, "path": ""},
+            "dsh": {"enabled": False, "hook": False, "path": ""},
+        },
+    },
+    "data": {                       # 数据（v0.11.0）
+        "log_days": 30,             # 日志保留天数（0 = 永久）；启动时清理一次，之后每 12 小时
+        "local_dir": "",            # 本地备份文件夹（空 = soul/snapshots）
+        "webdav_daily": True,       # 每天 03:00（北京时间）向 WebDAV 增量上传；错过了下次启动补上
+        "webdav_hour": 3,
+        "cloud_url": "",            # 云服务器：你自己服务器上的星愿地址（如 https://my.server:7860）
+        "cloud_token": "",          # 云服务器的主人令牌
+        "cloud_daily": False,       # 云服务器也每天 03:00 推送 + 拉取
+    },
+    "ui": {                         # 外观（v0.11.0）
+        "theme": "dark",            # light / dark / system
+        "accent": "#00B96B",        # 主题颜色
+        "scale": 100,               # 缩放百分比
+        "chat_side": "right",       # 对话抽屉默认位置
+        "task_side": "left",        # 任务列表位置
+        "chat_open": True,
+        "task_open": True,
+    },
     # —— 模型服务（v0.8.0）：服务商列表 + 默认模型；保存后自动映射到 llm / eye / embed ——
     "providers": [],
     "defaults": {"chat": "", "maintain": "", "vision": "", "embed": ""},
@@ -199,6 +242,7 @@ SECRET_FIELDS = [
     ("eye", "stt_api_key"),
     ("embed", "api_key"),
     ("llm", "maint_api_key"),
+    ("data", "cloud_token"),
 ]
 
 

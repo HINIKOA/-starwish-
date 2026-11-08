@@ -14,6 +14,9 @@ from app import config  # noqa: E402
 
 
 def main():
+    if "--notify" in sys.argv:          # v0.11.0：客户端钩子
+        from app.watch import notify
+        sys.exit(notify.main(sys.argv[1:]))
     cfg = config.load_config()
     ap = argparse.ArgumentParser(description="星愿 StarWish 本地记忆库")
     ap.add_argument("--host", default=cfg["server"]["host"])
@@ -28,6 +31,8 @@ def main():
     import uvicorn
 
     from app.server import app
+
+    config.update_state(run_port=a.port)
 
     uvicorn.run(app, host=a.host, port=a.port, log_level="info")
 
