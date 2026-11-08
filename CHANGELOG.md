@@ -1,5 +1,14 @@
 # 更新记录
 
+## v0.12.0（2026-11-08）星愿助手思考等级
+- **思考等级**：和 GPT / Claude Opus 的档位一致——默认（不传，模型自己决定）/ 关闭 none / 最少 minimal / 低 low / 中 medium / 高 high / 超高 xhigh / 最高 max。配置项 `llm.agent_effort`。
+  - OpenAI Chat Completions 传 `reasoning_effort`；OpenAI Responses 传 `reasoning.effort`；Anthropic 传 `output_config.effort`（Claude 没有 none / minimal，按 low），高档位自动把 `max_tokens` 提到 16k～64k（思考也算输出）。思考时不传温度。
+  - 模型 / 服务商不认这个参数（400 且报错提到相关字段）时自动去掉重试一次，并在对话里提示「当前模型不支持思考等级」。
+  - Claude 思考 + 工具调用：带签名的思考块会在下一轮原样传回（Anthropic 要求），否则多步工具调用会报错。
+  - 在哪里改：设置 → 默认模型 →「思考等级」卡片；对话抽屉标题栏的下拉；或在对话里发「/思考 高」（`/思考` 查看当前档位，英文 `/effort high` 也行）。
+  - 代理场景下客户端自己传的不认得的 `reasoning_effort` 值原样透传。
+- 新增 `tests/effort_test.py`（36 项）。
+
 ## v0.11.1（2026-11-08）宇宙之眼图标
 - 宇宙之眼图标改为矢量眼睛（顶栏按钮、观看页标题、设置导航、密钥显示按钮），不再依赖系统 emoji 字体，避免显示成方框。
 

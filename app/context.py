@@ -59,11 +59,14 @@ def main_ready(cfg: dict) -> bool:
                                                               or "127.0.0.1" in llm.get("base_url", "")))
 
 
-def main_complete(messages: list[dict], cfg: dict, tools: list | None = None, temperature: float = 0.2) -> dict:
-    """调用主模型（默认对话模型，按服务商协议）。返回 chat.completion 字典。测试里会被替换。"""
+def main_complete(messages: list[dict], cfg: dict, tools: list | None = None, temperature: float = 0.2,
+                  effort: str | None = None) -> dict:
+    """调用主模型（默认对话模型，按服务商协议）。effort = 思考等级（见 upstream.EFFORTS）。返回 chat.completion 字典。测试里会被替换。"""
     from . import upstream
     llm = cfg["llm"]
     body = {"model": llm["model"], "messages": messages, "temperature": temperature, "stream": False}
+    if upstream.norm_effort(effort) != "default":
+        body["reasoning_effort"] = upstream.norm_effort(effort)
     if tools:
         body["tools"] = tools
         body["tool_choice"] = "auto"

@@ -1386,8 +1386,10 @@ def api_agent_history(request: Request):
     from . import context
     h = agent.load_history()
     cfg = config.load_config()
+    from . import upstream
     return {"history": h[-200:], "tokens": context.total_tokens(h), "window": context.window(cfg),
-            "compact_at": context.compact_threshold(cfg)}
+            "compact_at": context.compact_threshold(cfg), "effort": upstream.norm_effort(cfg["llm"].get("agent_effort")),
+            "efforts": [[k, upstream.EFFORT_LABELS[k]] for k in upstream.EFFORTS]}
 
 
 @app.delete("/api/agent/history")

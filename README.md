@@ -478,6 +478,8 @@ Claude Code（`~/.claude/projects`）、Qoder（`~/.qoder/projects`、`~/.qoder-
 
 ![抽屉](docs/screenshot-drawers.png)
 
+**思考等级**（v0.12.0）：星愿助手的思考档位和 GPT / Claude Opus 一致——默认 / 关闭 / 最少 / 低 / 中 / 高 / 超高 / 最高（none、minimal、low、medium、high、xhigh、max）。在「设置 → 默认模型 → 思考等级」、对话抽屉标题栏的下拉里切换，或直接发「/思考 高」。GPT 系列按 `reasoning_effort`（Responses 为 `reasoning.effort`）传，Claude 按 `effort` 传（Claude 没有关闭 / 最少，按低）。档位越高越聪明、越慢、越费 token；模型不支持时自动按默认重试，并在对话里提示一句。
+
 ## 六、LLM 自动整理（可选）
 
 在设置里填好上游 API Key 后：
@@ -558,6 +560,7 @@ python tests/fusion_test.py      # 星图与星辰融合
 python tests/desktop_test.py     # 改名 / 图标 / 桌面版关窗即停 / 免安装版依赖 / 设置窗口与模型服务
 python tests/upstream_test.py    # 上游接口格式
 python tests/watch_test.py       # 对话监控 / 钩子 / 抽屉 / 星系整理 / 上下文压缩 / 数据同步
+python tests/effort_test.py      # 星愿助手思考等级（三种协议怎么传、不支持时自动退回）
 python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-onnx 和真实模型时会多跑一项真实录音分人）
 ```
 

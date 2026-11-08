@@ -162,7 +162,12 @@ def set_watch(client: str, enabled: bool) -> dict:
 
 
 # ---------------- 对话 ----------------
-HELP = "离线指令：/状态　/归纳　/整理　/搜索 关键词　/清空（清空对话历史）。配好「默认模型 → 对话模型」后可以直接用自然语言。"
+HELP = "离线指令：/状态　/归纳　/整理　/搜索 关键词　/思考 等级　/清空（清空对话历史）。配好「默认模型 → 对话模型」后可以直接用自然语言。"
+
+
+EFFORT_WORDS = {"默认": "default", "自动": "default", "关闭": "none", "关": "none", "不思考": "none", "最少": "minimal",
+                "低": "low", "中": "medium", "高": "high", "超高": "xhigh", "最高": "max", "极限": "max"}
+EFFORT_WORDS_HELP = ["默认", "关闭", "最少", "低", "中", "高", "超高", "最高"]
 
 
 def offline(text: str) -> dict | None:
@@ -175,6 +180,17 @@ def offline(text: str) -> dict | None:
         return {"ok": True, "reply": f"星星 {r['stars']} 颗（今天 +{r['today']}），待批准提案 {r['pending_proposals']}，"
                 f"监控已处理 {r['watch'].get('turns', 0)} 轮；整理模型{'已配置' if r['maintenance_model'] else '未配置'}。",
                 "actions": [{"tool": "get_status"}]}
+    if t.startswith("/思考") or t.startswith("/effort"):
+        from . import upstream
+        parts = t.split(None, 1)
+        if len(parts) == 1:
+            cur = upstream.norm_effort(config.load_config()["llm"].get("agent_effort"))
+            return {"ok": True, "reply": f"当前思考等级：{upstream.EFFORT_LABELS[cur]}。可选：" + " / ".join(EFFORT_WORDS_HELP), "actions": []}
+        v = EFFORT_WORDS.get(parts[1].strip().lower(), parts[1].strip().lower())
+        if v not in upstream.EFFORTS:
+            return {"ok": False, "reply": "没有这个档位。可选：" + " / ".join(EFFORT_WORDS_HELP), "actions": []}
+        config.update_config({"llm": {"agent_effort": v}})
+        return {"ok": True, "reply": f"思考等级已设为：{upstream.EFFORT_LABELS[v]}。", "actions": [{"tool": "set_effort", "args": {"effort": v}}]}
     if t in ("/归纳", "/digest"):
         run_tool("run_digest", {})
         return {"ok": True, "reply": "已开始归纳各客户端的新对话。", "actions": [{"tool": "run_digest"}]}
@@ -213,14 +229,23 @@ def chat(text: str, cfg: dict | None = None, max_rounds: int = 6) -> dict:
         msgs = [sys_msg] + use + [user]
         actions = []
         reply = ""
+        from . import upstream
+        effort = upstream.norm_effort(cfg["llm"].get("agent_effort"))
+        effort_note = ""
         for _ in range(max_rounds):
-            data = context.main_complete(msgs, cfg, tools=tools(), temperature=0.3)
+            data = context.main_complete(msgs, cfg, tools=tools(), temperature=0.3, effort=effort)
+            if data.get("effort_dropped") and not effort_note:
+                effort_note = "（当前模型不支持思考等级，这次按模型默认回答。）"
             msg = (data.get("choices") or [{}])[0].get("message") or {}
             calls = msg.get("tool_calls") or []
             if not calls:
                 reply = msg.get("content") or "（没有回复）"
                 break
-            msgs.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
+            am = {"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls}
+            for k in ("thinking_blocks", "reasoning_content"):   # 思考模型做工具调用时，思考内容要原样传回
+                if msg.get(k):
+                    am[k] = msg[k]
+            msgs.append(am)
             for tc in calls:
                 f = tc.get("function") or {}
                 nm = f.get("name", "")
@@ -239,4 +264,5 @@ def chat(text: str, cfg: dict | None = None, max_rounds: int = 6) -> dict:
         save_history(hist + [{"role": "user", "content": text, "t": time.time()},
                              {"role": "assistant", "content": reply + note, "t": time.time()}])
         j["detail"] = (reply[:200] + note)[:500]
-        return {"ok": True, "reply": reply, "actions": actions, "compacted": info}
+        return {"ok": True, "reply": reply, "actions": actions, "compacted": info, "effort": effort,
+                "effort_note": effort_note}

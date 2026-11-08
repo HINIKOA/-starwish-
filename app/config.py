@@ -50,6 +50,7 @@ DEFAULT_CONFIG = {
         "context_tokens": 400000,   # 主模型（对话模型）的上下文窗口：整理星系、对话抽屉按它分配预算
         "maint_context_tokens": 400000,  # 整理模型的上下文窗口（对话监控不带上下文，只看一轮）
         "compact_tokens": 380000,   # 有上下文的地方（对话抽屉、主模型整理）累计到这么多就自动压缩旧历史
+        "agent_effort": "default",  # 星愿助手（对话抽屉）的思考等级：default / none / minimal / low / medium / high / xhigh / max
     },
     "proxy": {
         "inject": True,

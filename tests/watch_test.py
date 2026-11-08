@@ -348,7 +348,7 @@ def main():
     print("\n[对话抽屉]")
     seen = []
 
-    def fake_main(messages, cfg, tools=None, temperature=0.2):
+    def fake_main(messages, cfg, tools=None, temperature=0.2, effort=None):
         seen.append(messages)
         last = messages[-1]
         if last["role"] == "tool":
@@ -390,7 +390,7 @@ def main():
         stars.add_star(txt, "", tags, 3, source="test")
     org_hist = []
 
-    def fake_org(messages, cfg, tools=None, temperature=0.2):
+    def fake_org(messages, cfg, tools=None, temperature=0.2, effort=None):
         org_hist.append(len(messages))
         p = messages[-1]["content"]
         assign = []

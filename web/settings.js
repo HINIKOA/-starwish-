@@ -328,7 +328,7 @@ function pageDefaults(m) {
       <div class="f-row"><select data-role="${r}">${opts(kinds, cfg.defaults[r] || "")}</select><button data-chk="${r}">检测</button></div>
       <div class="mres" id="dr-${r}"></div></div>`).join("")}
     ${cfg.providers.length ? "" : '<div class="sw-empty">还没有服务商：先到「模型服务」添加一家并填 Key。</div>'}</div>
-    ${contextCard()}`;
+    ${effortCard()}${contextCard()}`;
   bindAuto(m);
   m.querySelectorAll("select[data-role]").forEach((s) => (s.onchange = () => { cfg.defaults[s.dataset.role] = s.value; C.safe(saveProviders).then(() => C.refresh?.()); }));
   m.querySelectorAll("[data-chk]").forEach((b) => (b.onclick = async () => {
@@ -338,6 +338,15 @@ function pageDefaults(m) {
     } catch (e) { out.className = "mres bad"; out.textContent = "✗ " + e.message; }
     b.disabled = false;
   }));
+}
+
+const EFFORT_OPTS = [["default", "默认（模型自己决定）"], ["none", "关闭（none）"], ["minimal", "最少（minimal）"], ["low", "低（low）"],
+  ["medium", "中（medium）"], ["high", "高（high）"], ["xhigh", "超高（xhigh）"], ["max", "最高（max）"]];
+function effortCard() {
+  return card("思考等级",
+    row("星愿助手", sel("llm.agent_effort", EFFORT_OPTS, "w-m"),
+      "和 GPT / Claude Opus 的档位一致。GPT 系列按 reasoning_effort 传；Claude 按 effort 传（Claude 没有「关闭 / 最少」，按「低」）。" +
+      "档位越高越聪明、越慢、越费 token。模型不支持时自动按默认重试，并在对话里提示一句。对话抽屉标题栏也能切换，或发「/思考 高」。"));
 }
 
 function contextCard() {

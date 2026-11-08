@@ -25,7 +25,7 @@ function buildChat() {
   const d = document.createElement("div");
   d.id = "chatDrawer";
   d.className = "fdrawer";
-  d.innerHTML = `<div class="fd-head" id="chatHead"><span class="fd-dot"></span><b>星愿助手</b><span class="fd-ctx" id="chatCtx" title="上下文用量 / 自动压缩阈值"></span>
+  d.innerHTML = `<div class="fd-head" id="chatHead"><span class="fd-dot"></span><b>星愿助手</b><select class="fd-sel" id="chatEffort" title="思考等级（和 GPT / Claude Opus 的档位一致）。也可以发「/思考 高」切换"></select><span class="fd-ctx" id="chatCtx" title="上下文用量 / 自动压缩阈值"></span>
       <button class="fd-btn" id="chatClear" title="清空对话历史">清空</button><button class="fd-btn" id="chatMin" title="收起 / 展开">—</button></div>
     <div class="fd-body"><div class="chat-log" id="chatLog"></div>
       <form class="chat-form" id="chatForm"><textarea id="chatIn" rows="2" placeholder="让 AI 管理星愿，如「把足球的星归到体育」「整理星系」（Enter 发送）"></textarea>
@@ -37,6 +37,10 @@ function buildChat() {
   resize(d, $("#chatResize"));
   $("#chatMin").onclick = () => { const p = pos(); p.collapsed = !p.collapsed; savePos(p); placeChat(false); };
   $("#chatClear").onclick = () => confirm("清空和星愿助手的对话历史？") && C.safe(async () => { await C.api("/api/agent/history", { method: "DELETE" }); loadHistory(); });
+  $("#chatEffort").onchange = (e) => C.safe(async () => {
+    await C.api("/api/settings", { method: "PUT", body: { llm: { agent_effort: e.target.value } } });
+    C.toast?.("思考等级：" + e.target.selectedOptions[0].textContent);
+  });
   $("#chatForm").onsubmit = (e) => { e.preventDefault(); send(); };
   $("#chatIn").onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } };
   loadHistory();
@@ -85,7 +89,15 @@ async function loadHistory() {
   r.history.forEach((m) => bubble(m.role, m.role === "system" ? "（较早的对话已自动压缩成摘要）" : m.content));
   ctxLine(r);
 }
-function ctxLine(r) { if (r && r.window) $("#chatCtx").textContent = `${Math.round(r.tokens / 1000)}k / ${Math.round(r.compact_at / 1000)}k`; }
+function ctxLine(r) {
+  if (!r || !r.window) return;
+  $("#chatCtx").textContent = `${Math.round(r.tokens / 1000)}k / ${Math.round(r.compact_at / 1000)}k`;
+  const s = $("#chatEffort");
+  if (r.efforts && s) {
+    s.innerHTML = r.efforts.map(([k, t]) => `<option value="${k}" ${k === r.effort ? "selected" : ""}>思考：${C.esc(t.replace(/（.*）/, ""))}</option>`).join("");
+    s.title = "思考等级：" + (r.efforts.find(([k]) => k === r.effort) || [, ""])[1] + "。也可以发「/思考 高」切换";
+  }
+}
 async function send() {
   const t = $("#chatIn").value.trim();
   if (!t || sending) return;
@@ -98,6 +110,7 @@ async function send() {
     wait.remove();
     if (r.compacted) bubble("system", `上下文到了 ${Math.round(r.compacted.threshold / 1000)}k，较早的对话已自动压缩成摘要。`);
     bubble("ai", r.reply, r.actions);
+    if (r.effort_note) bubble("system", r.effort_note);
     if (r.actions && r.actions.length) C.refresh?.();
     C.safe(() => C.api("/api/agent/history")).then(ctxLine);
     refreshTasks();

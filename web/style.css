@@ -267,6 +267,8 @@ html[data-theme=light] .fdrawer{box-shadow:0 12px 40px rgba(0,0,0,.18)}
 .fd-dot{width:9px;height:9px;border-radius:50%;background:var(--brand);box-shadow:0 0 8px var(--brand)}
 .fd-ctx{color:var(--muted);font-size:11.5px;margin-left:auto}
 .fd-btn{padding:2px 9px!important;font-size:12px;border-radius:7px!important}
+.fd-sel{margin-left:8px;padding:1px 4px;font-size:11.5px;border-radius:7px;border:1px solid var(--line,rgba(127,127,127,.3));background:transparent;color:inherit;max-width:96px;cursor:pointer}
+.fd-sel option{color:#111;background:#fff}
 .fd-body{flex:1;display:flex;flex-direction:column;min-height:0}
 .chat-log{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
 .msg{max-width:88%;padding:8px 11px;border-radius:12px;line-height:1.6;font-size:13.5px;word-break:break-word}

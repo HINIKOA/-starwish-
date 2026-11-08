@@ -27,6 +27,31 @@ NAMES = {"openai": "OpenAI 兼容（Chat Completions）", "anthropic": "Anthropi
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
 
+# ---------------- 思考等级（和 GPT / Claude Opus 的档位一致） ----------------
+# default = 不传，用模型自己的默认；none = 不思考（GPT-5.1+）；minimal（GPT-5）；
+# low / medium / high（两家都有）；xhigh（GPT-5.2+ / Claude Opus 4.7+）；max（GPT-5.6+ / Claude Opus 4.6+）。
+EFFORTS = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+EFFORT_LABELS = {"default": "默认（模型自己决定）", "none": "关闭（none）", "minimal": "最少（minimal）", "low": "低（low）",
+                 "medium": "中（medium）", "high": "高（high）", "xhigh": "超高（xhigh）", "max": "最高（max）"}
+# Anthropic 档位只有 low~max：none / minimal 落到 low（新模型的自适应思考关不掉，low 是最省的一档）
+_A_EFFORT = {"none": "low", "minimal": "low", "low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max"}
+# 思考也算在 max_tokens 里：高档位给足输出上限（官方建议 xhigh / max 从 64k 起）
+_A_MIN_TOKENS = {"medium": 16000, "high": 32000, "xhigh": 64000, "max": 64000}
+_EFFORT_ERR = ("reasoning", "effort", "output_config", "thinking", "unrecognized", "unknown", "extra inputs",
+               "not support", "unsupported", "invalid param", "max_tokens", "max_output_tokens")
+
+
+def norm_effort(v) -> str:
+    v = str(v or "").strip().lower()
+    return v if v in EFFORTS else "default"
+
+
+def _effort_of(body: dict) -> str:
+    e = body.get("reasoning_effort")
+    if isinstance(e, dict):           # 有人按 Responses 的写法传进来
+        e = e.get("effort")
+    return norm_effort(e)
+
 
 def norm(protocol: str | None) -> str:
     p = (protocol or "openai").strip().lower()
@@ -133,6 +158,9 @@ def _to_anthropic(body: dict) -> dict:
                     elif u:
                         blocks.append({"type": "image", "source": {"type": "url", "url": u}})
         if role == "assistant":
+            tb = [x for x in (m.get("thinking_blocks") or []) if isinstance(x, dict)]
+            if tb:
+                blocks = tb + blocks
             for tc in m.get("tool_calls") or []:
                 f = tc.get("function") or {}
                 blocks.append({"type": "tool_use", "id": tc.get("id") or _new_id("toolu_"), "name": f.get("name", ""),
@@ -147,7 +175,13 @@ def _to_anthropic(body: dict) -> dict:
            "max_tokens": int(body.get("max_tokens") or body.get("max_completion_tokens") or DEFAULT_MAX_TOKENS)}
     if system:
         out["system"] = "\n\n".join(system)
-    if body.get("temperature") is not None:     # Anthropic 只接受 0~1
+    eff = _effort_of(body)
+    if eff != "default":
+        ae = _A_EFFORT[eff]
+        out["output_config"] = {"effort": ae}
+        if not (body.get("max_tokens") or body.get("max_completion_tokens")):
+            out["max_tokens"] = max(out["max_tokens"], _A_MIN_TOKENS.get(ae, out["max_tokens"]))
+    elif body.get("temperature") is not None:     # Anthropic 只接受 0~1；开了思考等级就不传温度（思考时不允许改温度）
         out["temperature"] = max(0.0, min(1.0, float(body["temperature"])))
     if body.get("top_p") is not None:
         out["top_p"] = body["top_p"]
@@ -211,8 +245,11 @@ def _to_responses(body: dict) -> dict:
     mt = body.get("max_tokens") or body.get("max_completion_tokens")
     if mt:
         out["max_output_tokens"] = int(mt)
+    eff = _effort_of(body)
+    if eff != "default":
+        out["reasoning"] = {"effort": eff}
     for k in ("temperature", "top_p"):
-        if body.get(k) is not None:
+        if body.get(k) is not None and eff in ("default", "none"):   # 推理模型思考时不接受温度
             out[k] = body[k]
     if body.get("stream"):
         out["stream"] = True
@@ -237,7 +274,23 @@ def build(protocol: str, base: str, key: str, body: dict) -> tuple[str, dict, di
     elif p == "responses":
         payload = _to_responses(body)
     else:
-        payload = body
+        payload = body   # 不需要改时原样转发（同一个对象）
+        eff = _effort_of(body)
+        raw = body.get("reasoning_effort")
+        if (raw is not None and (eff != "default" or str(raw).strip().lower() == "default" or isinstance(raw, dict))) \
+                or any(isinstance(m, dict) and "thinking_blocks" in m for m in body.get("messages") or []):
+            payload = dict(body)
+        if any("thinking_blocks" in m for m in body.get("messages") or [] if isinstance(m, dict)):
+            payload["messages"] = [{k: v for k, v in m.items() if k != "thinking_blocks"} for m in body["messages"]]
+        eff = _effort_of(body)
+        raw = body.get("reasoning_effort")
+        if raw is not None and (eff != "default" or str(raw).strip().lower() == "default" or isinstance(raw, dict)):
+            payload.pop("reasoning_effort", None)   # 认得的档位统一成字符串；不认得的原样透传（代理场景）
+        if eff != "default":
+            payload["reasoning_effort"] = eff
+            if eff != "none":
+                payload.pop("temperature", None)   # GPT-5 类推理模型思考时不接受温度
+                payload.pop("top_p", None)
     return endpoint(p, base), headers(p, key), payload
 
 
@@ -250,7 +303,7 @@ def parse(protocol: str, data: dict, model: str = "") -> dict:
     p = norm(protocol)
     if p == "openai":
         return data
-    text, reasoning, calls, finish, usage = [], [], [], "stop", {}
+    text, reasoning, calls, finish, usage, tblocks = [], [], [], "stop", {}, []
     if p == "anthropic":
         for b in data.get("content") or []:
             t = b.get("type")
@@ -258,6 +311,9 @@ def parse(protocol: str, data: dict, model: str = "") -> dict:
                 text.append(b.get("text", ""))
             elif t == "thinking":
                 reasoning.append(b.get("thinking", ""))
+                tblocks.append(b)
+            elif t == "redacted_thinking":
+                tblocks.append(b)
             elif t == "tool_use":
                 calls.append({"id": b.get("id"), "type": "function",
                               "function": {"name": b.get("name", ""),
@@ -294,6 +350,8 @@ def parse(protocol: str, data: dict, model: str = "") -> dict:
         msg["tool_calls"] = calls
     if reasoning:
         msg["reasoning_content"] = "".join(reasoning)
+    if tblocks and calls:   # 思考 + 工具调用：下一轮要把带签名的思考块原样传回（Anthropic 要求）
+        msg["thinking_blocks"] = tblocks
     return {"id": data.get("id") or _new_id(), "object": "chat.completion", "created": int(time.time()),
             "model": data.get("model") or model, "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
             "usage": usage}
@@ -499,12 +557,30 @@ class StreamTranslator:
 
 
 # ---------------- 同步调用（后台整理 / 检测） ----------------
+def _effort_rejected(r) -> bool:
+    if r.status_code not in (400, 422):
+        return False
+    t = r.text.lower()
+    return any(k in t for k in _EFFORT_ERR)
+
+
 def complete(protocol: str, base: str, key: str, body: dict, timeout: float = 120) -> dict:
+    """同步调用。设了思考等级但模型 / 服务商不认（400 且报错里提到相关参数）时，自动去掉思考等级重试一次，
+    返回里带 `effort_dropped: true`，调用方可以提示主人。"""
     body = dict(body, stream=False)
     url, h, payload = build(protocol, base, key, body)
     r = httpx.post(url, json=payload, headers=h, timeout=timeout, follow_redirects=True)
+    dropped = False
+    if _effort_of(body) != "default" and _effort_rejected(r):
+        body = {k: v for k, v in body.items() if k != "reasoning_effort"}
+        url, h, payload = build(protocol, base, key, body)
+        r = httpx.post(url, json=payload, headers=h, timeout=timeout, follow_redirects=True)
+        dropped = True
     r.raise_for_status()
-    return parse(protocol, r.json(), body.get("model", ""))
+    out = parse(protocol, r.json(), body.get("model", ""))
+    if dropped:
+        out["effort_dropped"] = True
+    return out
 
 
 def reply_text(data: dict) -> str:
