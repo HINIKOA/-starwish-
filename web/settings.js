@@ -1,3 +1,4 @@
+const EYE_ICON = '<svg class="ico-eye" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-0.125em"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 // 星愿记忆 —— 设置（v0.11.0 重做）：整页设置视图（左上「← 返回」），仿 Cherry Studio：
 // 左栏分组导航（基础 / 工具 / 偏好，可搜索）→ 有子页的分区多一栏子导航 → 右侧圆角卡片（标题、细分隔线、左标签右控件、灰色说明）。
 // 所有开关、输入改了就自动保存。浅色 / 深色都好看，跟随主题颜色。
@@ -14,7 +15,7 @@ let navFilter = "";
 
 const GROUPS = [
   ["基础", [["profile", "☺", "个人信息"], ["providers", "☁", "模型服务"], ["defaults", "◎", "默认模型"], ["embed", "✶", "本地模型"]]],
-  ["工具", [["mcp", "⇄", "MCP 与代理"], ["skills", "✧", "技能"], ["watch", "◉", "对话监控"], ["eye", "◈", "宇宙之眼"], ["voice", "♪", "宇宙之声"]]],
+  ["工具", [["mcp", "⇄", "MCP 与代理"], ["skills", "✧", "技能"], ["watch", "◉", "对话监控"], ["eye", EYE_ICON, "宇宙之眼"], ["voice", "♪", "宇宙之声"]]],
   ["偏好", [["general", "⚙", "通用"], ["appearance", "◐", "外观"], ["data", "▤", "数据"], ["core", "✦", "核心记忆"], ["about", "ⓘ", "关于"]]],
 ];
 const SUBS = {
@@ -219,7 +220,7 @@ function detail() {
       <button class="icon danger" id="pvDel" title="删除这个服务商">🗑</button></div>
     <div class="f-label">API 密钥 ${ps.key_url ? `<a href="${E(ps.key_url)}" target="_blank" rel="noopener">获取密钥 ↗</a>` : ""}</div>
     <div class="f-row"><input id="pvKey" type="password" autocomplete="off" placeholder="${p.api_key_set ? "已保存（" + E(p.api_key) + "），重新填写会覆盖" : p.preset === "ollama" ? "本机 Ollama 不需要 Key" : "粘贴 API Key"}">
-      <button class="icon" id="pvEye" title="显示 / 隐藏">👁</button><button id="pvCheck" class="primary">检测</button></div>
+      <button class="icon" id="pvEye" title="显示 / 隐藏">${EYE_ICON}</button><button id="pvCheck" class="primary">检测</button></div>
     <div class="f-label">API 地址 ${ps.base_url && ps.base_url !== p.base_url ? '<a href="#" id="pvReset">恢复默认</a>' : ""}</div>
     <div class="f-row"><input id="pvBase" value="${E(p.base_url)}" placeholder="https://…/v1"></div>
     <div class="f-hint">预览：<code id="pvPrev">${E(endpointPreview(p))}</code></div>

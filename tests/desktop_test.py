@@ -109,6 +109,8 @@ def main():
                                        for f in ("index.html", "core.html", "skills.html", "eye.html")))
     check("manifest 与 PNG 图标可访问", c.get("/static/manifest.json").json()["name"] == "星愿记忆" and c.get("/static/icons/icon-192.png").status_code == 200)
     check("顶栏显示软件图标", 'class="app-icon"' in idx)
+    eye_files = [(ROOT / "web" / f).read_text("utf-8") for f in ("index.html", "eye.html", "settings.js")]
+    check("宇宙之眼图标是矢量眼睛（不依赖 emoji 字体）", all('class="ico-eye"' in t for t in eye_files) and not any("👁" in t or "◈" in t for t in eye_files))
 
     print("== 3. 桌面版：无命令窗口、关窗即停服务")
     import desktop

@@ -1,8 +1,8 @@
 #pragma code_page(65001)
 1 ICON "../../assets/starwish.ico"
 1 VERSIONINFO
-FILEVERSION 0,11,0,0
-PRODUCTVERSION 0,11,0,0
+FILEVERSION 0,11,1,0
+PRODUCTVERSION 0,11,1,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -10,8 +10,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "星愿记忆"
       VALUE "ProductName", "星愿记忆 StarWish"
-      VALUE "FileVersion", "0.11.0"
-      VALUE "ProductVersion", "0.11.0"
+      VALUE "FileVersion", "0.11.1"
+      VALUE "ProductVersion", "0.11.1"
       VALUE "OriginalFilename", "星愿记忆.exe"
     END
   END
