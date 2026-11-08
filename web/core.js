@@ -1,4 +1,6 @@
 // 星愿 StarWish —— 核心记忆模块页面（查看 / 编辑三段 / 锁定 / 提案 / 版本历史与回滚 / 主人指令）
+// 事件时间：优先用 Unix 时间戳按本机时区显示，避免显示成 UTC
+const evTime = (x) => (x && x.t ? new Date(x.t * 1000).toLocaleString("zh-CN", { hour12: false }) : String((x && x.ts) || "").replace("T", " ").slice(0, 19));
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -111,11 +113,11 @@ async function renderHistory() {
   el.innerHTML = `<div class="intro" style="margin-top:12px">全部来自只追加的事件日志 <code>events.jsonl</code>，永不删除。「回到此版本」= 恢复到那次修改之后的样子；「撤销这次」= 只把那次改动的分区恢复成修改前。回滚本身也会生成新版本，所以回滚也能被撤销。</div>
     ${list.length ? "" : '<div class="empty">还没有修改记录。</div>'}
     ${list.map((x) => x.kind === "lock" ? `<div class="hcard"><div class="hhead"><span class="rev">${x.locked ? "🔒" : "🔓"}</span>
-        <span class="t">${esc((x.ts || "").replace("T", " ").slice(0, 19))} · ${x.locked ? "上锁" : "解锁"}（r${x.rev ?? "?"}）</span></div></div>` : `
+        <span class="t">${evTime(x)} · ${x.locked ? "上锁" : "解锁"}（r${x.rev ?? "?"}）</span></div></div>` : `
       <div class="hcard">
         <div class="hhead"><span class="rev">${x.rev != null ? "r" + x.rev : "旧#" + x.legacy_no}</span>
           <span class="src s-${esc(x.source)}">${esc(SRC[x.source] || x.source)}</span>
-          <span class="t">${esc((x.ts || "").replace("T", " ").slice(0, 19))}</span>
+          <span class="t">${evTime(x)}</span>
           <div class="acts">
             ${x.rev != null ? `<button data-to="${x.rev}" ${C.locked ? "disabled" : ""}>回到此版本</button>` : ""}
             <button class="danger" data-undo="${x.rev ?? ""}" data-legacy="${x.legacy_no ?? ""}" ${C.locked ? "disabled" : ""}>撤销这次</button>

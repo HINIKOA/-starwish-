@@ -1,4 +1,6 @@
 // 星愿 StarWish —— 技能进化模块页面
+// 事件时间：优先用 Unix 时间戳按本机时区显示，避免显示成 UTC
+const evTime = (x) => (x && x.t ? new Date(x.t * 1000).toLocaleString("zh-CN", { hour12: false }) : String((x && x.ts) || "").replace("T", " ").slice(0, 19));
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -26,7 +28,7 @@ async function loadStatus() {
   const b = $("#pBadge"); b.textContent = ST.pending; b.classList.toggle("hidden", !ST.pending);
   $("#intro").innerHTML = `技能是 AI 的<b>操作手册</b>（怎么做某件事），和星星（发生过什么）、核心记忆（我是谁）并列。参考 Hermes Agent：
     <b>前台自觉</b>——会用工具的 AI 做完复杂任务、修好难题后自己调用 <code>skill_manage</code> 存成技能，发现过时立即 patch；
-    <b>后台巡检</b>——每转发 ${ST.nudge_interval} 轮对话没有新技能时，维护模型在后台回看对话，从试错、绕路、主人纠正里提炼或修补技能。
+    <b>后台巡检</b>——每累计 ${ST.nudge_interval} 轮对话（对话监控读到的各客户端对话、代理转发的都算）没有新技能时，维护模型在后台回看对话，从试错、绕路、主人纠正里提炼或修补技能。
     AI 自建的技能都过安全扫描，危险的交给你批准；每次修改都可追溯、可回滚；不用的技能只会变暗或归档，<b>永不硬删除</b>。`;
 }
 
@@ -84,7 +86,7 @@ async function renderSkill(name) {
     <h3 style="color:var(--accent2);font-size:14px;margin-top:20px">版本历史（${hist.length}）</h3>
     ${hist.map((e) => `<div class="hcard"><div class="hhead"><span class="rev">r${e.rev}</span><span class="src s-${esc(e.source)}">${esc(SRC[e.source] || e.source)}</span>
       <span class="src">${esc(e.action)}</span>${e.strategy && e.strategy !== "exact" && e.strategy !== "rewrite" ? `<span class="src">模糊匹配 ${esc(e.strategy)}</span>` : ""}
-      <span class="t">${esc((e.ts || "").replace("T", " ").slice(0, 19))}</span>
+      <span class="t">${evTime(e)}</span>
       <div class="acts"><button data-to="${e.rev}">回到此版本</button><button class="danger" data-undo="${e.rev}">撤销这次</button></div></div>
       ${e.note ? `<div class="note">说明：${esc(e.note)}</div>` : ""}${diffHtml(e)}</div>`).join("")}`;
   $("#back").onclick = renderLib;
@@ -128,7 +130,7 @@ async function renderLog() {
     ${Object.keys(st.needs_fix || {}).length ? `<div class="note">待修复（被差评）：${Object.entries(st.needs_fix).map(([k, v]) => esc(k) + "（" + esc(v) + "）").join("、")}</div>` : ""}</div>
     <h3 style="color:var(--accent2);font-size:14px;margin-top:18px">全部技能修改</h3>
     ${hist.map((e) => `<div class="hcard"><div class="hhead"><span class="rev">${esc(e.name)} r${e.rev}</span><span class="src s-${esc(e.source)}">${esc(SRC[e.source] || e.source)}</span>
-      <span class="src">${esc(e.action)}</span><span class="t">${esc((e.ts || "").replace("T", " ").slice(0, 19))}</span></div>
+      <span class="src">${esc(e.action)}</span><span class="t">${evTime(e)}</span></div>
       ${e.note ? `<div class="note">${esc(e.note)}</div>` : ""}${diffHtml(e)}</div>`).join("") || '<div class="empty">暂无</div>'}`;
 }
 

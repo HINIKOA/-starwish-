@@ -1,5 +1,10 @@
 # 更新记录
 
+## v0.12.1（2026-11-08）技能自发进化接上对话监控
+- **修复**：v0.11.0 起不再依赖代理后，后台技能巡检只在代理转发时计数，监控读到的对话不计数，技能不会自发进化。现在对话监控处理的每一轮也进入巡检缓冲（来源 `watch:<客户端>`），累计到 `evolve.nudge_interval`（默认 10 轮）自动在后台回看、提炼或修补技能。
+- 技能进化页、核心记忆页适配浅色主题（原来是深色卡片 + 深色字，看不清）；版本历史的时间按本机时区显示。
+- 技能进化页说明文字更新为「对话监控读到的、代理转发的都算」。
+
 ## v0.12.0（2026-11-08）星愿助手思考等级
 - **思考等级**：和 GPT / Claude Opus 的档位一致——默认（不传，模型自己决定）/ 关闭 none / 最少 minimal / 低 low / 中 medium / 高 high / 超高 xhigh / 最高 max。配置项 `llm.agent_effort`。
   - OpenAI Chat Completions 传 `reasoning_effort`；OpenAI Responses 传 `reasoning.effort`；Anthropic 传 `output_config.effort`（Claude 没有 none / minimal，按 low），高档位自动把 `max_tokens` 提到 16k～64k（思考也算输出）。思考时不传温度。

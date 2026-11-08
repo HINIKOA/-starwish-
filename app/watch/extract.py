@@ -126,6 +126,11 @@ def process_turn(t: Turn, cfg: dict | None = None) -> dict:
                 fail_task(task["id"])
                 res["failed"] += 1
     log_event("watch_turn", client=t.client, session=t.session_id, **{k: v for k, v in res.items() if v})
+    try:   # 技能自进化：监控到的每一轮也计入巡检计数（不经代理时也能自发进化）
+        from .. import evolve
+        res["review"] = bool(evolve.review.on_turn(t.user_text, t.assistant_text, [], session=t.session_id, source=src))
+    except Exception as e:  # noqa: BLE001
+        log_event("evolve_watch_error", error=str(e))
     return res
 
 

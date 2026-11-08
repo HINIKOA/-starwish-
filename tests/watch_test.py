@@ -588,6 +588,23 @@ def main():
               "基础", "工具", "偏好", "上下文窗口", "自动压缩"):
         check(f"设置页包含「{k}」", k in sj)
 
+    # ---------- 技能自进化：监控到的轮次也计入巡检 ----------
+    print("\n[技能自进化]")
+    from app import evolve
+    from app.watch.turns import Turn
+    spawned = []
+    orig_spawn = evolve.review.spawn_review
+    evolve.review.spawn_review = lambda reason="", focus="": spawned.append(reason) or True
+    config.update_config({"evolve": {"nudge_interval": 2, "enabled": True}})
+    config.update_state(evolve_iters=0)
+    extract.llm = fake_llm
+    for i in range(2):
+        extract.process_turn(Turn(client="codex", session_id="ev", user_text=f"聊点别的 {i}", assistant_text="好", turn_complete=True))
+    buf = evolve.review._load_buf()
+    check("监控到的轮次进入巡检缓冲（来源 watch:客户端）", any(b.get("source") == "watch:codex" for b in buf))
+    check("累计到阈值自动发起技能巡检（不经代理也自发进化）", len(spawned) == 1 and "2 轮" in spawned[0])
+    evolve.review.spawn_review = orig_spawn
+
     ok = sum(1 for _, g, _ in RESULTS if g)
     for nme, g, dt in RESULTS:
         if not g:
