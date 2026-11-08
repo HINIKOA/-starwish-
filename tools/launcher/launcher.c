@@ -1,8 +1,12 @@
 /* 星愿记忆.exe —— 无命令窗口启动器。
  * 找到同目录下的 runtime\pythonw.exe，运行 desktop.py；没有控制台窗口。
  * 桌面窗口关闭时 desktop.py 会自己停掉本地服务并退出。 */
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #include <windows.h>
 #include <wchar.h>
 

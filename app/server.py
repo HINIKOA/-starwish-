@@ -216,7 +216,13 @@ class ImportPath(BaseModel):
 # ---------------- 基础 ----------------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "app": "starwish", "version": __version__, "soul_dir": str(config.SOUL_DIR)}
+    exe = os.environ.get("STARWISH_EXE") or ""
+    if exe:   # 单文件版：MCP 用 exe --mcp
+        mcp = {"command": exe, "args": ["--mcp"]}
+    else:
+        mcp = {"command": "MCP接入.bat", "args": []}
+    return {"ok": True, "app": "starwish", "version": __version__, "soul_dir": str(config.SOUL_DIR),
+            "exe": exe, "mcp": mcp}
 
 
 LAST_PING = 0.0  # 桌面版浏览器兜底模式用：页面心跳，全部关闭一段时间后自动退出

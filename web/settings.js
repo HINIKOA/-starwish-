@@ -312,12 +312,18 @@ function pageVideo(m) {
 function pageAccess(m) {
   const o = location.origin;
   form(m, "接入与代理", "聊天客户端把 API 地址改成下面的「OpenAI 兼容」地址，记忆就会自动注入。",
-    `<div class="kv"><span>OpenAI 兼容</span><code>${o}/v1</code><span>REST API</span><code>${o}/api</code><span>MCP</span><code>MCP接入.bat（或 python mcp_server.py）</code></div>
+    `<div class="kv"><span>OpenAI 兼容</span><code>${o}/v1</code><span>REST API</span><code>${o}/api</code><span>MCP</span><code id="mcpCmd">MCP接入.bat（或 python mcp_server.py）</code></div>
     ${field("proxy.inject", "自动注入核心记忆 + 相关星星", "checkbox")}
     ${field("proxy.log_to_archive", "把对话写入归档，供日后整理", "checkbox")}
     <div class="grid2"><div>${field("proxy.budget_tokens", "每轮召回预算（tokens）", "number")}</div><div>${field("proxy.model_override", "强制模型（可空）")}</div></div>
     ${field("proxy.proxy_key", "代理密钥（可空；填了则客户端需用它作为 API Key）", "secret")}
-    ${field("core.owner_token", "主人令牌（远程直接改核心记忆用，可空）", "secret")}`);
+    ${field("core.owner_token", "主人令牌（远程直接改核心记忆用，可空）", "secret")}`,
+    () => {
+      fetch("/api/health").then((r) => r.json()).then((h) => {
+        const el = $("#mcpCmd");
+        if (el && h.exe) el.textContent = `"${h.exe}" --mcp`;
+      }).catch(() => {});
+    });
 }
 
 function pageMemory(m) {

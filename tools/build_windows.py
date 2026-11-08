@@ -6,6 +6,11 @@
   models/embed/small  内置向量模型 bge-small-zh int8
   models/voice/       宇宙之声声纹模型（预先下载）
 
+单文件版：dist/星愿记忆-windows-amd64.exe（--onefile，默认同时生成）
+  = tools/launcher/onefile.c 启动器 + 上面整个文件夹的 zip + 64 字节尾部。
+  首次运行解压到 %LOCALAPPDATA%\StarWish\runtime\<版本-哈希>\，以后直接启动；
+  记忆数据在 exe 旁边的 soul\ 文件夹。
+
 用法（可在 Linux 上交叉构建，需要 x86_64-w64-mingw32-gcc / windres）：
   python tools/build_windows.py [--cache build/cache] [--out dist] [--no-voice-models]
 """
@@ -115,6 +120,56 @@ def launcher(out: Path):
     res.unlink()
 
 
+ONEFILE_NAME = f"{APP_NAME}-windows-amd64.exe"
+MAGIC = b"SWPKG01\0"
+
+
+def make_trailer(offset: int, size: int, tag: str) -> bytes:
+    import struct
+    t = tag.encode("utf-8")[:39]
+    return MAGIC + struct.pack("<QQ", offset, size) + t + b"\0" * (40 - len(t))
+
+
+def read_trailer(exe: Path) -> dict:
+    """测试用：读回尾部。"""
+    import struct
+    data = exe.read_bytes()
+    tr = data[-64:]
+    assert tr[:8] == MAGIC, "魔数不对"
+    off, size = struct.unpack("<QQ", tr[8:24])
+    return {"offset": off, "size": size, "tag": tr[24:].split(b"\0")[0].decode(), "total": len(data)}
+
+
+def onefile(folder: Path, dest: Path, version: str) -> Path:
+    import hashlib
+    import tempfile
+    src = ROOT / "tools" / "launcher"
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        res, stub = td / "onefile.res", td / "stub.exe"
+        sh("x86_64-w64-mingw32-windres", "-c", "65001", src / "onefile.rc", "-O", "coff", "-o", res, cwd=src)
+        sh("x86_64-w64-mingw32-gcc", "-O2", "-s", "-municode", "-mwindows", "-static", "-o", stub,
+           src / "onefile.c", src / "miniz" / "miniz.c", res, "-lcomctl32", "-lshell32", cwd=src)
+        payload = td / "payload.zip"
+        skip = {f"{APP_NAME}.exe", "MCP接入.bat"}   # 单文件版用 exe 本身启动、用 exe --mcp 接入
+        with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            for f in sorted(folder.rglob("*")):
+                rel = f.relative_to(folder).as_posix()
+                if rel in skip or not f.is_file():
+                    continue
+                z.write(f, rel)
+        h = hashlib.sha256(payload.read_bytes()).hexdigest()[:10]
+        tag = f"{version}-{h}"
+        head = stub.read_bytes()
+        with open(dest, "wb") as o:
+            o.write(head)
+            with open(payload, "rb") as p:
+                shutil.copyfileobj(p, o, 1 << 20)
+            o.write(make_trailer(len(head), payload.stat().st_size, tag))
+    print(f"单文件版：{dest}  {dest.stat().st_size / 1e6:.1f} MB  标签 {tag}")
+    return dest
+
+
 def copy_app(out: Path):
     for name in COPY:
         s = ROOT / name
@@ -150,6 +205,7 @@ def main():
     ap.add_argument("--cache", default=str(ROOT / "build" / "cache"))
     ap.add_argument("--out", default=str(ROOT / "dist"))
     ap.add_argument("--no-voice-models", action="store_true")
+    ap.add_argument("--no-onefile", action="store_true", help="只生成文件夹版")
     a = ap.parse_args()
     cache, out = Path(a.cache), Path(a.out) / APP_NAME
     cache.mkdir(parents=True, exist_ok=True)
@@ -163,6 +219,10 @@ def main():
         voice_models(out)
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print(f"完成：{out}  共 {size / 1e6:.1f} MB")
+    if not a.no_onefile:
+        sys.path.insert(0, str(ROOT))
+        from app import __version__
+        onefile(out, out.parent / ONEFILE_NAME, __version__)
 
 
 if __name__ == "__main__":

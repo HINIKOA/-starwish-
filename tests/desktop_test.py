@@ -231,6 +231,60 @@ def main():
     c.put("/api/settings", json={"providers": m["providers"], "defaults": m["defaults"]})
     check("保存后旧 Key 不丢", config.load_config()["providers"][0]["api_key"] == KEY and config.load_config()["llm"]["api_key"] == KEY)
 
+    # ---------- 单文件版 星愿记忆-windows-amd64.exe ----------
+    import shutil as _sh, zipfile as _zf, importlib.util as _iu
+    spec = _iu.spec_from_file_location("bw", ROOT / "tools" / "build_windows.py")
+    bw = _iu.module_from_spec(spec); spec.loader.exec_module(bw)
+    tr = bw.make_trailer(123, 456, "0.9.0-abcdef1234")
+    check("尾部固定 64 字节且以魔数开头", len(tr) == 64 and tr[:8] == bw.MAGIC)
+    check("单文件名为 星愿记忆-windows-amd64.exe", bw.ONEFILE_NAME == "星愿记忆-windows-amd64.exe")
+    src = (ROOT / "tools" / "launcher" / "onefile.c").read_text("utf-8")
+    check("启动器：已解压（.ok）则直接启动，不再解压", ".ok" in src and "GetFileAttributesW(okf) == INVALID_FILE_ATTRIBUTES" in src)
+    check("启动器：先解到 .tmp 再改名，半途中断不留半成品", ".tmp" in src and "MoveFileW(tmp, target)" in src)
+    check("启动器：记忆放 exe 旁 soul 文件夹", "STARWISH_SOUL_DIR" in src and "\\\\soul" in src)
+    check("启动器：无命令窗口、等待子进程（关窗即退出）", "CREATE_NO_WINDOW" in src and "WaitForSingleObject" in src)
+    check("启动器：--mcp 继承标准输入输出", "--mcp" in src and "STARTF_USESTDHANDLES" in src)
+    check("启动器：清理旧版本缓存", "clean_old" in src)
+    if _sh.which("x86_64-w64-mingw32-gcc"):
+        fake = TMP / "fake"
+        (fake / "runtime").mkdir(parents=True)
+        (fake / "desktop.py").write_text("print(1)", "utf-8")
+        (fake / "runtime" / "pythonw.exe").write_bytes(b"x" * 1000)
+        (fake / "星愿记忆.exe").write_bytes(b"old")
+        (fake / "MCP接入.bat").write_text("x", "utf-8")
+        (fake / "中文 目录").mkdir()
+        (fake / "中文 目录" / "说明.txt").write_text("你好", "utf-8")
+        exe = bw.onefile(fake, TMP / bw.ONEFILE_NAME, "9.9.9")
+        info = bw.read_trailer(exe)
+        head = exe.read_bytes()[:2]
+        check("单文件 exe 以 MZ 开头（Windows 可执行）", head == b"MZ")
+        check("尾部标签 = 版本-哈希", info["tag"].startswith("9.9.9-") and len(info["tag"]) == 16)
+        check("负载位置与大小自洽", info["offset"] + info["size"] + 64 == info["total"])
+        import io
+        z = _zf.ZipFile(io.BytesIO(exe.read_bytes()[info["offset"]:info["offset"] + info["size"]]))
+        names = set(z.namelist())
+        check("负载含运行环境与程序，中文路径无损", {"desktop.py", "runtime/pythonw.exe", "中文 目录/说明.txt"} <= names
+              and z.read("中文 目录/说明.txt").decode() == "你好")
+        check("负载不含旧启动器与 bat", "星愿记忆.exe" not in names and "MCP接入.bat" not in names)
+        again = bw.onefile(fake, TMP / "again.exe", "9.9.9")
+        check("内容不变则标签不变（第二次不会重解压）", bw.read_trailer(again)["tag"] == info["tag"])
+        (fake / "desktop.py").write_text("print(2)", "utf-8")
+        check("内容一变标签就变（升级会重新解压）", bw.read_trailer(bw.onefile(fake, TMP / "v2.exe", "9.9.9"))["tag"] != info["tag"])
+        mz = TMP / "payload_check"
+        if _sh.which("gcc"):
+            ld = ROOT / "tools" / "launcher"
+            subprocess.run(["gcc", "-O2", "-w", "-I", str(ld / "miniz"), "-o", str(mz), str(ld / "payload_check.c"),
+                            str(ld / "miniz" / "miniz.c")], check=False)
+        if mz.exists():
+            r = subprocess.run([str(mz), str(exe)], capture_output=True, text=True)
+            check("miniz（与启动器同一解压库）能完整读出负载", r.returncode == 0 and "bad=0" in r.stdout, r.stdout + r.stderr)
+    h = c.get("/api/health").json()
+    check("健康接口给出 MCP 接入方式", "mcp" in h and h["mcp"]["command"])
+    os.environ["STARWISH_EXE"] = r"D:\星愿记忆-windows-amd64.exe"
+    h = c.get("/api/health").json()
+    check("单文件版 MCP = exe --mcp", h["mcp"] == {"command": r"D:\星愿记忆-windows-amd64.exe", "args": ["--mcp"]})
+    os.environ.pop("STARWISH_EXE", None)
+
     ok = sum(1 for _, g, _ in RESULTS if g)
     for nme, g, dt in RESULTS:
         if not g:

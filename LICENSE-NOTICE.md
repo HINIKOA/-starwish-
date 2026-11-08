@@ -38,3 +38,5 @@
 - three.js 0.160.0（`web/vendor/three.module.min.js`）—— MIT License，© three.js authors
 - jieba —— MIT License
 - FastAPI、uvicorn、httpx、requests、cryptography、mcp 等依赖按各自许可使用
+
+- miniz（单文件版启动器内置的解压库）：MIT 许可，Copyright 2013-2014 RAD Game Tools and Valve Software, 2010-2014 Rich Geldreich and Tenacious Software LLC。许可全文见 `tools/launcher/miniz/LICENSE`。
