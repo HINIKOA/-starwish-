@@ -21,7 +21,7 @@ import httpx
 from .. import config
 
 ENGINES = {"frame": "通用帧模式", "qwen_omni": "千问 Omni 视频接口"}
-PROTOCOLS = ("openai", "anthropic")
+PROTOCOLS = ("openai", "anthropic", "responses")
 MIN_VIDEO_FRAMES = 4  # 千问视频输入至少要 4 帧；不足时按多图传
 
 
@@ -119,6 +119,12 @@ def build_request(r: dict, system: str, history: list[dict], text: str, frames: 
         body = {"model": r["model"], "max_tokens": max_tokens, "system": system, "messages": msgs, "stream": True}
         return url, headers, body
 
+    if r["protocol"] == "responses":   # OpenAI Responses：先按 Chat 格式组好，再统一转换
+        from .. import upstream
+        content = [{"type": "image_url", "image_url": {"url": f}} for f in frames] + [{"type": "text", "text": text}]
+        msgs = [{"role": "system", "content": system}] + [m for m in history if m.get("content")] + [{"role": "user", "content": content}]
+        return upstream.build("responses", base, r["api_key"],
+                              {"model": r["model"], "messages": msgs, "stream": True, "max_tokens": max(16, max_tokens)})
     url = base + "/chat/completions"
     headers = {"Authorization": f"Bearer {r['api_key']}", "content-type": "application/json"}
     if video is None:
@@ -194,6 +200,23 @@ async def stream(r: dict, system: str, history: list[dict], text: str, frames: l
     attempts = [None]
     if r["protocol"] == "openai" and r.get("video_mode") == "video" and len(_norm_frames(frames)) >= MIN_VIDEO_FRAMES:
         attempts = [True, False]  # 先按视频传，失败退回多图
+    tr = None
+    if r["protocol"] == "responses":
+        from .. import upstream
+        tr = upstream.StreamTranslator("responses", r.get("model", ""))
+
+    def _resp_parts(obj: dict) -> list[dict]:
+        out = []
+        for sse in tr.event(obj):
+            body = sse[6:].strip()
+            if body and body != "[DONE]":
+                o = json.loads(body)
+                if o.get("error"):
+                    out.append({"type": "error", "message": o["error"].get("message", "上游出错")})
+                else:
+                    out += _parse_openai(o, usage)
+        return out
+
     try:
         for i, video in enumerate(attempts):
             url, headers, body = build_request(r, system, history, text, frames, max_tokens, video)
@@ -208,6 +231,9 @@ async def stream(r: dict, system: str, history: list[dict], text: str, frames: l
                 ctype = resp.headers.get("content-type", "")
                 if "text/event-stream" not in ctype:  # 有的兼容服务忽略 stream=true
                     obj = json.loads((await resp.aread()) or b"{}")
+                    if tr is not None:
+                        from .. import upstream
+                        obj = upstream.parse("responses", obj, r.get("model", ""))
                     parts = _parse_anthropic_full(obj, usage) if r["protocol"] == "anthropic" else _parse_openai(obj, usage)
                     for p in parts:
                         if first is None and p["type"] == "delta":
@@ -225,7 +251,10 @@ async def stream(r: dict, system: str, history: list[dict], text: str, frames: l
                             obj = json.loads(data)
                         except Exception:
                             continue
-                        parts = _parse_anthropic(obj, usage) if r["protocol"] == "anthropic" else _parse_openai(obj, usage)
+                        if tr is not None:
+                            parts = _resp_parts(obj)
+                        else:
+                            parts = _parse_anthropic(obj, usage) if r["protocol"] == "anthropic" else _parse_openai(obj, usage)
                         for p in parts:
                             if first is None and p["type"] in ("delta", "audio"):
                                 first = time.time()

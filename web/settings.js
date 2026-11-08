@@ -124,7 +124,9 @@ function addPicker() {
 function endpointPreview(p) {
   const b = (p.base_url || "").replace(/\/+$/, "");
   if (!b) return "填写后这里会显示实际请求的地址";
-  return p.protocol === "anthropic" ? `${b}${/\/v1$/.test(b) ? "" : "/v1"}/messages` : `${b}/chat/completions`;
+  if (p.protocol === "anthropic") return `${b}${/\/v1$/.test(b) ? "" : "/v1"}/messages`;
+  if (p.protocol === "responses") return `${b}/responses`;
+  return `${b}/chat/completions`;
 }
 
 function detail() {
@@ -137,7 +139,7 @@ function detail() {
   const isDef = (mid) => ROLES.filter(([r]) => cfg.defaults[r] === `${p.id}::${mid}`).map(([, t]) => t.replace(/（.*）/, ""));
   d.innerHTML = `
     <div class="pv-top"><input class="pv-title" id="pvName" value="${E(p.name)}" title="点击改名">
-      <select id="pvProto" title="接口协议"><option value="openai" ${p.protocol !== "anthropic" ? "selected" : ""}>OpenAI 兼容</option><option value="anthropic" ${p.protocol === "anthropic" ? "selected" : ""}>Anthropic</option></select>
+      <select id="pvProto" title="接口格式：Chat Completions / Anthropic Messages / OpenAI Responses"><option value="openai" ${!["anthropic", "responses"].includes(p.protocol) ? "selected" : ""}>OpenAI 兼容（Chat）</option><option value="responses" ${p.protocol === "responses" ? "selected" : ""}>OpenAI Responses</option><option value="anthropic" ${p.protocol === "anthropic" ? "selected" : ""}>Anthropic</option></select>
       <label class="switch" title="启用 / 关闭"><input type="checkbox" id="pvOn" ${p.enabled ? "checked" : ""}><span></span></label>
       <button class="icon danger" id="pvDel" title="删除这个服务商">🗑</button></div>
     <div class="f-label">API 密钥 ${ps.key_url ? `<a href="${E(ps.key_url)}" target="_blank" rel="noopener">获取密钥 ↗</a>` : ""}</div>

@@ -198,7 +198,8 @@ model:
 2. **填 API 密钥 → 点「检测」**：验证 Key 和地址；地址少了 `/v1` 会自动补上；Key 不对、没权限、地址不通都会直接说明原因。检测通过后自动同步模型。
 3. **同步模型**：从服务商拉取全部可用模型，自动分成「对话 / 识图 / 向量 / 其他」；也可以点「＋」手动添加。每个模型都有「检测」按键，真的发一句话（向量模型发一条 embeddings）看能不能用。
 4. **默认模型**：对话模型（代理转发）、整理模型（可在另一家，选便宜快的）、识图模型（宇宙之眼帧模式）、向量模型（接口档）都从下拉里选，不用手打模型名；每项也能单独检测。
-5. Key 读取时只显示后 4 位；开启「安全 → 主密码」后服务商 Key 也会加密落盘。旧版只填了「上游大模型」的设置会自动显示成一个服务商。
+5. **接口格式**：每个服务商可选「OpenAI 兼容（Chat Completions，`/chat/completions`）」「OpenAI Responses（`/responses`）」「Anthropic（`/v1/messages`）」。对话代理、后台整理、宇宙之眼、检测都按所选格式调用；客户端那边始终只用 OpenAI 兼容格式接入星愿，文本、图片、工具调用、流式、用量、思考内容都会自动转换，上游错误也转成 OpenAI 错误格式。
+6. Key 读取时只显示后 4 位；开启「安全 → 主密码」后服务商 Key 也会加密落盘。旧版只填了「上游大模型」的设置会自动显示成一个服务商。
 
 ### 7. REST API 速查
 
@@ -416,7 +417,7 @@ tags: [博客, 部署]
 **两个引擎（设置页切换）：**
 | 引擎 | 协议 | 说明 |
 |---|---|---|
-| 通用帧模式 | OpenAI 兼容 / Anthropic 兼容 | 任意识图模型；地址留空就沿用「LLM 维护」的地址、Key、模型 |
+| 通用帧模式 | OpenAI 兼容 / OpenAI Responses / Anthropic 兼容 | 任意识图模型；地址留空就沿用「LLM 维护」的地址、Key、模型 |
 | 千问 Omni 视频接口（预留） | OpenAI 兼容：`https://maas.qianwenaiapi.com/compatible-mode/v1`<br>Anthropic 兼容：`https://maas.qianwenaiapi.com/apps/anthropic` | 默认模型 `qwen3.8-omni-flash`，**填上 Key 即可用**。OpenAI 协议下 ≥4 帧按「视频」传，上游不认就自动改成多图重试；可选让模型直接出语音（预留，未实测） |
 
 **声音：** 默认用浏览器识别你说的话、用浏览器朗读 AI 的话；设置里把「转写」改成「也转写电影声音」并填 OpenAI 兼容转写服务（Whisper / SenseVoice 等），共享标签页时勾选「共享音频」，台词每 6 秒转写一次进日记。
@@ -555,7 +556,7 @@ python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-o
 - [x] 相似的记忆星融合、归纳、进化（v0.6.0）
 - [x] 三档向量模型与 FTS5 混合检索（v0.7.0）
 - [ ] 多设备双向合并（目前 WebDAV 是整包覆盖式恢复）
-- [ ] Anthropic 原生 Messages API 代理（目前通过 Claude 的 OpenAI 兼容端点）
+- [x] 上游可用 Anthropic 原生 Messages 与 OpenAI Responses（v0.10.0）
 - [ ] 导出回星汐格式（记忆卡.md + 日记），与 DSH 互通
 - [ ] 便携版 Python 一键包（免安装 Python）
 - [ ] 宇宙之眼实时直连模式（Gemini Live / OpenAI Realtime / Qwen-Omni Realtime 的 WebSocket / WebRTC 双向流）

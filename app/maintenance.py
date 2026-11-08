@@ -40,14 +40,14 @@ def llm_ready(cfg: dict | None = None) -> bool:
 def chat(messages: list[dict], cfg: dict | None = None, model: str | None = None, temperature: float = 0.2) -> str:
     cfg = cfg or config.load_config()
     other = not model and cfg["llm"].get("maint_base_url")   # 整理模型在另一个服务商
-    url = (cfg["llm"]["maint_base_url"] if other else cfg["llm"]["base_url"]).rstrip("/") + "/chat/completions"
+    from . import upstream
+    base = cfg["llm"]["maint_base_url"] if other else cfg["llm"]["base_url"]
     key = cfg["llm"].get("maint_api_key") if other else cfg["llm"]["api_key"]
+    proto = (cfg["llm"].get("maint_protocol") or cfg["llm"].get("protocol")) if other else cfg["llm"].get("protocol")
     body = {"model": model or cfg["llm"].get("maintenance_model") or cfg["llm"]["model"],
             "messages": messages, "temperature": temperature, "stream": False}
-    r = httpx.post(url, json=body, headers={"Authorization": f"Bearer {key}"},
-                   timeout=float(cfg["llm"].get("timeout", 120)))
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"] or ""
+    data = upstream.complete(proto or "openai", base, key, body, timeout=float(cfg["llm"].get("timeout", 120)))
+    return upstream.reply_text(data)
 
 
 def parse_json(text: str) -> dict:

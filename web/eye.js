@@ -338,7 +338,7 @@ function renderSettings() {
   <div class="form">
     <h4>引擎</h4><div class="row">${SEL("engine", "使用哪个引擎", [["frame", "通用帧模式"], ["qwen_omni", "千问 Omni 视频接口"]])}</div>
     <h4>通用帧模式 <small class="note">地址留空 = 沿用「设置 → LLM 维护」的地址、Key 和模型</small></h4>
-    <div class="row">${SEL("frame_protocol", "协议", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]])}${F("frame_base_url", "地址（如 https://api.openai.com/v1）")}
+    <div class="row">${SEL("frame_protocol", "协议", [["openai", "OpenAI 兼容"], ["responses", "OpenAI Responses"], ["anthropic", "Anthropic 兼容"]])}${F("frame_base_url", "地址（如 https://api.openai.com/v1）")}
       ${F("frame_api_key", "API Key", "password")}${F("frame_model", "识图模型（如 gpt-4o-mini / qwen-vl-max）")}
       ${SEL("frame_compose", "帧怎么送", [["grid", "拼成一张分镜图（省钱）"], ["multi", "每帧一张图"]])}</div>
     <h4>千问 Qwen3.8-Omni-Flash 视频接口 <small class="note">预留：填上 Key 就能用</small></h4>

@@ -44,6 +44,8 @@ DEFAULT_CONFIG = {
         "maintenance_model": "",
         "maint_base_url": "",       # 整理模型在另一个服务商时用（由「默认模型」自动填写）
         "maint_api_key": "",
+        "protocol": "openai",       # openai / anthropic / responses（由「默认模型」所在服务商自动填写）
+        "maint_protocol": "",       # 整理模型在另一个服务商时的协议
         "timeout": 120,
     },
     "proxy": {
@@ -327,14 +329,16 @@ def apply_providers(cfg: dict) -> dict:
 
     chat = pv.resolve(cfg, "chat")
     if chat:
-        cfg["llm"].update(base_url=chat["base_url"], api_key=chat["api_key"], model=chat["model"])
+        cfg["llm"].update(base_url=chat["base_url"], api_key=chat["api_key"], model=chat["model"],
+                          protocol=chat["protocol"])
     mt = pv.resolve(cfg, "maintain")
     if mt:
-        same = chat and mt["base_url"] == chat["base_url"] and mt["api_key"] == chat["api_key"]
+        same = chat and mt["base_url"] == chat["base_url"] and mt["api_key"] == chat["api_key"] \
+            and mt["protocol"] == chat["protocol"]
         cfg["llm"].update(maintenance_model=mt["model"], maint_base_url="" if same else mt["base_url"],
-                          maint_api_key="" if same else mt["api_key"])
+                          maint_api_key="" if same else mt["api_key"], maint_protocol="" if same else mt["protocol"])
     elif cfg["defaults"].get("maintain") == "" and chat:
-        cfg["llm"].update(maintenance_model="", maint_base_url="", maint_api_key="")
+        cfg["llm"].update(maintenance_model="", maint_base_url="", maint_api_key="", maint_protocol="")
     vi = pv.resolve(cfg, "vision")
     if vi:
         cfg["eye"].update(frame_base_url=vi["base_url"], frame_api_key=vi["api_key"], frame_model=vi["model"],

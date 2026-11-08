@@ -1,5 +1,12 @@
 # 更新记录
 
+## v0.10.0（2026-11-08）上游接口格式：新增 OpenAI Responses，补上 Anthropic 漏洞
+- 新增 `app/upstream.py`：内部统一用 Chat Completions 格式，按服务商选的格式转换——OpenAI 兼容（`/chat/completions`，原样转发）、Anthropic（`/v1/messages`，x-api-key）、OpenAI Responses（`/responses`，`store:false`）。
+- 转换覆盖：system / instructions、图片（data URL 与网址）、工具定义与 tool_choice、工具调用与工具结果、temperature（Anthropic 自动限制在 0~1）/ top_p / max_tokens / stop、流式（含工具参数逐段拼接、字节被切碎也能拼回）、用量、思考内容 → `reasoning_content`、结束原因；上游错误转成 OpenAI 错误格式。
+- 补漏洞：以前选 Anthropic 服务商作默认对话 / 整理模型时，代理和后台整理仍发 `/chat/completions`，会失败；现在对话代理、`/v1/models`、后台整理（整理模型可在另一家、另一种格式）、检测、宇宙之眼帧模式都按所选格式调用。
+- 设置 → 模型服务的格式下拉新增「OpenAI Responses」，地址预览随之变化；宇宙之眼设置同样可选。
+- 新增 `tests/upstream_test.py` 47 项（本地模拟 Anthropic 与 Responses 上游，不联网）。
+
 ## v0.9.0（2026-11-08）单文件版 星愿记忆-windows-amd64.exe
 - 新增单文件版：整个软件（运行环境、依赖、内置向量模型、声纹模型）装进一个 `星愿记忆-windows-amd64.exe`（约 132MB），拷走这一个文件就能用。
 - 第一次打开会显示「首次启动，正在准备运行环境」进度窗，解压到 `%LOCALAPPDATA%\StarWish\runtime\<版本-哈希>\`；以后再开直接启动，不再解压。只有换了新版本（内容哈希变了）或缓存被删时才重新解压一次，并自动清掉旧版本缓存。

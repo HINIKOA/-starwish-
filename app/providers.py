@@ -62,7 +62,7 @@ def guess_kind(model_id: str) -> str:
 
 def norm_base(url: str) -> str:
     u = (url or "").strip().rstrip("/")
-    for tail in ("/chat/completions", "/completions", "/embeddings", "/models", "/messages"):
+    for tail in ("/chat/completions", "/completions", "/embeddings", "/models", "/messages", "/responses"):
         if u.endswith(tail):
             u = u[: -len(tail)]
     return u
@@ -142,19 +142,14 @@ def check(base_url: str, api_key: str, protocol: str = "openai", model: str = ""
             r.raise_for_status()
             dim = len(r.json()["data"][0]["embedding"])
             return {"ok": True, "ms": int((time.time() - t0) * 1000), "msg": f"向量模型可用：{dim} 维"}
-        if protocol == "anthropic":
-            url = base + ("/messages" if base.endswith("/v1") else "/v1/messages")
-            r = httpx.post(url, headers=_headers(protocol, api_key), timeout=timeout,
-                           json={"model": model, "max_tokens": 16, "messages": [{"role": "user", "content": "回复：好"}]})
-            r.raise_for_status()
-            text = "".join(c.get("text", "") for c in r.json().get("content", []))
-        else:
-            r = httpx.post(base + "/chat/completions", headers=_headers(protocol, api_key), timeout=timeout,
-                           json={"model": model, "max_tokens": 16, "stream": False,
-                                 "messages": [{"role": "user", "content": "回复：好"}]})
-            r.raise_for_status()
-            msg = (r.json().get("choices") or [{}])[0].get("message") or {}
-            text = msg.get("content") or msg.get("reasoning_content") or ""
+        from . import upstream
+        if protocol == "anthropic" and not base.endswith("/v1"):
+            base = base + "/v1"
+        # Responses 接口的最小输出是 16；其余协议同样给 16
+        data = upstream.complete(protocol, base, api_key, {"model": model, "max_tokens": 16,
+                                 "messages": [{"role": "user", "content": "回复：好"}]}, timeout=timeout)
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        text = msg.get("content") or msg.get("reasoning_content") or ""
         ms = int((time.time() - t0) * 1000)
         return {"ok": True, "ms": ms, "reply": (text or "").strip()[:40], "msg": f"模型可用，{ms} 毫秒"}
     except Exception as e:  # noqa: BLE001

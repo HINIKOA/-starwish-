@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
+from . import upstream
 from . import archive, config, core, evolve, stars
 
 router = APIRouter()
@@ -93,10 +94,25 @@ def _upstream(cfg: dict) -> tuple[str, dict]:
     base = (cfg["llm"].get("base_url") or "").rstrip("/")
     if not base:
         raise HTTPException(500, "未配置上游 base_url")
-    headers = {"Content-Type": "application/json"}
-    if cfg["llm"].get("api_key"):
-        headers["Authorization"] = f"Bearer {cfg['llm']['api_key']}"
-    return base, headers
+    return base, upstream.headers(_proto(cfg), cfg["llm"].get("api_key", ""))
+
+
+def _err(proto: str, status: int, data: bytes, ctype: str):
+    """非 OpenAI 协议的上游错误，转成 OpenAI 的错误格式，客户端才看得懂。"""
+    if proto == "openai":
+        return Response(data, status_code=status, media_type=ctype)
+    msg = upstream.error_message(proto, data) or data.decode("utf-8", "replace")[:500]
+    return JSONResponse({"error": {"message": msg, "type": "upstream_error", "code": status}}, status_code=status)
+
+
+def _proto(cfg: dict) -> str:
+    return upstream.norm(cfg["llm"].get("protocol"))
+
+
+def _models_url(cfg: dict, base: str) -> str:
+    if _proto(cfg) == "anthropic" and not base.endswith("/v1"):
+        return base + "/v1/models"
+    return base + "/models"
 
 
 # ---------------- 主人指令（核心记忆） ----------------
@@ -164,7 +180,7 @@ async def models(request: Request):
     try:
         base, headers = _upstream(cfg)
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.get(base + "/models", headers=headers)
+            r = await client.get(_models_url(cfg, base), headers=headers)
         if r.status_code == 200:
             return JSONResponse(r.json())
     except Exception:
@@ -189,8 +205,9 @@ async def chat_completions(request: Request):
     rec = {}
     if cfg["proxy"].get("inject", True) and request.headers.get("x-starwish-inject", "1") != "0":
         body, rec = await run_in_threadpool(inject, body, cfg, core_note)
-    base, headers = _upstream(cfg)
-    url = base + "/chat/completions"
+    base, _ = _upstream(cfg)
+    proto = _proto(cfg)
+    url, headers, payload = upstream.build(proto, base, cfg["llm"].get("api_key", ""), body)
     timeout = httpx.Timeout(float(cfg["llm"].get("timeout", 120)), connect=15)
     extra = {"x-starwish-recalled": ",".join(str(i["id"]) for i in rec.get("items", [])),
              "x-starwish-recall-tokens": str(rec.get("used_tokens", 0)),
@@ -198,49 +215,53 @@ async def chat_completions(request: Request):
 
     if body.get("stream"):
         client = httpx.AsyncClient(timeout=timeout)
-        req = client.build_request("POST", url, json=body, headers=headers)
+        req = client.build_request("POST", url, json=payload, headers=headers)
         r = await client.send(req, stream=True)
         if r.status_code != 200:
             data = await r.aread()
             await r.aclose()
             await client.aclose()
-            return Response(data, status_code=r.status_code, media_type=r.headers.get("content-type", "application/json"))
-        collected: list[bytes] = []
+            return _err(proto, r.status_code, data, r.headers.get("content-type", "application/json"))
+        tr = upstream.StreamTranslator(proto, body.get("model", ""))
+        ctype = r.headers.get("content-type", "")
 
         async def gen():
             try:
-                async for chunk in r.aiter_raw():
-                    collected.append(chunk)
-                    yield chunk
+                if proto == "openai":
+                    async for chunk in r.aiter_raw():
+                        tr.feed(chunk)
+                        yield chunk
+                elif "text/event-stream" not in ctype:   # 上游忽略了 stream：整包转成流
+                    data = json.loads((await r.aread()) or b"{}")
+                    full = upstream.parse(proto, data, body.get("model", ""))
+                    msg = full["choices"][0]["message"]
+                    tr.text_parts.append(msg.get("content") or "")
+                    yield tr._chunk({"role": "assistant", "content": msg.get("content") or "",
+                                     **({"tool_calls": [dict(tc, index=i) for i, tc in enumerate(msg["tool_calls"])]}
+                                        if msg.get("tool_calls") else {})}).encode()
+                    yield tr._chunk({}, full["choices"][0]["finish_reason"], full.get("usage")).encode()
+                    yield b"data: [DONE]\n\n"
+                else:
+                    async for chunk in r.aiter_raw():
+                        for s in tr.feed(chunk):
+                            yield s.encode("utf-8")
+                    for s in tr.finish():
+                        yield s.encode("utf-8")
             finally:
                 await r.aclose()
                 await client.aclose()
 
         def after():
-            reply = []
-            for line in b"".join(collected).decode("utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    continue
-                try:
-                    delta = json.loads(payload)["choices"][0].get("delta") or {}
-                    if delta.get("content"):
-                        reply.append(delta["content"])
-                except Exception:
-                    pass
-            _log(cfg, body, "".join(reply), session, rec)
+            _log(cfg, body, tr.text, session, rec)
 
-        return StreamingResponse(gen(), media_type=r.headers.get("content-type", "text/event-stream"),
+        return StreamingResponse(gen(), media_type="text/event-stream" if proto != "openai" else (ctype or "text/event-stream"),
                                  headers={**extra, "Cache-Control": "no-cache"}, background=BackgroundTask(after))
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(url, json=body, headers=headers)
+        r = await client.post(url, json=payload, headers=headers)
     if r.status_code != 200:
-        return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type", "application/json"))
-    data = r.json()
+        return _err(proto, r.status_code, r.content, r.headers.get("content-type", "application/json"))
+    data = upstream.parse(proto, r.json(), body.get("model", ""))
     try:
         reply = data["choices"][0]["message"]["content"] or ""
     except Exception:
