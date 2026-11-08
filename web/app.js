@@ -652,7 +652,7 @@ async function embedPanel() {
       ${!st.deps_ok ? '<button id="embDeps">一键安装运行库</button>' : ""}
       ${!L.small.installed ? '<button id="embSmall">下载内置模型</button>' : ""}
       ${L.m3.installed ? '<button class="danger" id="embM3Del">删除 BGE-M3</button>' : `<button class="primary" id="embM3">一键部署 BGE-M3（约 ${L.m3.need_mb}MB）</button>`}
-      <button id="embTest">测试向量接口</button><button id="embRe">重新补齐向量</button>
+      <button id="embTest">检查向量接口</button><button id="embRe">重新补齐向量</button>
     </div>`;
   const inst = (kind) => safe(async () => { await api("/api/embed/install", { method: "POST", body: { kind } }); toast("已在后台开始"); embedPanel(); });
   if ($("#embDeps")) $("#embDeps").onclick = () => inst("small");

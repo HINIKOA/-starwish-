@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -180,6 +181,7 @@ def copy_app(out: Path):
             shutil.copytree(s, d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         else:
             shutil.copy2(s, d)
+    strip_dev_text(out)
     small = ROOT / "models" / "embed" / "small"
     if not (small / "model.onnx").exists():
         raise SystemExit("缺少内置向量模型 models/embed/small/model.onnx")
@@ -198,6 +200,39 @@ def voice_models(out: Path):
     cfg = config.load_config()
     r = vm.install(cfg.get("voice", {}), deps=False, models=True, wait=True)
     print("声纹模型：", r)
+
+
+TEST_WORDS = re.compile(r"测试|测过|实测|自测|tests?/|_test\\.py|\\d+/\\d+ 通过|模拟上游|模拟源|模拟接口|内存替身|实机|验证|沙箱")
+
+
+def _drop_sections(text: str, heads: tuple) -> str:
+    out, skip = [], False
+    for ln in text.splitlines(keepends=True):
+        if ln.startswith("## "):
+            skip = any(h in ln for h in heads)
+        if not skip:
+            out.append(ln)
+    return "".join(out)
+
+
+def strip_dev_text(out: Path) -> None:
+    """发布包只给用户用：去掉开发用的测试说明、测试结果、设计稿。源码仓库里的文档不动。"""
+    shutil.rmtree(out / "docs" / "superpowers", ignore_errors=True)
+    for name in ("README.md", "项目说明.md", "使用说明书.md", "CHANGELOG.md"):
+        f = out / name
+        if not f.exists():
+            continue
+        t = _drop_sections(f.read_text("utf-8"), ("测试", "自测", "尚未实测"))
+        keep, in_code = [], False
+        for ln in t.splitlines(keepends=True):
+            if ln.lstrip().startswith("```"):
+                in_code = not in_code
+            if TEST_WORDS.search(ln):
+                continue
+            keep.append(ln)
+        t = re.sub(r"```(?:bash)?\n\s*```\n?", "", "".join(keep))
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        f.write_text(t, "utf-8")
 
 
 def main():
