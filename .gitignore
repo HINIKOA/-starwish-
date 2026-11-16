@@ -5,3 +5,6 @@ build/
 dist/
 *.spec
 models/
+.graphflow/
+.graphflow-cache/
+graphflow-out/

@@ -12,6 +12,7 @@ import json
 import re
 import threading
 import time
+from collections import Counter
 
 from . import config, semantic
 from . import db as _db
@@ -131,7 +132,9 @@ def find_groups(cfg: dict | None = None, scan: int | None = None) -> list[dict]:
 
 FUSE_PROMPT = """下面是几颗相似的记忆。请把它们归纳成一颗：保留所有具体事实（时间、名字、数字、地点、偏好的细节），去掉重复；
 有先后变化的（比如以前喜欢 A、后来改成 B）要写清楚以哪个为准。用第三人称陈述（「主人…」），不要编造。
-只输出 JSON：{{"summary": "不超过 30 字的标题", "content": "归纳后的完整记忆"}}
+同时给出 major（恒星系大类）、minor（行星系小类，可空）和 1~3 个主题标签 tags。
+优先复用已有类别：{categories}
+只输出 JSON：{{"summary": "不超过 30 字的标题", "content": "归纳后的完整记忆", "major": "", "minor": "", "tags": [""]}}
 
 {items}"""
 
@@ -145,7 +148,7 @@ def _naive(rows) -> tuple[str, str]:
 
 def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=None) -> dict:
     """把几颗星融合成一颗新星。返回新星。"""
-    from . import maintenance, stars as st
+    from . import maintenance, organize, stars as st
     cfg = cfg or config.load_config()
     ids = sorted({int(i) for i in ids})
     if len(ids) < 2:
@@ -156,15 +159,19 @@ def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=Non
             if len(rows) != len(ids) or any(r["deleted_at"] or r["fused_into"] for r in rows):
                 raise ValueError("有的星已经被隐藏或融合过了")
         summary, content, by_llm = "", "", False
+        major, minor, auto_tags = "", "", []
         if use_llm and (chat or maintenance.llm_ready(cfg)):
             from datetime import datetime
             items = "\n".join(f"[{i + 1}] {datetime.fromtimestamp(r['created_at']).strftime('%Y-%m-%d')} {r['content'].strip()[:600]}"
                               for i, r in enumerate(sorted(rows, key=lambda r: r["created_at"])))
             try:
-                txt = (chat or (lambda m: maintenance.chat(m, cfg)))([{"role": "user", "content": FUSE_PROMPT.format(items=items)}])
+                prompt = FUSE_PROMPT.format(items=items, categories=organize.category_text())
+                txt = (chat or (lambda m: maintenance.chat(m, cfg)))([{"role": "user", "content": prompt}])
                 d = maintenance.parse_json(txt)
                 summary, content = str(d.get("summary", "")).strip(), str(d.get("content", "")).strip()
                 by_llm = bool(content)
+                if by_llm:
+                    major, minor, auto_tags = organize.metadata(d)
             except Exception as ex:  # noqa: BLE001
                 log_event("star_fuse_llm_failed", error=str(ex)[:160])
         if not content:
@@ -176,17 +183,25 @@ def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=Non
                     tags.append(t)
         if "融合" not in tags:
             tags.append("融合")
+        if not major:
+            inherited = Counter((r["cat_major"], r["cat_minor"]) for r in rows if r["cat_major"])
+            if inherited:
+                major, minor = inherited.most_common(1)[0][0]
+            elif use_llm and by_llm and maintenance.llm_ready(cfg):
+                major, minor, extra = organize.classify_new(content, summary, tags, cfg)
+                auto_tags += extra
+        tags = st._norm_tags(tags + auto_tags)
         now = time.time()
         gen = max(int(r["generation"] or 0) for r in rows) + 1
         with get_conn() as c:
             cur = c.execute(
                 "INSERT INTO stars(content, summary, tags, created_at, updated_at, last_recalled_at, recall_count, importance, boost,"
-                " source, session, hash, generation, fused_from) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " source, session, hash, generation, fused_from, cat_major, cat_minor) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (content, summary[:60] or st.auto_summary(content), json.dumps(tags[:12], ensure_ascii=False),
                  max(r["created_at"] for r in rows), now, max((r["last_recalled_at"] or 0) for r in rows) or None,
                  sum(int(r["recall_count"] or 0) for r in rows), max(int(r["importance"]) for r in rows),
                  max(float(r["boost"] or 1) for r in rows), "fuse:" + ",".join(map(str, ids)), "", st._hash(content), gen,
-                 json.dumps(ids)))
+                 json.dumps(ids), major, minor))
             nid = cur.lastrowid
             c.execute(f"UPDATE stars SET fused_into=? WHERE id IN ({','.join('?' * len(ids))})", (nid, *ids))
             st._index(c, nid, content, summary, tags)

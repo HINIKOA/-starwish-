@@ -93,6 +93,7 @@ def last(kind):
 def main():
     from app import upstream, config, agent, context
     from app.server import app
+    real_complete = context.main_complete
     BASE = mock()
     msgs = [{"role": "user", "content": "hi"}]
 
@@ -215,6 +216,40 @@ def main():
           and c.post("/api/agent/chat", json={"text": "未验证"}).status_code == 403)
     verified = c.get("/api/agent/history", headers={"X-StarWish-Owner": "fixture-owner-token"}).json()
     check("验证主人令牌后才返回对话历史", verified["authorized"] and bool(verified["history"]))
+
+    print("== 对话模型候选")
+    owner = {"X-StarWish-Owner": "fixture-owner-token"}
+    c.put("/api/settings", headers=owner, json={
+        "providers": [{"id": "test", "name": "Fixture", "base_url": BASE, "api_key": "fixture-key",
+                       "protocol": "anthropic", "enabled": True,
+                       "models": [{"id": m, "kind": "chat", "enabled": m != "disabled"}
+                                  for m in ("primary", "second", "disabled", "unlisted")]}],
+        "defaults": {"chat": "test::primary"},
+        "model_choices": {"chat": ["test::second", "test::disabled", "test::missing"]},
+    })
+    status = c.get("/api/agent/status", headers=owner).json()
+    check("默认对话模型与已启用候选同时可用", [m["ref"] for m in status["model_choices"]] == ["test::primary", "test::second"])
+    check("未授权不返回候选", not c.get("/api/agent/status").json()["model_choices"])
+    context.main_complete = lambda messages, cfg, **kw: {"choices": [{"message": {"content":
+        cfg["llm"]["protocol"] + ":" + cfg["llm"]["model"]}}]}
+    r = c.post("/api/agent/chat", headers=owner, json={"text": "回答这个问题", "model_ref": "test::second"})
+    check("对话请求使用候选的模型与协议，不改默认", r.json().get("reply") == "anthropic:second" and
+          config.load_config()["llm"]["model"] == "primary")
+    check("未加入候选的模型不能调用", c.post("/api/agent/chat", headers=owner,
+          json={"text": "回答这个问题", "model_ref": "test::unlisted"}).status_code == 400)
+    fixture = config.load_config()["providers"]
+    fixture.append({"id": "gateway", "preset": "custom", "name": "Fixture gateway", "base_url": BASE,
+                    "api_key": "fixture-gateway", "enabled": True,
+                    "models": [{"id": "gateway-model", "kind": "other", "enabled": True}]})
+    c.put("/api/settings", headers=owner, json={"providers": fixture,
+          "model_choices": {"chat": ["test::second", "gateway::gateway-model"]}})
+    status = c.get("/api/agent/status", headers=owner).json()
+    check("明确分配用途的模型可选，并返回实际协议", [m["protocol"] for m in status["model_choices"]] ==
+          ["anthropic", "anthropic", "responses"])
+    context.main_complete = real_complete
+    r = c.post("/api/agent/chat", headers=owner, json={"text": "继续回答这个问题", "model_ref": "gateway::gateway-model"})
+    check("自定义候选没有显式协议时实际请求 Responses", r.json().get("ok") and
+          SEEN[-1][0] == "responses" and SEEN[-1][1]["model"] == "gateway-model")
 
     print("== 6. 界面")
     js = (ROOT / "web" / "drawers.js").read_text("utf-8")

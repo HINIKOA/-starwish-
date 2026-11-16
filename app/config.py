@@ -133,6 +133,7 @@ DEFAULT_CONFIG = {
         "frame_base_url": "",
         "frame_api_key": "",
         "frame_model": "",
+        "frame_model_ref": "",
         "frame_compose": "grid",    # grid = 多帧拼成一张分镜图（省钱、单图模型也能用）；multi = 每帧一张图
         # —— 千问 Qwen3.8-Omni-Flash 视频接口（预留：填 Key 即用）——
         "qwen_protocol": "openai",  # openai / anthropic
@@ -227,6 +228,7 @@ DEFAULT_CONFIG = {
     # —— 模型服务（v0.8.0）：服务商列表 + 默认模型；保存后自动映射到 llm / eye / embed ——
     "providers": [],
     "defaults": {"chat": "", "maintain": "", "vision": "", "embed": ""},
+    "model_choices": {"chat": [], "vision": []},
     "server": {"host": "127.0.0.1", "port": 7860, "open_browser": True},
     "secrets_encrypted": False,
     "secrets_salt": "",

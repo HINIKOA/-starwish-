@@ -112,11 +112,11 @@ def runtime(cache: Path, out: Path):
     install_wheels(wheels(cache), rt / "Lib" / "site-packages")
 
 
-def launcher(out: Path):
+def launcher(out: Path, *, cc="x86_64-w64-mingw32-gcc", windres="x86_64-w64-mingw32-windres"):
     src = ROOT / "tools" / "launcher"
     res = out / "_launcher.res"
-    sh("x86_64-w64-mingw32-windres", "-c", "65001", src / "launcher.rc", "-O", "coff", "-o", res, cwd=src)
-    sh("x86_64-w64-mingw32-gcc", "-O2", "-s", "-municode", "-mwindows", "-static",
+    sh(windres, "-c", "65001", src / "launcher.rc", "-O", "coff", "-o", res, cwd=src)
+    sh(cc, "-O2", "-s", "-municode", "-mwindows", "-static",
        "-o", out / f"{APP_NAME}.exe", src / "launcher.c", res)
     res.unlink()
 
@@ -134,24 +134,35 @@ def make_trailer(offset: int, size: int, tag: str) -> bytes:
 def read_trailer(exe: Path) -> dict:
     """测试用：读回尾部。"""
     import struct
-    data = exe.read_bytes()
-    tr = data[-64:]
+    with exe.open("rb") as stream:
+        stream.seek(-64, os.SEEK_END)
+        total = stream.tell() + 64
+        tr = stream.read(64)
     assert tr[:8] == MAGIC, "魔数不对"
     off, size = struct.unpack("<QQ", tr[8:24])
-    return {"offset": off, "size": size, "tag": tr[24:].split(b"\0")[0].decode(), "total": len(data)}
+    return {"offset": off, "size": size, "tag": tr[24:].split(b"\0")[0].decode(), "total": total}
 
 
-def onefile(folder: Path, dest: Path, version: str) -> Path:
-    import hashlib
+def onefile(folder: Path, dest: Path, version: str, *, cc="x86_64-w64-mingw32-gcc",
+            windres="x86_64-w64-mingw32-windres") -> Path:
     import tempfile
     src = ROOT / "tools" / "launcher"
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         res, stub = td / "onefile.res", td / "stub.exe"
-        sh("x86_64-w64-mingw32-windres", "-c", "65001", src / "onefile.rc", "-O", "coff", "-o", res, cwd=src)
-        sh("x86_64-w64-mingw32-gcc", "-O2", "-s", "-municode", "-mwindows", "-static", "-o", stub,
+        sh(windres, "-c", "65001", src / "onefile.rc", "-O", "coff", "-o", res, cwd=src)
+        sh(cc, "-O2", "-s", "-municode", "-mwindows", "-static", "-o", stub,
            src / "onefile.c", src / "miniz" / "miniz.c", res, "-lcomctl32", "-lshell32", cwd=src)
-        payload = td / "payload.zip"
+        return pack_onefile(folder, dest, version, stub.read_bytes())
+
+
+def pack_onefile(folder: Path, dest: Path, version: str, stub: bytes) -> Path:
+    import hashlib
+    import tempfile
+    if not stub.startswith(b"MZ"):
+        raise ValueError("The onefile stub must be a Windows executable.")
+    with tempfile.TemporaryDirectory() as td:
+        payload = Path(td) / "payload.zip"
         skip = {f"{APP_NAME}.exe", "MCP接入.bat"}   # 单文件版用 exe 本身启动、用 exe --mcp 接入
         with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             for f in sorted(folder.rglob("*")):
@@ -159,14 +170,17 @@ def onefile(folder: Path, dest: Path, version: str) -> Path:
                 if rel in skip or not f.is_file():
                     continue
                 z.write(f, rel)
-        h = hashlib.sha256(payload.read_bytes()).hexdigest()[:10]
+        digest = hashlib.sha256()
+        with payload.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+        h = digest.hexdigest()[:10]
         tag = f"{version}-{h}"
-        head = stub.read_bytes()
         with open(dest, "wb") as o:
-            o.write(head)
+            o.write(stub)
             with open(payload, "rb") as p:
                 shutil.copyfileobj(p, o, 1 << 20)
-            o.write(make_trailer(len(head), payload.stat().st_size, tag))
+            o.write(make_trailer(len(stub), payload.stat().st_size, tag))
     print(f"单文件版：{dest}  {dest.stat().st_size / 1e6:.1f} MB  标签 {tag}")
     return dest
 
@@ -181,6 +195,7 @@ def copy_app(out: Path):
             shutil.copytree(s, d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         else:
             shutil.copy2(s, d)
+    copy_graphflow_tools(out)
     strip_dev_text(out)
     small = ROOT / "models" / "embed" / "small"
     if not (small / "model.onnx").exists():
@@ -189,6 +204,16 @@ def copy_app(out: Path):
     (out / "MCP接入.bat").write_bytes(
         "@echo off\r\nchcp 65001 >nul\r\nREM 供 Claude Desktop / Cursor 等以 MCP stdio 方式调用\r\n"
         'cd /d "%~dp0"\r\n"runtime\\python.exe" mcp_server.py\r\n'.encode("utf-8"))
+
+
+def copy_graphflow_tools(out: Path):
+    tools = out / "tools"
+    lock = tools / "graphflow_runtime"
+    lock.mkdir(parents=True)
+    for name in ("graphflow_engine.py", "graphflow_codex.py", "graphflow_codex_probe.py"):
+        shutil.copy2(ROOT / "tools" / name, tools / name)
+    for name in ("package.json", "package-lock.json"):
+        shutil.copy2(ROOT / "tools" / "graphflow_runtime" / name, lock / name)
 
 
 def voice_models(out: Path):
@@ -241,15 +266,28 @@ def main():
     ap.add_argument("--out", default=str(ROOT / "dist"))
     ap.add_argument("--no-voice-models", action="store_true")
     ap.add_argument("--no-onefile", action="store_true", help="只生成文件夹版")
+    ap.add_argument("--cc", default="x86_64-w64-mingw32-gcc", help="Windows x64 MinGW-compatible C compiler")
+    ap.add_argument("--windres", default="x86_64-w64-mingw32-windres", help="Windows x64 resource compiler")
+    ap.add_argument("--with-graphflow", action="store_true", help="随包内置固定 GraphFlow 引擎（需要 Windows x64 Node.js/npm）")
+    ap.add_argument("--graphflow-offline", action="store_true", help="仅从本机 npm 缓存准备随包引擎")
     a = ap.parse_args()
+    if a.graphflow_offline and not a.with_graphflow:
+        ap.error("--graphflow-offline requires --with-graphflow")
     cache, out = Path(a.cache), Path(a.out) / APP_NAME
     cache.mkdir(parents=True, exist_ok=True)
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
     copy_app(out)
+    if a.with_graphflow:
+        if __package__:
+            from .graphflow_engine import bundle_windows
+        else:
+            from graphflow_engine import bundle_windows
+
+        print("GraphFlow:", bundle_windows(out.resolve(), offline=a.graphflow_offline))
     runtime(cache, out)
-    launcher(out)
+    launcher(out, cc=a.cc, windres=a.windres)
     if not a.no_voice_models:
         voice_models(out)
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
@@ -257,7 +295,7 @@ def main():
     if not a.no_onefile:
         sys.path.insert(0, str(ROOT))
         from app import __version__
-        onefile(out, out.parent / ONEFILE_NAME, __version__)
+        onefile(out, out.parent / ONEFILE_NAME, __version__, cc=a.cc, windres=a.windres)
 
 
 if __name__ == "__main__":

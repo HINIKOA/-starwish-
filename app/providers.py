@@ -29,7 +29,7 @@ PRESETS = [
      "key_url": "https://cloud.siliconflow.cn/account/ak"},
     {"preset": "volcengine", "name": "火山方舟（豆包）", "protocol": "openai", "base_url": "https://ark.cn-beijing.volces.com/api/v3",
      "key_url": "https://console.volcengine.com/ark"},
-    {"preset": "openai", "name": "OpenAI", "protocol": "openai", "base_url": "https://api.openai.com/v1",
+    {"preset": "openai", "name": "OpenAI", "protocol": "responses", "base_url": "https://api.openai.com/v1",
      "key_url": "https://platform.openai.com/api-keys"},
     {"preset": "anthropic", "name": "Anthropic Claude", "protocol": "anthropic", "base_url": "https://api.anthropic.com",
      "key_url": "https://console.anthropic.com/settings/keys"},
@@ -38,9 +38,13 @@ PRESETS = [
     {"preset": "openrouter", "name": "OpenRouter", "protocol": "openai", "base_url": "https://openrouter.ai/api/v1",
      "key_url": "https://openrouter.ai/keys"},
     {"preset": "ollama", "name": "Ollama（本机）", "protocol": "openai", "base_url": "http://127.0.0.1:11434/v1", "key_url": ""},
-    {"preset": "custom", "name": "自定义（OpenAI 兼容）", "protocol": "openai", "base_url": "", "key_url": ""},
+    {"preset": "custom", "name": "自定义（OpenAI 兼容）", "protocol": "responses", "base_url": "", "key_url": ""},
 ]
 PRESET_MAP = {p["preset"]: p for p in PRESETS}
+
+
+def provider_protocol(p: dict) -> str:
+    return p.get("protocol") or PRESET_MAP.get(p.get("preset"), {}).get("protocol", "responses")
 
 _EMBED = re.compile(r"embed|bge|m3e|text-embedding|gte-|e5-", re.I)
 _VISION = re.compile(r"vl|vision|omni|4o|gpt-4\.1|gpt-5|gemini|claude|glm-4v|glm-4\.\dv|qvq|kimi-k2\.5|kimi-latest|"
@@ -173,10 +177,42 @@ def find(cfg: dict, pid: str) -> dict | None:
 def resolve(cfg: dict, role: str) -> dict | None:
     """默认模型 → {base_url, api_key, protocol, model}；服务商或模型被停用时返回 None。"""
     pid, model = split_ref((cfg.get("defaults") or {}).get(role, ""))
+    return _resolve_model(cfg, pid, model)
+
+
+def _resolve_model(cfg: dict, pid: str, model: str) -> dict | None:
     p = find(cfg, pid)
     if not p or not p.get("enabled", True) or not model:
         return None
     if any(m.get("id") == model and m.get("enabled") is False for m in p.get("models") or []):
         return None
     return {"base_url": norm_base(p.get("base_url", "")), "api_key": p.get("api_key", ""),
-            "protocol": p.get("protocol", "openai"), "model": model, "provider": p.get("name", pid)}
+            "protocol": provider_protocol(p), "model": model, "provider": p.get("name", pid)}
+
+
+def model_choices(cfg: dict, role: str) -> list[dict]:
+    """Use explicit role assignments, not the model name's guessed capability."""
+    configured = cfg.get("model_choices")
+    choices = configured.get(role, []) if isinstance(configured, dict) else []
+    default = (cfg.get("defaults") or {}).get(role, "")
+    out, seen = [], set()
+    for ref in [default, *(choices if isinstance(choices, list) else [])]:
+        if not isinstance(ref, str) or not ref or ref in seen:
+            continue
+        seen.add(ref)
+        pid, model = split_ref(ref)
+        p = find(cfg, pid)
+        if not any(m.get("id") == model and m.get("enabled") is True for m in ((p or {}).get("models") or [])):
+            continue
+        r = _resolve_model(cfg, pid, model)
+        if r:
+            local_chat = role == "chat" and any(h in r["base_url"] for h in ("localhost", "127.0.0.1"))
+            out.append({"ref": ref, "model": model, "provider": r["provider"], "protocol": r["protocol"],
+                        "ready": bool(r["base_url"] and (r["api_key"] or local_chat))})
+    return out
+
+
+def resolve_choice(cfg: dict, role: str, ref: str) -> dict | None:
+    if any(m["ref"] == ref and m["ready"] for m in model_choices(cfg, role)):
+        return _resolve_model(cfg, *split_ref(ref))
+    return None

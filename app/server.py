@@ -20,6 +20,8 @@ from starlette.concurrency import run_in_threadpool
 from . import __version__, agent, archive, datasync, jobs, organize, config, core, evolve, eye, fusion, importers, maintenance, providers, semantic, stars, sync, voice
 from .embed import models as embed_models
 from .db import init_db, log_event, read_events
+from . import graphflow, mcp_connections
+from .graphflow_routes import require_local_project, router as graphflow_router
 from .proxy import router as proxy_router
 
 log = logging.getLogger("starwish")
@@ -92,9 +94,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         log.warning("jobs: %s", e)
     from .watch import watcher as _watcher
-    if not os.environ.get("STARWISH_NO_WATCH"):
-        _watcher.get().start()           # 对话监控：只活在服务进程里，关窗即停
-    task = asyncio.create_task(scheduler_loop())
+    watcher = None if os.environ.get("STARWISH_NO_WATCH") else _watcher.get()
+    if watcher is not None:
+        watcher.start()                  # 对话监控：只活在服务进程里，关窗即停
+    task = None if os.environ.get("STARWISH_NO_SCHEDULER") else asyncio.create_task(scheduler_loop())
 
     def _boot_data():   # 启动时：清理过期日志；关窗期间错过的 03:00 备份补上
         try:
@@ -105,13 +108,18 @@ async def lifespan(app: FastAPI):
     if not os.environ.get("STARWISH_NO_DAILY"):
         import threading as _th
         _th.Thread(target=_boot_data, daemon=True, name="starwish-boot-data").start()
-    yield
-    task.cancel()
-    _watcher.get().stop()
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+        if watcher is not None:
+            watcher.stop()
 
 
 app = FastAPI(title="星愿 StarWish", version=__version__, lifespan=lifespan)
 app.include_router(proxy_router)
+app.include_router(graphflow_router)
 
 
 @app.exception_handler(core.CoreLockedError)
@@ -253,6 +261,29 @@ def health():
         mcp = {"command": "MCP接入.bat", "args": []}
     return {"ok": True, "app": "starwish", "version": __version__, "soul_dir": str(config.SOUL_DIR),
             "exe": exe, "mcp": mcp}
+
+
+@app.get("/api/mcp/status")
+def mcp_status(request: Request):
+    if request.client is None or request.client.host not in LOOPBACK:
+        raise HTTPException(403, "MCP 连接状态只在本机查看")
+    return JSONResponse(mcp_connections.status(), headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/mcp/setup")
+def mcp_setup(request: Request, include_project: bool = False):
+    if request.client is None or request.client.host not in LOOPBACK:
+        raise HTTPException(403, "STDIO 配置只在本机查看")
+    if include_project:
+        require_local_project(request)
+    headers = {"Cache-Control": "no-store"}
+    try:
+        setup = mcp_connections.launch_config(include_project=include_project)
+    except graphflow.GraphFlowError as exc:
+        raise HTTPException(exc.status_code, str(exc), headers=headers) from exc
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(503, "无法访问已配置的项目或引擎。", headers=headers) from exc
+    return JSONResponse(setup, headers=headers)
 
 
 LAST_PING = 0.0  # 桌面版浏览器兜底模式用：页面心跳，全部关闭一段时间后自动退出
@@ -499,13 +530,16 @@ async def api_evolve_review(req: ReviewReq):
 
 # ---------------- 星星 ----------------
 @app.get("/api/stars")
-def get_stars(limit: int = 50, offset: int = 0, include_deleted: bool = False, tag: Optional[str] = None):
+def get_stars(request: Request, limit: int = 50, offset: int = 0, include_deleted: bool = False, tag: Optional[str] = None):
+    if include_deleted:
+        _need_owner(request)
     return stars.list_stars(min(limit, 1000), offset, include_deleted, tag)
 
 
 @app.post("/api/stars")
-def post_star(s: StarIn):
-    return stars.add_star(s.content, s.summary, s.tags, s.importance, s.source, s.session, s.created_at, s.merge_near)
+def post_star(s: StarIn, request: Request):
+    return stars.add_star(s.content, s.summary, s.tags, s.importance, s.source, s.session, s.created_at, s.merge_near,
+                          classify=is_owner(request))
 
 
 @app.get("/api/stars/map")
@@ -552,39 +586,51 @@ def unfuse_star(sid: int):
         raise HTTPException(400, str(ex))
 
 
-@app.get("/api/stars/{sid}")
-def get_star(sid: int):
+def _panel_star(sid: int, request: Request) -> dict:
     s = stars.get_star(sid)
     if not s:
         raise HTTPException(404, "星星不存在")
-    s["raw"] = stars._raw_for(s.get("source", ""), 2000)
+    if s["deleted_at"] is not None or s["fused_into"] is not None:
+        _need_owner(request)
+    return s
+
+
+@app.get("/api/stars/{sid}")
+def get_star(sid: int, request: Request):
+    s = _panel_star(sid, request)
+    s["raw"] = stars.raw_excerpt(sid, 2000)
     if s.get("fused_from"):
         s["members"] = fusion.members(sid)
     return s
 
 
 @app.patch("/api/stars/{sid}")
-def patch_star(sid: int, p: StarPatch):
+def patch_star(sid: int, p: StarPatch, request: Request):
+    _panel_star(sid, request)
     return stars.update_star(sid, **p.model_dump())
 
 
 @app.post("/api/stars/{sid}/brighten")
-def brighten(sid: int):
+def brighten(sid: int, request: Request):
+    _panel_star(sid, request)
     return stars.adjust_boost(sid, 1.25)
 
 
 @app.post("/api/stars/{sid}/dim")
-def dim(sid: int):
+def dim(sid: int, request: Request):
+    _panel_star(sid, request)
     return stars.adjust_boost(sid, 0.8)
 
 
 @app.post("/api/stars/{sid}/delete")
-def soft_delete(sid: int):
+def soft_delete(sid: int, request: Request):
+    _panel_star(sid, request)
     return stars.soft_delete(sid)
 
 
 @app.post("/api/stars/{sid}/restore")
-def restore_star(sid: int):
+def restore_star(sid: int, request: Request):
+    _need_owner(request)
     return stars.soft_delete(sid, restore=True)
 
 
@@ -618,30 +664,39 @@ def post_archive(a: ArchiveIn):
     return {"file": archive.append_messages(a.messages, a.session, a.source)}
 
 
-def _consolidate_job():
-    with jobs.run("maintenance", "整理归档对话") as j:
+def _consolidate_job(include_classification: bool = False):
+    with jobs.run("maintenance", "整理对话和星球分类" if include_classification else "整理归档对话") as j:
         r = maintenance.consolidate()
+        if include_classification:
+            classification = organize.organize(fuse=False, merge_categories=False)
+            r = {**r, **{k: classification[k] for k in ("assigned", "tagged", "pending")},
+                 "errors": (r.get("errors") or []) + classification["errors"]}
+            r["ok"] = not r["errors"]
+            r.pop("reason", None)
+            config.update_state(last_consolidate={"t": time.time(), **r})
         j["detail"] = r.get("reason") or f"新增 {r.get('added', 0)}，合并 {r.get('merged', 0)}，提案 {r.get('proposals', 0)}"
+        if include_classification:
+            j["detail"] += f"，补分类 {r['assigned']}，补标签 {r['tagged']}，待补 {r['pending']}"
         if r.get("errors"):
             j["status"] = "failed"
         return r
 
 
 @app.post("/api/maintenance/consolidate")
-async def api_consolidate(background: bool = True):
-    if not maintenance.llm_ready():
-        return {"ok": False, "skipped": True, "reason": "未配置 LLM API Key，跳过整理（其他功能不受影响）"}
+async def api_consolidate(request: Request, background: bool = True):
+    _need_owner(request)
     if background:
         import threading as _th
-        _th.Thread(target=_consolidate_job, daemon=True).start()
+        _th.Thread(target=_consolidate_job, kwargs={"include_classification": True}, daemon=True).start()
         return {"ok": True, "started": True}
-    return await run_in_threadpool(_consolidate_job)
+    return await run_in_threadpool(_consolidate_job, True)
 
 
 @app.get("/api/maintenance/status")
 def api_maint_status():
     st = config.load_state()
     return {"llm_ready": maintenance.llm_ready(), "pending": {k: v[1] - v[0] for k, v in maintenance.pending_work().items()},
+            "pending_classification": organize.pending_classification(),
             "last": st.get("last_consolidate"), "last_snapshot": st.get("last_snapshot"), "last_backup": st.get("last_backup")}
 
 
@@ -657,12 +712,13 @@ def _prov_args(body: dict) -> tuple[str, str, str]:
     cfg = config.load_config()
     p = providers.find(cfg, body.get("id", "")) or {}
     if not p and body.get("id") == "legacy":
-        p = {"api_key": cfg["llm"].get("api_key", ""), "base_url": cfg["llm"].get("base_url", "")}
+        p = {"api_key": cfg["llm"].get("api_key", ""), "base_url": cfg["llm"].get("base_url", ""),
+             "protocol": cfg["llm"].get("protocol") or "openai"}
     key = body.get("api_key") or ""
     if not key or key.startswith("****"):
         key = p.get("api_key", "")
     base = body.get("base_url") or p.get("base_url", "")
-    return base, key, body.get("protocol") or p.get("protocol", "openai")
+    return base, key, body.get("protocol") or (providers.provider_protocol(p) if p else "openai")
 
 
 @app.get("/api/providers/presets")
@@ -691,7 +747,8 @@ def providers_check(body: dict):
         base, key, proto = _prov_args(body)
         model = body.get("model", "")
     try:
-        res = providers.check(base, key, proto, model, body.get("kind", ""))
+        kind = "embedding" if body.get("role") == "embed" else body.get("kind", "")
+        res = providers.check(base, key, proto, model, kind)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, str(e))
     log_event("provider_check", model=model or None, ok=True)
@@ -853,6 +910,7 @@ def eye_status(request: Request):
         engines[k] = {**eye.engine.public_view(eye.resolve(cfg, k)), "title": title}
     pre = config.load_state().get("eye_preflight") or {}
     return {"enabled": True, "engine": e.get("engine", "frame"), "engines": engines, "settings": e,
+            "vision_choices": providers.model_choices(cfg, "vision"),
             "usage": eye.session.usage_today(), "preflight": pre, "pace_gap": eye.session.PACE_GAP,
             "sessions": eye.session.list_sessions(8)}
 
@@ -898,6 +956,24 @@ def eye_session_get(sid: str, request: Request):
     return d
 
 
+@app.delete("/api/eye/session/{sid}")
+def eye_session_delete(sid: str, request: Request):
+    _eye_owner(request)
+    try:
+        deleted = eye.session.delete_diary(sid)
+    except eye.SessionNotFound:
+        raise HTTPException(404, "找不到这条画面日记") from None
+    if not deleted:
+        raise HTTPException(409, "请先结束观看，再删除这条画面日记")
+    return {"deleted": 1}
+
+
+@app.delete("/api/eye/sessions")
+def eye_sessions_clear(request: Request):
+    _eye_owner(request)
+    return {"deleted": eye.session.clear_diaries()}
+
+
 @app.post("/api/eye/session/{sid}/note")
 def eye_note(sid: str, req: EyeNote, request: Request):
     _eye_owner(request)
@@ -926,7 +1002,7 @@ async def eye_end(sid: str, req: EyeEnd, request: Request):
             vend = await run_in_threadpool(voice.pipeline.end_session, cfg, sid)
         except Exception as ex:  # noqa: BLE001
             log.warning("宇宙之声收尾失败：%s", ex)
-    d = eye.session.end(sid, make_star=make, llm_summary=summary, cast=vend.get("cast", ""))
+    d = await run_in_threadpool(eye.session.end, sid, make_star=make, llm_summary=summary, cast=vend.get("cast", ""))
     d["voice"] = vend
     return d
 
@@ -1372,8 +1448,17 @@ async def api_task_status(tid: int, body: dict, request: Request):
 @app.post("/api/agent/chat")
 async def api_agent_chat(body: dict, request: Request):
     _need_owner(request)
+    text = str((body or {}).get("text") or "")
+    ref = (body or {}).get("model_ref")
+    cfg = None
+    if ref:
+        cfg = config.load_config()
+        r = providers.resolve_choice(cfg, "chat", ref)
+        if not r:
+            raise HTTPException(400, "这个对话模型已不可用，请重新选择")
+        cfg["llm"].update({k: r[k] for k in ("base_url", "api_key", "protocol", "model")})
     try:
-        return await run_in_threadpool(agent.chat, str((body or {}).get("text") or ""))
+        return await run_in_threadpool(agent.chat, text, cfg)
     except ValueError:
         raise
     except Exception as e:  # noqa: BLE001
@@ -1386,8 +1471,12 @@ def _agent_status(cfg: dict, request: Request) -> dict:
     llm = cfg["llm"]
     ready = context.main_ready(cfg)
     configured = providers.resolve(cfg, "chat")
+    authorized = is_owner(request)
     return {"model": llm["model"] if ready else (configured or {}).get("model", ""), "model_ready": ready,
-            "authorized": is_owner(request), "owner_token_required": bool(cfg["core"].get("owner_token")),
+            "model_protocol": llm.get("protocol") or "openai",
+            "authorized": authorized, "owner_token_required": bool(cfg["core"].get("owner_token")),
+            "model_choices": providers.model_choices(cfg, "chat") if authorized else [],
+            "default_model_ref": cfg["defaults"].get("chat", "") if authorized else "",
             "window": context.window(cfg), "compact_at": context.compact_threshold(cfg),
             "effort": upstream.norm_effort(llm.get("agent_effort")),
             "efforts": [[k, upstream.EFFORT_LABELS[k]] for k in upstream.EFFORTS]}
@@ -1427,7 +1516,8 @@ def api_categories():
 
 
 @app.post("/api/stars/{sid}/category")
-def api_star_category(sid: int, body: dict):
+def api_star_category(sid: int, body: dict, request: Request):
+    _panel_star(sid, request)
     organize.set_category(sid, str((body or {}).get("major") or ""), str((body or {}).get("minor") or ""))
     return stars.get_star(sid)
 

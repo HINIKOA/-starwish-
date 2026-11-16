@@ -1,0 +1,7 @@
+{
+  "name": "starwish-graphflow-runtime",
+  "private": true,
+  "dependencies": {
+    "@roarpeng/graphflow": "3.9.2"
+  }
+}

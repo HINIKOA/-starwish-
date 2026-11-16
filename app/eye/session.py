@@ -56,8 +56,12 @@ def _read(sid: str) -> tuple[dict, list[dict]]:
 
 
 def _append(sid: str, obj: dict) -> None:
-    with _lock, _path(sid).open("a", encoding="utf-8") as f:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    with _lock:
+        p = _path(sid)
+        if not p.is_file():
+            raise SessionNotFound(sid)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
 def start(title: str = "", source: str = "screen", engine: str = "") -> dict:
@@ -106,12 +110,33 @@ def get(sid: str, with_entries: bool = True) -> dict:
 
 def list_sessions(limit: int = 30) -> list[dict]:
     out = []
-    for p in sorted(eye_dir().glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
-        try:
-            out.append(get(p.stem, with_entries=False))
-        except Exception:
-            continue
+    with _lock:
+        for p in sorted(eye_dir().glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True)[:limit]:
+            try:
+                out.append(get(p.stem, with_entries=False))
+            except Exception:
+                continue
     return out
+
+
+def delete_diary(sid: str) -> bool:
+    with _lock:
+        meta, _ = _read(sid)
+        if not meta.get("ended_at"):
+            return False
+        _path(sid).unlink()
+        return True
+
+
+def clear_diaries() -> int:
+    deleted = 0
+    with _lock:
+        for p in eye_dir().glob("*.jsonl"):
+            try:
+                deleted += delete_diary(p.stem)
+            except (SessionNotFound, json.JSONDecodeError, UnicodeError):
+                continue
+    return deleted
 
 
 def history_messages(sid: str, turns: int = 12) -> list[dict]:

@@ -115,6 +115,10 @@ starwish/
 | MCP（stdio） | `python mcp_server.py` | Claude Desktop、Cursor、Cherry Studio、Hermes Agent 等支持 MCP 的客户端，模型按需调用记忆工具 |
 | REST API | `http://127.0.0.1:7860/api/...` | 自己写脚本、其他 Agent 框架 |
 
+**按本机配置接入：** 打开星愿「设置 → MCP 与代理」，选择客户端的 `STDIO` 类型，将面板生成的启动命令、每项参数、环境变量和工作目录分别填入。`STARWISH_SOUL_DIR` 让 MCP 与面板使用同一套记忆库。保存后重新连接，在星图顶栏点「MCP」查看客户端会话：绿灯表示已完成握手，黄灯表示仍有会话在握手，红灯表示没有会话。旧版本 MCP 进程需要换用当前配置并重连，才会上报状态。MCP 接通不代表开启了对话监控，`/v1` 也不是 MCP 地址。
+
+**项目代码能力（源码版）：** 星图顶栏的「GraphFlow」提供源码定位、静态影响分析、只读工作流和任务台账。项目访问需要明确授权 Git 工作区；写入、回滚和预设测试需要本机审批。安装固定版本引擎、连接 Codex 和了解兼容范围，请查看 [GraphFlow 接入及验收说明](docs/graphflow-roadmap.md)。
+
 下面路径以 U 盘 `E:\星愿记忆` 为例，请换成你的实际路径。Windows 的 JSON 里反斜杠要写成 `\\`。
 
 ### 1. Claude Desktop（MCP）

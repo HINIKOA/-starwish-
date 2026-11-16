@@ -437,8 +437,12 @@ def main():
     r = c.post(f"/api/stars/{b1}/category", json={"major": "运动", "minor": ""}).json()
     check("手动改类别", r["cat_major"] == "运动")
     check("手动整理排进任务抽屉", c.post("/api/organize").json()["ok"])
-    time.sleep(1.2)
     check("整理任务可见", any(j["kind"] == "organize" for j in jobs.list_jobs(100)))
+    deadline = time.monotonic() + 10
+    while any(j["kind"] == "organize" and j["status"] == "running" for j in jobs.list_jobs(100)):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("整理任务未结束，不能开始增量数据测试")
+        time.sleep(0.1)
 
     # ---------- 8. 数据：增量 / 定时 / 云服务器 ----------
     print("\n[数据]")

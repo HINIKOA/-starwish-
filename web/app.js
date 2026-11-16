@@ -1,8 +1,8 @@
 // 星愿 StarWish —— 记忆星图面板（无需构建，原生 ES Module + three.js）
 // 设计灵感来自 dsh-xingxi（作者 Yuuyuko-uu）：越新的星越亮，老星只是变暗、不会消失。
 
-import { initSettings, toggleSettings } from "./settings.js";
-import { initDrawers } from "./drawers.js";
+import { initSettings, toggleSettings } from "./settings.js?v=mcp-project-1";
+import { initDrawers } from "./drawers.js?v=chat-fit-1";
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -36,6 +36,47 @@ function toast(msg, err = false) {
 }
 async function safe(fn) { try { return await fn(); } catch (e) { toast(e.message, true); } }
 
+function initMcpStatus() {
+  const button = $("#mcpStatusButton"), drawer = $("#mcpStatusDrawer");
+  const summary = $("#mcpStatusSummary"), sessions = $("#mcpSessions");
+  const setOpen = (open, restoreFocus = false) => {
+    button.setAttribute("aria-expanded", open);
+    drawer.classList.toggle("hidden", !open);
+    if (open) poll();
+    else if (restoreFocus) button.focus();
+  };
+  function render(state, label, detail, clients = []) {
+    button.dataset.state = state;
+    button.querySelector("span").textContent = `MCP · ${label}`;
+    if (summary.textContent !== detail) summary.textContent = detail;
+    sessions.innerHTML = clients.map((client) => `<li><i class="mcp-dot" data-state="${client.state === "connected" ? "connected" : "partial"}" aria-hidden="true"></i><div><b>${esc(client.name)}</b>${client.version ? `<small>${esc(client.version)}</small>` : ""}</div><span>${client.state === "connected" ? "已接通" : "握手中"}</span></li>`).join("");
+  }
+  let polling = false;
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    try {
+      const { state, connected, pending, sessions: clients } = await api("/api/mcp/status", { signal: AbortSignal.timeout(4000) });
+      const label = state === "connected" ? `已接通 ${connected}` : pending ? (connected ? "部分接通" : "握手中") : "未接通";
+      render(state, label, clients.length ? `${connected} 个已接通 · ${pending} 个握手中` : "目前没有客户端连接。", clients);
+    } catch {
+      render("unknown", "状态未知", "无法读取连接状态，请在运行星愿的电脑上打开面板。");
+    } finally { polling = false; }
+  }
+  button.onclick = () => setOpen(drawer.classList.contains("hidden"));
+  $("#mcpStatusClose").onclick = () => setOpen(false, true);
+  $("#mcpStatusSetup").onclick = () => { setOpen(false); toggleSettings(true, "mcp"); };
+  document.addEventListener("click", (e) => {
+    if (!drawer.contains(e.target) && !button.contains(e.target)) setOpen(false);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !drawer.classList.contains("hidden")) setOpen(false, true);
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });
+  setInterval(() => { if (!document.hidden) poll(); }, 3000);
+  poll();
+}
+
 // ---------------- three.js 加载（本地优先，CDN 兜底） ----------------
 async function loadThree() {
   const urls = [
@@ -53,7 +94,7 @@ const S = {
   stars: [], idToIdx: new Map(), positions: null, baseBright: null,
   searchSet: null, cutoff: Infinity, hovered: -1, selected: -1,
   cam: { theta: 0.6, phi: 0.82, dist: 55, target: [0, 0, 0] },
-  targetGoal: null, autoRotate: true, lastInteract: 0, minT: 0, maxT: 0, core: null,
+  targetGoal: null, autoRotate: false, orbiting: false, lastInteract: 0, minT: 0, maxT: 0, core: null,
 };
 
 const hash = (s) => { let h = 2166136261; s = String(s); for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; };
@@ -277,33 +318,92 @@ function applyFilters() {
 }
 
 // ---------------- 相机控制（拖拽旋转 / 滚轮缩放） ----------------
+function syncCamera() {
+  const { theta, phi, dist, target } = S.cam;
+  S.camera.position.set(target[0] + dist * Math.sin(phi) * Math.cos(theta), target[1] + dist * Math.cos(phi), target[2] + dist * Math.sin(phi) * Math.sin(theta));
+  S.camera.lookAt(...target);
+  S.camera.updateMatrixWorld();
+}
+
+function pointAtDepth(mouse, depth) {
+  const rc = new S.three.Raycaster();
+  rc.setFromCamera(mouse, S.camera);
+  const forward = S.camera.getWorldDirection(new S.three.Vector3());
+  return rc.ray.at(depth / rc.ray.direction.dot(forward), new S.three.Vector3());
+}
+
+function mouseNdc(e, dom) {
+  const view = dom.getBoundingClientRect();
+  return new S.three.Vector2((e.clientX - view.left) / view.width * 2 - 1, 1 - (e.clientY - view.top) / view.height * 2);
+}
+
+function cursorAnchor(e, dom) {
+  syncCamera();
+  const mouse = mouseNdc(e, dom), hit = pick(e);
+  const hitDepth = hit?.point.clone().sub(S.camera.position).dot(S.camera.getWorldDirection(new S.three.Vector3()));
+  const depth = hitDepth > S.camera.near ? hitDepth : S.cam.dist;
+  return { mouse, depth, point: pointAtDepth(mouse, depth) };
+}
+
+function keepCursorAnchor(anchor, depth = anchor.depth) {
+  syncCamera();
+  const shift = anchor.point.clone().sub(pointAtDepth(anchor.mouse, depth));
+  S.cam.target = S.cam.target.map((v, i) => v + shift.getComponent(i));
+  syncCamera();
+}
+
 function bindControls(dom) {
   let drag = null;
-  dom.addEventListener("pointerdown", (e) => { drag = { x: e.clientX, y: e.clientY, moved: 0 }; S.lastInteract = performance.now(); });
-  window.addEventListener("pointerup", (e) => {
-    if (drag && drag.moved < 5 && e.target === dom) onClick(e);
-    drag = null;
+  dom.addEventListener("pointerdown", (e) => {
+    if (drag || ![0, 1].includes(e.button)) return;
+    drag = { id: e.pointerId, button: e.button, x: e.clientX, y: e.clientY, moved: 0 };
+    S.orbiting = true; S.lastInteract = performance.now();
+    if (e.button === 1) {
+      e.preventDefault();
+      dom.setPointerCapture(e.pointerId);
+      S.targetGoal = null;
+      drag.anchor = cursorAnchor(e, dom);
+    }
   });
+  window.addEventListener("pointerup", (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (drag.button === 0 && drag.moved < 5 && e.target === dom) onClick(e);
+    drag = null; S.orbiting = false; S.lastInteract = performance.now();
+  });
+  dom.addEventListener("pointercancel", (e) => {
+    if (drag?.id === e.pointerId) { drag = null; S.orbiting = false; }
+  });
+  dom.addEventListener("auxclick", (e) => { if (e.button === 1) e.preventDefault(); });
   dom.addEventListener("pointermove", (e) => {
-    if (drag) {
+    if (drag?.id === e.pointerId) {
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
       drag.moved += Math.abs(dx) + Math.abs(dy);
       S.cam.theta -= dx * 0.005; S.cam.phi = Math.min(3.0, Math.max(0.15, S.cam.phi - dy * 0.005));
+      if (drag.anchor) keepCursorAnchor(drag.anchor);
       drag.x = e.clientX; drag.y = e.clientY; S.lastInteract = performance.now();
       $("#tooltip").classList.add("hidden");
     } else onHover(e);
   });
   dom.addEventListener("wheel", (e) => {
     e.preventDefault();
-    S.cam.dist = Math.min(600, Math.max(6, S.cam.dist * (e.deltaY > 0 ? 1.1 : 0.9))); S.userZoomed = true;
+    if (!e.deltaY) return;
+    const oldDist = S.cam.dist;
+    const nextDist = Math.min(600, Math.max(6, oldDist * (e.deltaY > 0 ? 1.1 : 0.9)));
+    if (nextDist !== oldDist) {
+      S.targetGoal = null;
+      const anchor = cursorAnchor(e, dom);
+      S.cam.dist = nextDist;
+      // Scale the anchor's depth as the camera moves along the cursor ray.
+      keepCursorAnchor(anchor, Math.max(S.camera.near * 1.01, anchor.depth * nextDist / oldDist));
+      S.userZoomed = true;
+    }
     S.lastInteract = performance.now();
   }, { passive: false });
 }
 
 function pick(e) {
   const THREE = S.three;
-  const view = S.renderer.domElement.getBoundingClientRect();
-  const mouse = new THREE.Vector2((e.clientX - view.left) / view.width * 2 - 1, 1 - (e.clientY - view.top) / view.height * 2);
+  const mouse = mouseNdc(e, S.renderer.domElement);
   const rc = new THREE.Raycaster();
   rc.setFromCamera(mouse, S.camera);
   rc.params.Points.threshold = Math.max(0.6, S.cam.dist * 0.012);
@@ -379,15 +479,13 @@ function animate(t) {
   requestAnimationFrame(animate);
   if (!S.renderer) return;
   const idle = performance.now() - S.lastInteract > 2500;
-  if (S.autoRotate && idle && $("#drawer").classList.contains("hidden")) S.cam.theta += 0.0007;
+  if (S.autoRotate && !S.orbiting && idle && $("#drawer").classList.contains("hidden")) S.cam.theta += 0.0007;
   if (S.targetGoal) {
     const tg = S.cam.target;
     for (let k = 0; k < 3; k++) tg[k] += (S.targetGoal[k] - tg[k]) * 0.08;
     if (Math.hypot(...tg.map((v, k) => v - S.targetGoal[k])) < 0.05) S.targetGoal = null;
   }
-  const { theta, phi, dist, target } = S.cam;
-  S.camera.position.set(target[0] + dist * Math.sin(phi) * Math.cos(theta), target[1] + dist * Math.cos(phi), target[2] + dist * Math.sin(phi) * Math.sin(theta));
-  S.camera.lookAt(target[0], target[1], target[2]);
+  syncCamera();
   for (const label of S.minorLabels || []) label.visible = S.camera.position.distanceToSquared(label.position) < 75 ** 2;
   stepAnims(performance.now());
   for (const p of [S.points, S.corePoints, S.ghostPoints]) if (p) p.material.uniforms.uTime.value = t / 1000;
@@ -561,8 +659,16 @@ document.querySelectorAll("nav button").forEach((b) => b.addEventListener("click
 function openPanel(name) { if (name === "skills") { location.href = "/skills"; return; } if (name === "eye") { location.href = "/eye"; return; } ({ core: panelCore, proposals: panelProposals, add: panelAdd, import: panelImport, sync: panelSync, settings: panelSettings, events: panelEvents })[name](); }
 
 // —— 星星详情 ——
-async function openStar(id) {
-  const s = await safe(() => api("/api/stars/" + id));
+async function openStar(id, ownerToken = "") {
+  const ownerHeaders = () => ownerToken ? { "X-StarWish-Owner": ownerToken } : {};
+  const s = await safe(async () => {
+    try { return await api("/api/stars/" + id, { headers: ownerHeaders() }); }
+    catch (e) {
+      if (e.status !== 403 || ownerToken) throw e;
+      ownerToken = prompt("查看已隐藏的记忆，请输入星愿主人令牌：") || "";
+      return ownerToken ? api("/api/stars/" + id, { headers: ownerHeaders() }) : null;
+    }
+  });
   if (!s) return;
   const i = S.idToIdx.get(id); if (i !== undefined) { S.selected = i; applyFilters(); }
   const del = !!s.deleted_at;
@@ -595,10 +701,10 @@ async function openStar(id) {
     <div class="sub" style="margin-top:8px">星星永远不会被真正删除：隐藏只是打标记，所有改动都记在事件日志里。</div>
     ${s.raw ? `<h3>原始对话</h3><pre>${esc(s.raw)}</pre>` : ""}
   `);
-  const act = (p, msg) => safe(async () => { await api(`/api/stars/${id}/${p}`, { method: "POST" }); toast(msg); await refresh(); openStar(id); });
+  const act = (p, msg) => safe(async () => { await api(`/api/stars/${id}/${p}`, { method: "POST", headers: ownerHeaders() }); toast(msg); await refresh(); openStar(id, ownerToken); });
   $("#sSave").onclick = () => safe(async () => {
-    await api("/api/stars/" + id, { method: "PATCH", body: { summary: $("#sSummary").value, content: $("#sContent").value, tags: $("#sTags").value, importance: +$("#sImp").value } });
-    toast("已保存"); await refresh(); openStar(id);
+    await api("/api/stars/" + id, { method: "PATCH", headers: ownerHeaders(), body: { summary: $("#sSummary").value, content: $("#sContent").value, tags: $("#sTags").value, importance: +$("#sImp").value } });
+    toast("已保存"); await refresh(); openStar(id, ownerToken);
   });
   $("#sBright").onclick = () => act("brighten", "变亮了");
   $("#sDim").onclick = () => act("dim", "变暗了");
@@ -688,10 +794,11 @@ async function panelSync() {
   const pending = st ? Object.values(st.pending).reduce((a, b) => a + b, 0) : 0;
   openDrawer(`
     <h2>备份与整理</h2>
-    <h3>LLM 整理（可选）</h3>
-    <div class="sub">${st && st.llm_ready ? "已配置 API Key。" : '<span class="warn">未配置 API Key：整理功能不可用，其余功能不受影响。</span>'}
-      待整理的归档对话：<b>${pending}</b> 条。上次整理：${st && st.last ? fmtDate(st.last.t) + `（新增 ${st.last.added}，合并 ${st.last.merged}，提案 ${st.last.proposals}）` : "—"}</div>
-    <div class="row"><button class="primary" id="mGo" ${st && st.llm_ready ? "" : "disabled"}>立即整理</button></div>
+    <h3>对话整理与标签分类</h3>
+    <div class="sub">${st?.llm_ready ? "使用整理模型归档对话，并为星球补齐大类、小类和主题标签。" : "未配置整理模型时，只能按已有标签粗分。"}
+      待整理对话：<b>${pending}</b> 条 · 待补分类或标签：<b>${st?.pending_classification ?? "—"}</b> 颗。
+      上次整理：${st?.last ? fmtDate(st.last.t) + `（新增 ${st.last.added ?? 0}，分类 ${st.last.assigned ?? 0}，补标签 ${st.last.tagged ?? 0}）` : "—"}</div>
+    <div class="row"><button class="primary" id="mGo" ${st ? "" : "disabled"}>立即整理</button></div>
     <h3>星辰融合</h3>
     <div class="sub">相似的记忆会融合、归纳成一颗新星（配好 LLM 时由它归纳，否则朴素拼接）。原来的星不会删除，可随时拆开还原。每新增 8 颗星自动检查一次。</div>
     <div class="row"><button id="fusePrev">看看哪些会融合</button><button class="primary" id="fuseGo">立即融合归纳</button></div>
@@ -705,7 +812,17 @@ async function panelSync() {
     <div class="row"><button class="primary" id="davGo">立即备份</button><button id="davList">查看云端版本</button></div>
     <div id="davBox"></div>
   `);
-  if ($("#mGo")) $("#mGo").onclick = () => safe(async () => { await api("/api/maintenance/consolidate", { method: "POST" }); toast("整理已在后台开始"); });
+  const organizeNow = $("#mGo");
+  organizeNow.onclick = () => safe(async () => {
+    organizeNow.disabled = true;
+    organizeNow.textContent = "整理中…";
+    try {
+      const r = await api("/api/maintenance/consolidate?background=false", { method: "POST" });
+      toast(`${r.ok ? "整理完成" : "整理部分失败"}：补分类 ${r.assigned} 颗，补标签 ${r.tagged} 颗`, !r.ok);
+      await refresh();
+      if (organizeNow.isConnected && !$("#drawer").classList.contains("hidden")) await panelSync();
+    } finally { organizeNow.disabled = false; organizeNow.textContent = "立即整理"; }
+  });
   $("#fusePrev").onclick = () => safe(async () => { const r = await api("/api/stars/fuse/preview");
     $("#fuseBox").innerHTML = r.groups.map((g) => `<div class="card"><div class="meta">${g.ids.length} 颗 · 相似度 ${g.score}</div>${g.summaries.map(esc).join("<br>")}</div>`).join("") || '<div class="sub">现在没有足够相似的星。</div>'; });
   $("#fuseGo").onclick = () => safe(async () => { $("#fuseGo").disabled = true; $("#fuseGo").textContent = "融合中…";
@@ -784,6 +901,7 @@ async function panelEvents() {
   if (chrome) measure.observe(chrome);
   measure.observe(timeline);
   initSettings({ api, toast, esc, safe, refresh, embedPanel });
+  initMcpStatus();
   initDrawers({ api, toast, esc, safe, refresh });
   if (location.hash.startsWith("#settings")) toggleSettings(true, location.hash.slice(10));   // 例如 #settings/data/webdav
   const THREE = await loadThree();

@@ -65,7 +65,7 @@ def import_delta(delta: dict, source: str = "sync") -> dict:
             skipped += 1
             continue
         with get_conn() as c:
-            r = c.execute(f"SELECT id, {CHANGED} AS changed FROM stars WHERE uid=?", (uid,)).fetchone()
+            r = c.execute(f"SELECT id, content, summary, {CHANGED} AS changed FROM stars WHERE uid=?", (uid,)).fetchone()
             tags = d.get("tags") if isinstance(d.get("tags"), str) else json.dumps(d.get("tags") or [], ensure_ascii=False)
             if r is None:
                 cur = c.execute("INSERT INTO stars(uid, content, summary, tags, created_at, updated_at, importance, boost, source, session, "
@@ -78,6 +78,8 @@ def import_delta(delta: dict, source: str = "sync") -> dict:
                 added += 1
             elif _changed(d) > float(r["changed"] or 0):
                 sid = r["id"]
+                if d["content"] != r["content"] or (d.get("summary") or "") != r["summary"]:
+                    c.execute("DELETE FROM star_archive_refs WHERE star_id=?", (sid,))
                 c.execute("UPDATE stars SET content=?, summary=?, tags=?, updated_at=?, importance=?, boost=?, deleted_at=?, "
                           "cat_major=?, cat_minor=?, hash=? WHERE id=?",
                           (d["content"], d.get("summary") or "", tags, d.get("updated_at"), int(d.get("importance") or 3),
@@ -373,7 +375,7 @@ def reset_data() -> dict:
     """重置：先做一次本地快照（可恢复），再清空星星、提案、向量、任务与核心记忆。设置保留。"""
     snap = sync.local_snapshot()
     with get_conn() as c:
-        for t in ("stars", "proposals", "embeddings"):
+        for t in ("stars", "proposals", "embeddings", "star_archive_refs"):
             c.execute(f"DELETE FROM {t}")
         for t in ("jobs", "watch_tasks", "watch_fragments"):
             try:

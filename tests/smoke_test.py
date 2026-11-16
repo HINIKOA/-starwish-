@@ -240,8 +240,10 @@ def main():
     env = {**os.environ, "STARWISH_SOUL_DIR": str(soul), "PYTHONIOENCODING": "utf-8"}
     up_port, port, dav_port = free_port(), free_port(), free_port()
     mock_app, _ = start_mock_upstream(up_port)
-    srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
-                           env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    server_log = tmp / "server.log"
+    with server_log.open("wb") as output:
+        srv = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "--no-browser", "--port", str(port)],
+                               env=env, cwd=str(ROOT), stdout=output, stderr=subprocess.STDOUT)
     B = f"http://127.0.0.1:{port}"
     c = httpx.Client(base_url=B, timeout=60)
     try:
@@ -684,11 +686,12 @@ def main():
     finally:
         srv.terminate()
         try:
-            out = srv.communicate(timeout=10)[0].decode("utf-8", "replace")
-        except Exception:
+            srv.wait(timeout=10)
+        except subprocess.TimeoutExpired:
             srv.kill()
-            out = ""
-        if any(not ok for _, ok, _ in RESULTS):
+            srv.wait()
+        if sys.exc_info()[0] or any(not ok for _, ok, _ in RESULTS):
+            out = server_log.read_text("utf-8", errors="replace")
             print("---- 服务器日志尾部 ----\n" + out[-3000:])
 
     # ---------------- 性能：1 万颗星 ----------------

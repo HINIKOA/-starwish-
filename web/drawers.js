@@ -5,11 +5,13 @@
 let C = null;
 const $ = (s) => document.querySelector(s);
 const POS_KEY = "starwish.chatpos";
-const TASK_KEY = "starwish.taskdrawer";
 const ST = { done: ["st-done", "完成"], closed: ["st-done", "已闭环"], running: ["st-running", "进行中"], open: ["st-running", "未闭环"], failed: ["st-failed", "失败"] };
 const CLIENT = { claude: "Claude Code", qoder: "Qoder", workbuddy: "WorkBuddy", codebuddy: "CodeBuddy", codex: "Codex", opencode: "OpenCode", dsh: "DeepSeek Harness" };
 let tab = "jobs", openTask = null, sending = false;
+let tasksOpen = false;
 let ownerToken = "", chatStatus = null, statusRequest = 0;
+let chatModelRef = "";
+const MODEL_PROTOCOL = { responses: "OpenAI Responses", openai: "OpenAI Chat Completions", anthropic: "Anthropic Messages" };
 
 const ago = (t) => { if (!t) return ""; const s = Date.now() / 1000 - t; if (s < 60) return "刚刚"; if (s < 3600) return Math.floor(s / 60) + " 分钟前";
   if (s < 86400) return Math.floor(s / 3600) + " 小时前"; return new Date(t * 1000).toLocaleDateString("zh-CN"); };
@@ -18,7 +20,7 @@ export function initDrawers(ctx) {
   C = ctx;
   buildChat();
   buildTasks();
-  window.addEventListener("starwish-ui", () => { placeChat(false); placeTasks(); });
+  window.addEventListener("starwish-ui", () => { placeChat(); placeTasks(); });
   window.addEventListener("starwish-agent-config", refreshChatStatus);
 }
 
@@ -30,7 +32,7 @@ function buildChat() {
   d.innerHTML = `<div class="fd-head" id="chatHead"><span class="fd-dot" aria-hidden="true"></span><b>星愿助手</b>
       <span class="fd-ctx" id="chatCtx" title="上下文用量 / 自动压缩阈值"></span>
       <button class="fd-btn" id="chatClear" title="清空对话历史" disabled>清空</button><button class="fd-btn" id="chatMin" title="收起 / 展开">—</button>
-      <div class="fd-meta"><div class="fd-model"><span>模型</span><strong id="chatModel" aria-live="polite">读取中…</strong></div>
+      <div class="fd-meta"><div class="fd-model"><span>模型</span><select id="chatModel" aria-label="切换对话模型" disabled><option>读取中…</option></select></div>
         <select class="fd-sel" id="chatEffort" aria-label="思考等级" disabled><option>思考：读取中…</option></select></div>
     </div>
     <div class="fd-body"><div class="chat-log" id="chatLog"></div>
@@ -38,10 +40,19 @@ function buildChat() {
       <button class="primary" id="chatSend" disabled>发送</button></form></div>
     <div class="fd-resize" id="chatResize" title="拖动调整大小"></div>`;
   document.body.appendChild(d);
-  placeChat(true);
+  $("#chatModel").onchange = (e) => { chatModelRef = e.target.value; ctxLine(chatStatus); };
+  placeChat();
+  let fitFrame = 0;
+  const scheduleFit = () => {
+    if (!fitFrame) fitFrame = requestAnimationFrame(() => { fitFrame = 0; placeChat(); });
+  };
+  window.addEventListener("resize", scheduleFit);
+  const chromeObserver = new ResizeObserver(scheduleFit);
+  chromeObserver.observe($("#mapChrome"));
+  chromeObserver.observe($("#timeline"));
   drag(d, $("#chatHead"));
   resize(d, $("#chatResize"));
-  $("#chatMin").onclick = () => { const p = pos(); p.collapsed = !p.collapsed; savePos(p); placeChat(false); };
+  $("#chatMin").onclick = () => { const p = pos(); p.collapsed = !p.collapsed; savePos(p); placeChat(); };
   $("#chatClear").onclick = () => confirm("清空和星愿助手的对话历史？") && C.safe(async () => { await agentApi("/api/agent/history", { method: "DELETE" }); await loadHistory(); });
   $("#chatEffort").onchange = async (e) => {
     const select = e.target, effort = select.value;
@@ -59,17 +70,27 @@ function buildChat() {
 }
 function pos() { try { return JSON.parse(localStorage.getItem(POS_KEY) || "{}") || {}; } catch { return {}; } }
 function savePos(p) { localStorage.setItem(POS_KEY, JSON.stringify(p)); }
-function placeChat(first) {
+function placeChat() {
   const d = $("#chatDrawer"), side = document.documentElement.dataset.chatSide || "right";
   let p = pos();
   if (p.side !== side) { p = { side, collapsed: p.collapsed }; savePos(p); }   // 换了默认位置：回到那一侧
-  const w = Math.min(p.w || 380, innerWidth - 20), h = Math.min(p.h || 460, innerHeight - 120);
+  const margin = 8;
+  let top = Math.ceil($("#mapChrome").getBoundingClientRect().bottom) + 6;
+  let bottom = Math.floor($("#timeline").getBoundingClientRect().top) - 4;
+  // Very short windows may need to overlap the map controls to keep the composer reachable.
+  if (bottom - top < 180) { top = margin; bottom = innerHeight - margin; }
+  const maxH = Math.max(1, bottom - top);
+  const maxW = Math.max(1, innerWidth - margin * 2);
+  const w = Math.min(maxW, Math.max(300, p.w || 380));
+  const h = Math.min(maxH, Math.max(240, p.h || 460));
   const x = p.x ?? (side === "left" ? 16 : innerWidth - w - 16);
-  const y = p.y ?? Math.max(70, innerHeight - h - 70);
-  d.style.setProperty("--chat-top", Math.min(innerHeight - 44, y) + "px");
-  Object.assign(d.style, { left: Math.max(0, Math.min(innerWidth - 120, x)) + "px", width: w + "px",
-    height: p.collapsed ? "auto" : h + "px" });
+  const y = p.y ?? innerHeight - h - 70;
   d.classList.toggle("collapsed", !!p.collapsed);
+  d.style.setProperty("--chat-floor", `${top}px`);
+  Object.assign(d.style, { left: `${Math.max(margin, Math.min(innerWidth - w - margin, x))}px`,
+    width: `${w}px`, height: p.collapsed ? "auto" : `${h}px` });
+  const visibleH = p.collapsed ? d.offsetHeight : h;
+  d.style.setProperty("--chat-top", `${Math.max(top, Math.min(bottom - visibleH, y))}px`);
   $("#chatMin").textContent = p.collapsed ? "▢" : "—";
 }
 function drag(el, handle) {
@@ -157,7 +178,7 @@ async function refreshChatStatus() {
     else if (!r.authorized) { ownerToken = ""; showOwnerPrompt(r); }
   } catch (err) {
     if (request !== statusRequest || chatStatus) return;
-    $("#chatModel").textContent = "读取失败";
+    $("#chatModel").options[0].textContent = "读取失败";
     $("#chatEffort").options[0].textContent = "思考：读取失败";
     $("#chatLog").innerHTML = '<button class="fd-btn" id="chatRetry">重试读取助手状态</button>';
     $("#chatRetry").onclick = refreshChatStatus;
@@ -171,9 +192,18 @@ function ctxLine(r) {
   }
   chatStatus = r;
   const model = $("#chatModel");
-  model.textContent = r.model || "未配置对话模型";
-  model.title = r.model && !r.model_ready ? r.model + "（凭据不可用）" : model.textContent;
-  model.classList.toggle("warn", !!r.model && !r.model_ready);
+  const choices = (r.model_choices || []).filter((m) => m.ref !== r.default_model_ref);
+  const active = choices.find((m) => m.ref === chatModelRef && m.ready);
+  chatModelRef = active?.ref || "";
+  const defaultLabel = r.model ? `默认：${r.model}` : "未配置默认对话模型";
+  model.innerHTML = `<option value="">${C.esc(defaultLabel)}</option>` + choices.map((m) =>
+    `<option value="${C.esc(m.ref)}" ${m.ready ? "" : "disabled"}>${C.esc(m.model + " · " + m.provider)}</option>`).join("");
+  model.value = chatModelRef;
+  model.disabled = !r.authorized || sending || !choices.some((m) => m.ready);
+  const protocol = MODEL_PROTOCOL[active?.protocol || r.model_protocol];
+  const name = active ? `${active.model} · ${active.provider}` : r.model && !r.model_ready ? r.model + "（凭据不可用）" : defaultLabel;
+  model.title = (active || r.model) && protocol ? `${name} · ${protocol}` : name;
+  model.classList.toggle("warn", !active && !!r.model && !r.model_ready);
   $("#chatClear").disabled = $("#chatIn").disabled = !r.authorized;
   $("#chatSend").disabled = !r.authorized || sending;
   const s = $("#chatEffort");
@@ -186,12 +216,12 @@ function ctxLine(r) {
 async function send() {
   const t = $("#chatIn").value.trim();
   if (!t || sending || !chatStatus?.authorized) return;
-  sending = true; $("#chatSend").disabled = true;
+  sending = true; $("#chatSend").disabled = $("#chatModel").disabled = true;
   $("#chatIn").value = "";
   bubble("user", t);
   const wait = bubble("ai", "思考中…");
   try {
-    const r = await agentApi("/api/agent/chat", { method: "POST", body: { text: t } });
+    const r = await agentApi("/api/agent/chat", { method: "POST", body: { text: t, model_ref: chatModelRef } });
     wait.remove();
     if (r.compacted) bubble("system", `上下文到了 ${Math.round(r.compacted.threshold / 1000)}k，较早的对话已自动压缩成摘要。`);
     bubble("ai", r.reply, r.actions);
@@ -203,7 +233,8 @@ async function send() {
     if (e.status === 403) { ownerToken = ""; $("#chatIn").value = t; await refreshChatStatus(); }
     else { wait.textContent = "出错了：" + e.message; wait.classList.add("bad"); }
   }
-  sending = false; $("#chatSend").disabled = !chatStatus?.authorized;
+  sending = false;
+  if (chatStatus) ctxLine(chatStatus);
 }
 
 // ---------------- 任务抽屉 ----------------
@@ -211,29 +242,31 @@ function buildTasks() {
   const d = document.createElement("aside");
   d.id = "taskDrawer";
   d.className = "taskdrawer";
-  d.innerHTML = `<div class="td-head"><b>任务</b><div class="td-tabs"><button data-t="jobs" class="on">星愿</button><button data-t="client">客户端任务 <span id="tdOpen" class="td-n"></span></button></div>
-      <button class="fd-btn" id="tdMin" title="收起">‹</button></div>
+  d.innerHTML = `<div class="td-head"><b>任务</b><div class="td-tabs"><button data-t="jobs" class="on">星愿</button><button data-t="client">客户端任务 <span id="tdOpen" class="td-n"></span></button></div></div>
     <div class="td-body" id="tdBody"></div>`;
   document.body.appendChild(d);
   const tabBtn = document.createElement("button");
-  tabBtn.id = "taskTab"; tabBtn.className = "task-tab hidden"; tabBtn.title = "展开任务列表";
-  tabBtn.innerHTML = '任务 <span id="tdBadge" class="td-n"></span>';
+  tabBtn.id = "taskTab"; tabBtn.className = "task-tab"; tabBtn.type = "button";
+  tabBtn.setAttribute("aria-controls", d.id);
+  tabBtn.innerHTML = '<span class="task-tab-main"><span class="task-tab-label">任务</span><span id="tdArrow" aria-hidden="true"></span></span><span id="tdBadge" class="td-n"></span>';
   document.body.appendChild(tabBtn);
   d.querySelectorAll("[data-t]").forEach((b) => (b.onclick = () => { tab = b.dataset.t; d.querySelectorAll("[data-t]").forEach((x) => x.classList.toggle("on", x === b)); refreshTasks(); }));
-  $("#tdMin").onclick = () => { localStorage.setItem(TASK_KEY, "closed"); placeTasks(); };
-  tabBtn.onclick = () => { localStorage.setItem(TASK_KEY, "open"); placeTasks(); };
+  tabBtn.onclick = () => { tasksOpen = !tasksOpen; placeTasks(); };
   placeTasks();
   refreshTasks();
   setInterval(() => { if (document.visibilityState === "visible") refreshTasks(); }, 4000);
 }
 function placeTasks() {
   const side = document.documentElement.dataset.taskSide || "left";
-  const closed = localStorage.getItem(TASK_KEY) === "closed";
+  const right = side === "right";
   const d = $("#taskDrawer"), t = $("#taskTab");
-  d.classList.toggle("right", side === "right"); t.classList.toggle("right", side === "right");
-  d.classList.toggle("hidden", closed); t.classList.toggle("hidden", !closed);
-  $("#tdMin").textContent = side === "right" ? "›" : "‹";
-  document.body.dataset.tasks = closed ? "" : side;
+  d.classList.toggle("right", right); t.classList.toggle("right", right);
+  d.classList.toggle("hidden", !tasksOpen);
+  t.setAttribute("aria-expanded", String(tasksOpen));
+  t.title = tasksOpen ? "收起任务列表" : "展开任务列表";
+  t.setAttribute("aria-label", t.title);
+  $("#tdArrow").textContent = right === tasksOpen ? "›" : "‹";
+  document.body.dataset.tasks = tasksOpen ? side : "";
 }
 let lastSig = "";
 async function refreshTasks() {

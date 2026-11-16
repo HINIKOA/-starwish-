@@ -50,7 +50,7 @@ def main():
     html = (ROOT / "web" / "index.html").read_text("utf-8")
     check("前端：不再铺 2500 颗背景星尘、旧的三星 + 金色星尘已去掉", "const N = 2500" not in js and "3 + 160" not in js)
     check("前端：主核星辰是一颗金色星（加一圈柔光）", "主核星辰" in js and "new Float32Array([16, 46])" in js)
-    check("前端：空星图提示文案", 'id="emptyHint"' in html and "只有一颗主核星辰" in html)
+    check("前端：空星图提示文案", 'id="emptyHint"' in html and "现在只有星系核" in html)
     check("前端：大小 / 亮度按时间先后、融合飞入动画、诞生动画", all(k in js for k in ("recency", "buildGhosts", "stepAnims", '"birth"', '"fuse"')))
 
     print("== 使用中长出新星（时间先后）")
@@ -97,10 +97,12 @@ def main():
 
     def fake_chat(msgs):
         seen["prompt"] = msgs[-1]["content"]
-        return '{"summary": "主人的咖啡偏好", "content": "主人以前爱喝不加糖的美式，每天早上一杯；最近改喝燕麦拿铁（以此为准）。"}'
+        return json.dumps({"summary": "主人的咖啡偏好", "content": "主人以前爱喝不加糖的美式，每天早上一杯；最近改喝燕麦拿铁（以此为准）。",
+                           "major": "生活", "minor": "饮食", "tags": ["咖啡"]}, ensure_ascii=False)
     f2 = fusion.fuse(coffee["ids"], use_llm=True, chat=fake_chat)
     check("LLM 归纳：提示里带全部成员与「以哪个为准」", all(m in seen["prompt"] for m in MEMS[:3]) and "以哪个为准" in seen["prompt"])
     check("LLM 归纳结果写进新星", f2["by_llm"] and f2["summary"] == "主人的咖啡偏好" and "燕麦拿铁" in f2["content"])
+    check("融合新星直接写入分类和标签", f2["cat_major"] == "生活" and f2["cat_minor"] == "饮食" and "咖啡" in f2["tags"])
     stars.add_star("主人说燕麦拿铁要少冰", created_at=time.time())
     f3 = fusion.fuse([f2["id"], stars.star_map()["stars"][-1][0]], use_llm=False)
     check("融合星再融合 → 第 2 代（进化）", f3["generation"] == 2)

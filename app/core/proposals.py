@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 
 from ..db import get_conn, log_event
 from .edit import set_section
@@ -10,14 +11,15 @@ from .store import SECTIONS, ConfirmRequiredError, norm_section
 
 # ---------------- 提案 ----------------
 
-def create_proposal(section: str, content: str, reason: str = "", source: str = "", mode: str = "append") -> dict:
+def create_proposal(section: str, content: str, reason: str = "", source: str = "", mode: str = "append",
+                    *, conn=None, emit=None) -> dict:
     sec = norm_section(section)
     if mode not in ("append", "replace"):
         mode = "append"
     content = (content or "").strip()
     if not content:
         raise ValueError("提案内容为空")
-    with get_conn() as c:
+    with (get_conn() if conn is None else nullcontext(conn)) as c:
         dup = c.execute(
             "SELECT id FROM proposals WHERE section=? AND content=? AND status='pending'", (sec, content)
         ).fetchone()
@@ -29,7 +31,8 @@ def create_proposal(section: str, content: str, reason: str = "", source: str = 
         )
         pid = cur.lastrowid
         p = get_proposal(pid, c)
-    log_event("proposal_create", id=pid, section=sec, mode=mode, content=content, reason=reason, source=source)
+    (emit if emit is not None else log_event)("proposal_create", id=pid, section=sec, mode=mode, content=content,
+                                             reason=reason, source=source)
     return p
 
 

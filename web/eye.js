@@ -469,16 +469,40 @@ async function renderActiveTab() {
 }
 async function renderDiary() {
   const list = await api("/api/eye/sessions?limit=50");
-  $("#tab-diary").innerHTML = list.length ? list.map((s) => `<div class="sess" data-id="${s.id}"><div class="hhead"><b>「${esc(s.title)}」</b>
+  const pane = $("#tab-diary");
+  const scope = "只删除画面日记，不删除已经生成的星球或另存的画面。";
+  pane.innerHTML = `<div class="diary-tools"><span class="note">只可删除已结束的日记</span>
+    <button type="button" id="clearDiaries" class="danger" ${list.length ? "" : "disabled"}>清空画面日记</button></div>` + (list.length ? list.map((s) => `<div class="sess" data-id="${esc(s.id)}"><div class="hhead">
+    <button type="button" class="diary-toggle" aria-expanded="false" aria-controls="diary-${esc(s.id)}"><b>「${esc(s.title)}」</b>
     <span class="t">${fmtDate(s.started_at)} · ${s.minutes} 分钟 · 对话 ${s.count.user + s.count.ai} 句${s.count.subtitle ? ` · 台词 ${s.count.subtitle}` : ""}</span>
-    ${s.star_id ? `<span class="src">★ 星 #${s.star_id}</span>` : s.ended_at ? "" : '<span class="src s-undo">进行中</span>'}</div><div class="diary hidden"></div></div>`).join("")
-    : `<div class="empty">还没有一起看过东西。</div>`;
-  $$("#tab-diary .sess").forEach((el) => el.onclick = async () => {
-    const box = el.querySelector(".diary"); if (!box.classList.contains("hidden")) { box.classList.add("hidden"); return; }
-    const d = await api(`/api/eye/session/${el.dataset.id}`);
-    const K = { user: "主人", ai: "我", subtitle: "台词", scene: "场景", note: "备注" };
-    box.innerHTML = d.entries.filter((x) => x.text.replace(/[….\s]/g, "")).map((x) => `<div><span class="k">${K[x.kind]}${x.who ? "·" + esc(x.who) : ""}</span>${esc(x.text)}</div>`).join("") || "（只看没聊）";
-    box.classList.remove("hidden");
+    ${s.star_id ? `<span class="src">★ 星 #${s.star_id}</span>` : s.ended_at ? "" : '<span class="src s-undo">进行中</span>'}</button>
+    ${s.ended_at ? '<button type="button" class="diary-delete danger">删除</button>' : ""}</div>
+    <div class="diary hidden" id="diary-${esc(s.id)}"></div></div>`).join("") : '<div class="empty">还没有画面日记。</div>');
+  async function remove(button, path, question) {
+    if (!confirm(question + "\n" + scope)) return;
+    button.disabled = true;
+    try {
+      const r = await api(path, { method: "DELETE" });
+      await renderDiary();
+      toast(r.deleted ? `已删除 ${r.deleted} 条画面日记` : "没有可删除的日记");
+    } catch (err) { toast(err.message, true); }
+    finally { button.disabled = false; }
+  }
+  $("#clearDiaries").onclick = (e) => remove(e.currentTarget, "/api/eye/sessions", "清空所有已结束的画面日记？");
+  pane.querySelectorAll(".sess").forEach((el) => {
+    const toggle = el.querySelector(".diary-toggle"), del = el.querySelector(".diary-delete");
+    const path = `/api/eye/session/${encodeURIComponent(el.dataset.id)}`;
+    if (del) del.onclick = () => remove(del, path, "删除这条画面日记？");
+    toggle.onclick = () => safe(async () => {
+      const box = el.querySelector(".diary");
+      if (!box.classList.contains("hidden")) {
+        box.classList.add("hidden"); toggle.setAttribute("aria-expanded", "false"); return;
+      }
+      const d = await api(path);
+      const K = { user: "主人", ai: "我", subtitle: "台词", scene: "场景", note: "备注" };
+      box.innerHTML = d.entries.filter((x) => x.text.replace(/[….\s]/g, "")).map((x) => `<div><span class="k">${K[x.kind]}${x.who ? "·" + esc(x.who) : ""}</span>${esc(x.text)}</div>`).join("") || "（只看没聊）";
+      box.classList.remove("hidden"); toggle.setAttribute("aria-expanded", "true");
+    });
   });
 }
 const F = (k, label, type = "text", extra = "") => { const v = CFG()[k]; return type === "checkbox"
@@ -489,6 +513,12 @@ const F = (k, label, type = "text", extra = "") => { const v = CFG()[k]; return 
 const SEL = (k, label, opts) => `<div><label>${label}</label><select data-k="${k}">${opts.map(([v, t]) => `<option value="${v}" ${String(CFG()[k]) === v ? "selected" : ""}>${t}</option>`).join("")}</select></div>`;
 function renderSettings() {
   const E = ST.engines, pre = ST.preflight || {};
+  const choices = ST.vision_choices || [], selected = CFG().frame_model_ref || "";
+  const frameChoice = `<div><label for="eye-frame-choice">识图模型</label><select id="eye-frame-choice" data-k="frame_model_ref">
+    <option value="">使用默认 / 自定义配置</option>
+    ${selected && !choices.some((m) => m.ref === selected) ? `<option value="${esc(selected)}" selected disabled>候选已不可用，请重新选择</option>` : ""}
+    ${choices.map((m) => `<option value="${esc(m.ref)}" ${m.ref === selected ? "selected" : ""} ${m.ready ? "" : "disabled"}>${esc(m.model + " · " + m.provider + (m.ready ? "" : "（凭据不可用）"))}</option>`).join("")}
+    </select><div class="note">在「模型服务」添加识图候选；选用后沿用该服务商的设置。</div></div>`;
   const card = (k) => { const e = E[k]; const key = `${e.engine}|${e.protocol}|${e.base_url}|${e.model}`; const p = pre[key];
     return `<div class="eng ${ST.engine === k ? "on" : ""}"><div class="hhead"><b>${esc(e.title)}</b>${ST.engine === k ? '<span class="src">当前</span>' : ""}
       <span class="acts"><button data-pre="${k}">能力预检</button></span></div>
@@ -496,14 +526,14 @@ function renderSettings() {
       <div class="note">${p ? (p.ok ? `<span class="ok">✔ 能看图</span>（回答「${esc(p.reply)}」，首字 ${p.first_ms} ms）` : `<span class="bad">✘ ${esc(p.reason)}</span>`) : "还没预检：发一张纯红小图问颜色，答得出才算真能看图。"}</div></div>`; };
   $("#tab-settings").innerHTML = `<div class="engcards">${card("frame")}${card("qwen_omni")}</div>
   <div class="form">
-    <h4>引擎</h4><div class="row">${SEL("engine", "使用哪个引擎", [["frame", "通用帧模式"], ["qwen_omni", "千问 Omni 视频接口"]])}</div>
-    <h4>通用帧模式 <small class="note">地址留空 = 沿用「设置 → LLM 维护」的地址、Key 和模型</small></h4>
+    <h4>引擎</h4><div class="row">${SEL("engine", "使用哪个引擎", [["frame", "通用帧模式"], ["qwen_omni", "兼容视频接口"]])}</div>
+    <h4>通用帧模式 <small class="note">可切换识图候选，也可沿用默认 / 自定义配置</small></h4>
     <div class="row">${SEL("frame_protocol", "协议", [["openai", "OpenAI 兼容"], ["responses", "OpenAI Responses"], ["anthropic", "Anthropic 兼容"]])}${F("frame_base_url", "地址（如 https://api.openai.com/v1）")}
-      ${F("frame_api_key", "API Key", "password")}${F("frame_model", "识图模型（如 gpt-4o-mini / qwen-vl-max）")}
+      ${F("frame_api_key", "API Key", "password")}${frameChoice}${F("frame_model", "自定义模型 ID")}
       ${SEL("frame_compose", "帧怎么送", [["grid", "拼成一张分镜图（省钱）"], ["multi", "每帧一张图"]])}</div>
-    <h4>千问 Qwen3.8-Omni-Flash 视频接口 <small class="note">预留：填上 Key 就能用</small></h4>
+    <h4>兼容视频接口 <small class="note">预填千问地址，可改用其他兼容服务商</small></h4>
     <div class="row">${SEL("qwen_protocol", "协议", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]])}${F("qwen_api_key", "API Key", "password")}${F("qwen_model", "模型")}
-      ${F("qwen_base_url_openai", "OpenAI 兼容地址")}${F("qwen_base_url_anthropic", "Anthropic 兼容地址")}
+      ${F("qwen_base_url_openai", "OpenAI 兼容 API 地址", "url")}${F("qwen_base_url_anthropic", "Anthropic 兼容 API 地址", "url")}
       ${SEL("qwen_video_mode", "帧序列怎么送（OpenAI 协议）", [["video", "按视频送（不认就自动改多图）"], ["images", "每帧一张图"]])}
       ${F("qwen_voice", "音色（直接出语音时）")}${F("qwen_audio_out", "让模型直接出语音（预留，未实测）", "checkbox")}</div>
     <h4>看与说</h4>
@@ -518,6 +548,14 @@ function renderSettings() {
     ${voiceSettingsHtml()}
     <div class="toolbar"><button id="saveEye" class="primary">保存设置</button></div>
   </div>`;
+  const choiceEl = $("#eye-frame-choice");
+  function showFrameInputs() {
+    for (const k of ["frame_protocol", "frame_base_url", "frame_api_key", "frame_model"]) {
+      $(`#tab-settings [data-k="${k}"]`).disabled = Boolean(choiceEl.value);
+    }
+  }
+  choiceEl.onchange = showFrameInputs;
+  showFrameInputs();
   $$("[data-pre]").forEach((b) => b.onclick = () => safe(async () => {
     b.disabled = true; b.textContent = "预检中…";
     const r = await api("/api/eye/preflight", { method: "POST", body: { engine: b.dataset.pre } });
@@ -526,7 +564,7 @@ function renderSettings() {
   $("#saveEye").onclick = () => safe(async () => {
     const patch = {};
     $$("#tab-settings [data-k]").forEach((el) => { const k = el.dataset.k;
-      if (el.type === "password" && !el.value) return;
+      if (el.disabled || (el.type === "password" && !el.value)) return;
       patch[k] = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value || 0) : el.value; });
     const vpatch = {};
     $$("#tab-settings [data-v]").forEach((el) => { const k = el.dataset.v;

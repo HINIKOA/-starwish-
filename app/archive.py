@@ -1,11 +1,14 @@
 """原始对话归档：soul/archive/ 下只追加，不修改、不删除。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
+from uuid import uuid4
 
 from . import config
 from .db import log_event
@@ -33,12 +36,13 @@ def append_messages(messages: list[dict], session: str = "", source: str = "api"
     day = day or datetime.now().strftime("%Y-%m-%d")
     path = config.ARCHIVE_DIR / f"{day}.jsonl"
     now = time.time()
+    batch = uuid4().hex if not session else ""
     lines = []
     for m in messages:
         txt = _content_text(m.get("content"))
         if not txt.strip():
             continue
-        lines.append(json.dumps({"t": m.get("t", now), "session": session, "source": source,
+        lines.append(json.dumps({"t": m.get("t", now), "session": session, "source": source, "batch": batch,
                                  "role": m.get("role", "user"), "content": txt}, ensure_ascii=False))
     if not lines:
         return ""
@@ -78,3 +82,33 @@ def iter_jsonl_files() -> list[Path]:
 
 def list_days() -> list[str]:
     return sorted(p.stem for p in config.ARCHIVE_DIR.glob("*.jsonl"))
+
+
+def jsonl_path(rel: str) -> Path | None:
+    try:
+        path = (config.SOUL_DIR / rel).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if path.suffix == ".jsonl" and config.ARCHIVE_DIR.resolve() in path.parents and path.is_file():
+        return path
+    return None
+
+
+def range_digest(lines: list[str]) -> str:
+    # A newline added when appending to an imported JSONL does not change the previous row.
+    return hashlib.sha256("\n".join(line.rstrip("\r\n") for line in lines).encode("utf-8")).hexdigest()
+
+
+def read_excerpt(rel: str, start: int, end: int, digest: str, limit: int) -> str:
+    path = jsonl_path(rel)
+    if not path or not 0 <= start < end or limit <= 0:
+        return ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            lines = list(islice(stream, start, end))
+        if len(lines) != end - start or range_digest(lines) != digest:
+            return ""
+        msgs = (json.loads(line) for line in lines)
+        return "\n".join(f"{m.get('role', '?')}: {m.get('content', '')}" for m in msgs)[:limit]
+    except (OSError, ValueError, AttributeError):
+        return ""

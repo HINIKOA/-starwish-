@@ -6,7 +6,8 @@
 <link rel="icon" href="/static/favicon.ico"><link rel="apple-touch-icon" href="/static/icons/icon-180.png"><link rel="manifest" href="/static/manifest.json">
 <title>星愿记忆 · 记忆星图</title>
 <script src="/static/theme.js"></script>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=chat-fit-1">
+<link rel="stylesheet" href="/static/appearance.css?v=3">
 </head>
 <body>
 <div id="stage"></div>
@@ -26,9 +27,11 @@
     <button data-panel="proposals">提案 <span id="propBadge" class="badge hidden">0</span></button>
     <button data-panel="add">＋ 新星</button>
     <button data-panel="import">导入</button>
+    <button id="mcpStatusButton" data-state="unknown" aria-controls="mcpStatusDrawer" aria-expanded="false"><svg class="mcp-chevron" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="m2.5 4.5 3.5 3.5 3.5-3.5"/></svg><i class="mcp-dot" aria-hidden="true"></i><span>MCP · 检查中</span></button>
     <button data-panel="sync">备份/整理</button>
     <button data-panel="settings">设置</button>
     <button data-panel="events">日志</button>
+    <a class="graphflow-entry" href="/graphflow" title="打开项目代码检索"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.25" aria-hidden="true" focusable="false"><circle cx="3.5" cy="8" r="1.75"/><circle cx="12.5" cy="3.5" r="1.75"/><circle cx="12.5" cy="12.5" r="1.75"/><path d="m5 7 6-2.5M5 9l6 2.5"/></svg>GraphFlow</a>
   </nav>
 </div>
 <div class="map-meta">
@@ -40,6 +43,12 @@
     <span><i class="legend-planet" aria-hidden="true"></i>星球</span>
   </div>
 </div>
+<section id="mcpStatusDrawer" class="hidden" aria-labelledby="mcpStatusTitle">
+  <div class="mcp-drawer-head"><strong id="mcpStatusTitle">MCP 连接</strong><button type="button" id="mcpStatusClose" aria-label="收起连接窗口">×</button></div>
+  <div id="mcpStatusSummary" role="status">正在检查…</div>
+  <ul id="mcpSessions"></ul>
+  <div class="mcp-drawer-foot"><small>按客户端报告的会话显示；不等于对话监控。</small><button type="button" id="mcpStatusSetup">接入设置</button></div>
+</section>
 </header>
 
 <footer id="timeline">
@@ -47,7 +56,7 @@
   <input id="tlSlider" type="range" min="0" max="1000" value="1000">
   <span id="tlText">全部</span>
   <button id="resetView" title="重置视角">⟲ 视角</button>
-  <label class="tl-check"><input type="checkbox" id="autoRotate" checked> 缓慢旋转</label>
+  <label class="tl-check"><input type="checkbox" id="autoRotate" autocomplete="off"> 自动环绕</label>
 </footer>
 
 <div id="emptyHint" class="hidden">现在只有星系核，它装着 AI 是谁、你是谁、你的喜好。<br>新增的记忆会成为星球，分类后归入对应的恒星系和行星系。</div>
@@ -63,7 +72,7 @@
   <p>其他功能（核心记忆、提案、导入、备份、设置）都可以正常使用。</p>
 </div>
 
-<link rel="modulepreload" href="/static/drawers.js">
-<script type="module" src="/static/app.js"></script>
+<link rel="modulepreload" href="/static/drawers.js?v=chat-fit-1">
+<script type="module" src="/static/app.js?v=mcp-project-1"></script>
 </body>
 </html>

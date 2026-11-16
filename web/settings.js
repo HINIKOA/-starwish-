@@ -25,13 +25,18 @@ const SUBS = {
   data: [["", [["dir", "▤", "数据目录"]]], ["云备份设置", [["local", "▣", "本地备份"], ["webdav", "☁", "WebDAV"], ["cloud", "⇅", "云服务器"],
     ["jianguo", "◌", "坚果云配置", true], ["s3", "▭", "S3 兼容存储", true]]], ["导入设置", [["import", "⇩", "导入外部应用数据"]]]],
 };
-const KIND = { chat: "对话", vision: "识图", embedding: "向量", other: "其他" };
 const ROLES = [
-  ["chat", "对话模型", "对话抽屉、整理星系用它；代理转发给聊天客户端时默认也用它", ["chat", "vision"]],
+  ["chat", "对话模型", "对话抽屉、代理转发默认使用；未设置整理模型时也用它整理星系", ["chat", "vision"]],
   ["maintain", "整理模型", "对话监控、后台整理、融合归纳、技能巡检用；留空 = 和对话模型相同。建议选便宜快速的", ["chat", "vision"]],
   ["vision", "识图模型", "宇宙之眼「通用帧模式」看屏幕 / 摄像头时用，必须支持图片输入", ["vision", "chat"]],
   ["embed", "向量模型", "向量模型选「③ 接口」时用；内置 bge-small 不需要它", ["embedding"]],
 ];
+const SWITCHABLE = new Set(["chat", "vision"]);
+const choicesFor = (role) => cfg.model_choices?.[role] || [];
+function setChoice(role, ref, enabled) {
+  cfg.model_choices ||= {};
+  cfg.model_choices[role] = [...choicesFor(role).filter((item) => item !== ref), ...(enabled ? [ref] : [])];
+}
 
 const $ = (s) => document.querySelector(s);
 const E = (s) => C.esc(s);
@@ -191,7 +196,7 @@ function queueSave(delay = 500) {
 function saveProviders() {
   clearTimeout(saveTimer); saveTimer = null;
   const providers = cfg.providers.map(({ api_key_set, ...p }) => p);
-  const body = JSON.stringify({ providers, defaults: cfg.defaults });
+  const body = JSON.stringify({ providers, defaults: cfg.defaults, model_choices: cfg.model_choices });
   providerSave = providerSave.catch(() => {}).then(async () => {
     const r = await C.api("/api/settings", { method: "PUT", body: JSON.parse(body) });
     const saved = new Map(r.providers.map((p) => [p.id, p]));
@@ -202,7 +207,7 @@ function saveProviders() {
         current.api_key_set = result.api_key_set;
       }
     }
-    const { providers: _p, defaults: _d, ...rest } = r; Object.assign(cfg, rest);
+    const { providers: _p, defaults: _d, model_choices: _m, ...rest } = r; Object.assign(cfg, rest);
     flash("已自动保存");
     window.dispatchEvent(new Event("starwish-agent-config"));
   });
@@ -212,6 +217,7 @@ function saveProviders() {
 // ———————————————— 模型服务 ————————————————
 function cur() { return cfg.providers.find((p) => p.id === selId); }
 function presetOf(p) { return presets.find((x) => x.preset === p.preset) || {}; }
+const protocolOf = (p) => p.protocol || presetOf(p).protocol || "responses";
 const modelRef = (p, m) => p.id + "::" + m.id;
 
 const PRIORITY_MODEL_FAMILIES = [
@@ -342,8 +348,9 @@ function endpointPreview(p) {
   const b = (p.base_url || "").trim().replace(/\/+$/, "")
     .replace(/\/(?:chat\/completions|completions|embeddings|models|messages|responses)$/, "");
   if (!b) return "填写后这里会显示实际请求的地址";
-  if (p.protocol === "anthropic") return `${b}${/\/v1$/.test(b) ? "" : "/v1"}/messages`;
-  if (p.protocol === "responses") return `${b}/responses`;
+  const protocol = protocolOf(p);
+  if (protocol === "anthropic") return `${b}${/\/v1$/.test(b) ? "" : "/v1"}/messages`;
+  if (protocol === "responses") return `${b}/responses`;
   return `${b}/chat/completions`;
 }
 
@@ -351,9 +358,10 @@ function detail() {
   const d = $("#pvDetail"), p = cur();
   if (!p) { d.innerHTML = '<div class="sw-empty big">← 选择或添加一个服务商</div>'; return; }
   const ps = presetOf(p);
+  const protocol = protocolOf(p);
   d.innerHTML = `
     <div class="pv-top"><input class="pv-title" id="pvName" value="${E(p.name)}" title="点击改名">
-      <select id="pvProto" title="接口格式：Chat Completions / Anthropic Messages / OpenAI Responses"><option value="openai" ${!["anthropic", "responses"].includes(p.protocol) ? "selected" : ""}>OpenAI 兼容（Chat）</option><option value="responses" ${p.protocol === "responses" ? "selected" : ""}>OpenAI Responses</option><option value="anthropic" ${p.protocol === "anthropic" ? "selected" : ""}>Anthropic Messages（原生）</option></select>
+      <select id="pvProto" title="接口格式：Chat Completions / Anthropic Messages / OpenAI Responses"><option value="responses" ${protocol === "responses" ? "selected" : ""}>OpenAI Responses</option><option value="openai" ${protocol === "openai" ? "selected" : ""}>OpenAI 兼容（Chat）</option><option value="anthropic" ${protocol === "anthropic" ? "selected" : ""}>Anthropic Messages（原生）</option></select>
       <label class="switch" title="启用 / 关闭"><input type="checkbox" id="pvOn" ${p.enabled ? "checked" : ""}><span></span></label>
       <button class="icon danger" id="pvDel" title="删除这个服务商">🗑</button></div>
     <div class="f-label">API 密钥 ${ps.key_url ? `<a href="${E(ps.key_url)}" target="_blank" rel="noopener">获取密钥 ↗</a>` : ""}</div>
@@ -366,6 +374,7 @@ function detail() {
     <div class="pv-mhead"><b>模型</b><span class="muted" id="pvMCount"></span>
       <input id="pvMSearch" type="search" placeholder="筛选模型" value="${E(modelFilter)}">
       <button id="pvSync">⟳ 同步模型</button><button class="icon" id="pvMAdd" title="手动添加">＋</button></div>
+    <div class="f-hint" id="pvUseHint">点「＋」选用后设置用途。对话和识图可分配给多个模型。</div>
     <div id="pvModels"></div>`;
 
   $("#pvName").onchange = (e) => { p.name = e.target.value.trim() || p.name; queueSave(0); setTimeout(() => pageProviders($("#swMain")), 200); };
@@ -374,6 +383,7 @@ function detail() {
   $("#pvDel").onclick = () => confirm(`删除「${p.name}」？用到它的默认模型会被清空。`) && C.safe(async () => {
     cfg.providers = cfg.providers.filter((x) => x.id !== p.id);
     Object.keys(cfg.defaults).forEach((r) => { if ((cfg.defaults[r] || "").startsWith(p.id + "::")) cfg.defaults[r] = ""; });
+    for (const r of SWITCHABLE) for (const ref of choicesFor(r)) if (ref.startsWith(p.id + "::")) setChoice(r, ref, false);
     selId = cfg.providers[0]?.id || ""; await saveProviders(); pageProviders($("#swMain"));
   });
   $("#pvEye").onclick = () => { const k = $("#pvKey"); k.type = k.type === "password" ? "text" : "password"; };
@@ -406,20 +416,21 @@ function renderModelList(p) {
     groups.get(family).push(m);
   }
   $("#pvMCount").textContent = `${models.length} 个 · 已选 ${models.filter((m) => m.enabled).length} 个`;
-  const tags = (m) => ROLES.filter(([r]) => cfg.defaults[r] === modelRef(p, m))
-    .map(([, t]) => `<span class="tag on">${E(t)}</span>`).join("");
+  const tags = (m) => {
+    const ref = modelRef(p, m);
+    return ROLES.map(([r, t]) => cfg.defaults[r] === ref ? `<span class="tag on">${t.replace("模型", "")}</span>`
+      : choicesFor(r).includes(ref) ? `<span class="tag">${t.replace("模型", "")}</span>` : "").join("");
+  };
   const rank = (name) => MODEL_FAMILY_RANK.get(name) ?? MODEL_FAMILY_RANK.size;
   list.innerHTML = [...groups].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b, "zh-CN")).map(([family, arr]) => `
     <details class="mgroup" data-family="${E(family)}" ${query || expandedModelGroups.has(family) ? "open" : ""}>
       <summary>${E(family)} <span class="muted">${arr.length}</span></summary>
       ${arr.map((m) => {
-        const roles = ROLES.filter(([, , , kinds]) => kinds.includes(m.kind || "chat"));
         const action = m.enabled ? "取消选用" : "选用";
         return `<div class="mrow" data-m="${E(m.id)}"><span class="mname" title="${E(m.id)}">${E(m.id)}</span>
           ${tags(m)}
-          <select class="mkind" title="类型">${Object.entries(KIND).map(([v, t]) => `<option value="${v}" ${v === (m.kind || "chat") ? "selected" : ""}>${t}</option>`).join("")}</select>
-          <select class="mdef" title="${m.enabled ? "设为默认" : "先点＋选用模型"}" aria-label="设为默认" ${m.enabled && p.enabled && roles.length ? "" : "disabled"}>
-            <option value="">--</option>${roles.map(([r, t]) => `<option value="${r}">${t}</option>`).join("")}</select>
+          <select class="mdef" title="${m.enabled ? "选择用途；再次选择可取消" : "先点＋选用模型"}" aria-label="设置模型用途" aria-describedby="pvUseHint" ${m.enabled && p.enabled ? "" : "disabled"}>
+            <option value="" disabled selected hidden>--</option>${ROLES.map(([r, t]) => `<option value="${r}">${t.replace("模型", "")}</option>`).join("")}</select>
           <button class="mchk" title="发一句话试试">检测</button>
           <button class="icon mtoggle" type="button" aria-label="选用 ${E(m.id)}" aria-pressed="${!!m.enabled}" title="${action}">${m.enabled ? "−" : "＋"}</button>
           <span class="mres"></span></div>`;
@@ -433,25 +444,31 @@ function renderModelList(p) {
       [...list.querySelectorAll(".mrow")].find((el) => el.dataset.m === mid)?.querySelector(selector)?.focus();
       changed();
     };
-    row.querySelector(".mkind").onchange = (e) => {
-      mm.kind = e.target.value;
-      for (const [r, , , kinds] of ROLES) if (cfg.defaults[r] === ref && !kinds.includes(mm.kind)) cfg.defaults[r] = "";
-      update(".mkind");
-    };
     row.querySelector(".mdef").onchange = (e) => {
       const role = e.target.value;
       if (!role) return;
-      cfg.defaults[role] = ref;
+      if (SWITCHABLE.has(role)) {
+        if (cfg.defaults[role] === ref) {
+          e.target.value = "";
+          flash("当前默认项可在「默认模型」更改");
+          return;
+        }
+        setChoice(role, ref, !choicesFor(role).includes(ref));
+      } else cfg.defaults[role] = cfg.defaults[role] === ref ? "" : ref;
       update(".mdef");
     };
     row.querySelector(".mtoggle").onclick = () => {
       mm.enabled = !mm.enabled;
-      if (!mm.enabled) for (const [r] of ROLES) if (cfg.defaults[r] === ref) cfg.defaults[r] = "";
+      if (!mm.enabled) for (const [r] of ROLES) {
+        if (cfg.defaults[r] === ref) cfg.defaults[r] = "";
+        if (SWITCHABLE.has(r)) setChoice(r, ref, false);
+      }
       update(".mtoggle");
     };
     row.querySelector(".mchk").onclick = async (e) => {
       const res = row.querySelector(".mres"), btn = e.target; btn.disabled = true; res.className = "mres"; res.textContent = "检测中…";
-      try { await flushKey(p); const r = await C.api("/api/providers/check", { method: "POST", body: { id: p.id, model: mid, kind: mm.kind } });
+      try { await flushKey(p); const r = await C.api("/api/providers/check", { method: "POST", body: { id: p.id, model: mid,
+        kind: cfg.defaults.embed === ref ? "embedding" : mm.kind } });
         res.className = "mres ok"; res.textContent = `✓ ${r.msg}${r.reply ? " · 「" + r.reply + "」" : ""}`;
       } catch (err) { res.className = "mres bad"; res.textContent = "✗ " + err.message; }
       btn.disabled = false;
@@ -492,7 +509,7 @@ async function syncModels(p, quiet = false) {
     if (cur() !== p || !$("#pvModels")) return;
     if (r.fixed_base_url) { $("#pvBase").value = p.base_url; $("#pvPrev").textContent = endpointPreview(p); }
     renderModelList(p);
-    say(true, `✓ 已同步 ${catalog.size} 个模型。点「＋」选用后，再按需设为默认。`);
+    say(true, `✓ 已同步 ${catalog.size} 个模型。点「＋」选用后，再设置用途。`);
   } catch (e) { if (!quiet) say(false, "✗ 同步失败：" + E(e.message)); else say(false, "✗ Key 有效，但拉取模型列表失败：" + E(e.message) + "。可以点「＋」手动添加模型。"); }
   if ($("#pvSync")) { $("#pvSync").disabled = false; $("#pvSync").textContent = "⟳ 同步模型"; }
 }
@@ -505,9 +522,12 @@ function guessKind(id) {
 
 // ———————————————— 默认模型 ————————————————
 function pageDefaults(m) {
-  const opts = (kinds, val) => {
+  const opts = (role, kinds, val) => {
     const groups = cfg.providers.filter((p) => p.enabled).map((p) => {
-      const ms = (p.models || []).filter((x) => x.enabled && kinds.includes(x.kind || "chat"));
+      const ms = (p.models || []).filter((x) => {
+        const ref = modelRef(p, x);
+        return x.enabled && (ref === val || choicesFor(role).includes(ref) || kinds.includes(x.kind || "chat"));
+      });
       return ms.length ? `<optgroup label="${E(p.name)}">${ms.map((x) => `<option value="${E(p.id + "::" + x.id)}" ${val === p.id + "::" + x.id ? "selected" : ""}>${E(x.id)}</option>`).join("")}</optgroup>` : "";
     }).join("");
     const missing = val && !groups.includes(`value="${E(val)}"`) ? `<option value="${E(val)}" selected>（已失效）${E(val.split("::")[1] || val)}</option>` : "";
@@ -515,7 +535,7 @@ function pageDefaults(m) {
   };
   m.innerHTML = `<div class="sv-card"><div class="sv-card-h">默认模型</div><div class="sv-help" style="margin-top:-4px">从已选用的模型里设置默认项。下拉里没有想要的？先到「模型服务」点＋选用。</div>
     ${ROLES.map(([r, t, desc, kinds]) => `<div class="def-row"><div><b>${t}</b><div class="muted">${desc}</div></div>
-      <div class="f-row"><select data-role="${r}">${opts(kinds, cfg.defaults[r] || "")}</select><button data-chk="${r}">检测</button></div>
+      <div class="f-row"><select data-role="${r}">${opts(r, kinds, cfg.defaults[r] || "")}</select><button data-chk="${r}">检测</button></div>
       <div class="mres" id="dr-${r}"></div></div>`).join("")}
     ${cfg.providers.length ? "" : '<div class="sw-empty">还没有服务商：先到「模型服务」添加一家并填 Key。</div>'}</div>
     ${effortCard()}${contextCard()}`;
@@ -541,7 +561,7 @@ function effortCard() {
 
 function contextCard() {
   return card("上下文窗口与自动压缩",
-    row("主模型上下文窗口（tokens）", inp("llm.context_tokens", "number", "400000", "w-s"), "对话抽屉、整理星系能看到的上下文上限，默认 400,000。对话监控刻意不带上下文，只看一轮。") +
+    row("主模型上下文窗口（tokens）", inp("llm.context_tokens", "number", "400000", "w-s"), "对话抽屉能看到的上下文上限，默认 400,000。对话监控刻意不带上下文，只看一轮。") +
     row("整理模型上下文窗口（tokens）", inp("llm.maint_context_tokens", "number", "400000", "w-s")) +
     row("自动压缩阈值（tokens）", inp("llm.compact_tokens", "number", "380000", "w-s"), "累计上下文到这么多时自动压缩：较早的历史压成一段摘要，保留最近几轮。每次压缩都会出现在任务抽屉里。"));
 }
@@ -610,14 +630,91 @@ function pageEmbed(m) {
 
 // ———————————————— MCP 与代理 ————————————————
 function pageMcp(m) {
-  const o = location.origin;
-  m.innerHTML = card("接入地址", row("OpenAI 兼容", `<code>${o}/v1</code>`, "聊天客户端把 API 地址改成它，记忆就会自动注入。") +
-      row("REST API", `<code>${o}/api</code>`) + row("MCP", `<code id="mcpCmd">MCP接入.bat（或 python mcp_server.py）</code>`, "在 Claude / Cursor 等客户端的 MCP 设置里填这条命令。")) +
+  const origin = location.origin, o = E(origin);
+  const setupPath = "/api/mcp/setup";
+  const makePrompt = (withProject = false) => `请把星愿记忆接入你当前的 MCP 客户端，作为本地记忆工具${withProject ? "，并接入我在星愿里授权的 GraphFlow 项目" : ""}。
+
+1. 确认你和星愿运行在同一台电脑，读取 ${origin}${setupPath}${withProject ? "?include_project=true" : ""}，获取这台电脑的实际接入配置。
+2. 新建名为 starwish 的 MCP 服务器，类型选 STDIO。按返回值填写 command（启动命令）、args（参数，按顺序逐项填）、env（环境变量）和 cwd（工作目录）。保留 STARWISH_SOUL_DIR，确保连到我现有的记忆库。不要把 /v1 当作 MCP 地址。
+3. 保存并重新连接。如果你不能修改 MCP 配置，或当前会话需要重启才能加载，请直接说明，并列出我需要手动填写的字段。如果读不到配置，请让我从星愿「设置 → MCP 与代理」提供，不要猜测路径。
+4. 连接后先列出 MCP 工具，再调用一次只读的 recall_index。${withProject ? "再用 graphflow_read 搜索一个项目符号，分别报告记忆和项目的连接结果。不要改代码或启用审批设置。" : "成功后告诉我结果；失败就说明卡在哪一步，不要把「已配置」当作「已接通」。"}
+
+这次只验证连接，不调用 remember，不写入测试记忆，也不修改核心记忆。`;
+  m.innerHTML = card("连接本机 MCP", `<div class="sv-mcp-intro"><p>在客户端选择「添加自定义 MCP」，按下方字段填写。客户端需和星愿运行在同一台电脑。</p><p>保存后，在客户端启用或重连星愿。回到星图顶栏展开「MCP」确认是否接通。</p></div>
+    <section class="sv-mcp-prompt" aria-labelledby="mcpPromptTitle">
+      <div class="sv-mcp-prompt-head"><div><strong id="mcpPromptTitle">给其他 Agent 的接入提示词</strong><div class="sv-help">复制后发给同一台电脑上的 Agent，让它配置并验证连接。</div></div><button type="button" class="sv-btn" id="mcpPromptCopy">复制提示词</button></div>
+      <details><summary>查看完整提示词</summary><textarea class="sv-in" id="mcpPromptText" aria-label="Agent 接入提示词" readonly rows="8">${E(makePrompt())}</textarea></details>
+      <div class="sv-help" id="mcpPromptFeedback" role="status"></div>
+    </section>
+    <div class="sv-mcp-intro">
+      <label><input type="checkbox" id="mcpIncludeProject" disabled> 在接入配置和提示词中包含已授权的 GraphFlow 项目</label>
+      <p>默认只提供记忆配置。只把包含项目的配置发给你信任的本机 Agent；不会复制编辑或测试的审批设置。若客户端之前已经配置了项目，需在客户端移除对应的环境变量。</p>
+      <div class="sv-help" id="mcpProjectFeedback" role="status"></div>
+    </div><div id="mcpSetupFields" role="status">正在读取本机配置…</div>`) +
     card("对话代理", row("自动注入核心记忆 + 相关星星", tog("proxy.inject")) + row("把对话写入归档，供日后整理", tog("proxy.log_to_archive")) +
       row("每轮召回预算（tokens）", inp("proxy.budget_tokens", "number", "", "w-s")) + row("强制模型（可空）", inp("proxy.model_override", "text", "", "w-m")) +
-      row("代理密钥", inp("proxy.proxy_key", "secret", "", "w-m"), "可空；填了则客户端需用它作为 API Key。"));
+      row("代理密钥", inp("proxy.proxy_key", "secret", "", "w-m"), "可空；填了则客户端需用它作为 API Key。")) +
+    card("其他接入方式", row("OpenAI 兼容代理", `<code>${o}/v1</code>`, "这是聊天客户端的 API 地址，不是 MCP 地址。") + row("REST API", `<code>${o}/api</code>`));
   bindAuto(m);
-  fetch("/api/health").then((r) => r.json()).then((h) => { const el = $("#mcpCmd"); if (el && h.exe) el.textContent = `"${h.exe}" --mcp`; }).catch(() => {});
+  const promptText = m.querySelector("#mcpPromptText"), feedback = m.querySelector("#mcpPromptFeedback");
+  const copyPrompt = m.querySelector("#mcpPromptCopy");
+  copyPrompt.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(promptText.value);
+      feedback.textContent = "已复制，可以粘贴给 Agent。";
+    } catch {
+      promptText.closest("details").open = true;
+      promptText.focus();
+      promptText.select();
+      feedback.textContent = "提示词已选中，请手动复制。";
+    }
+  };
+  const fields = m.querySelector("#mcpSetupFields");
+  const toggle = m.querySelector("#mcpIncludeProject"), projectFeedback = m.querySelector("#mcpProjectFeedback");
+  const renderSetup = ({ name, command, args, env, cwd }) => {
+    if (!fields.isConnected) return;
+    fields.removeAttribute("role");
+    const copy = (value, label) => `<div class="sv-mcp-copy"><code>${E(value)}</code><button type="button" class="sv-btn" aria-label="复制${E(label)}" data-mcp-copy="${E(value)}">复制</button></div>`;
+    const argsRows = args.map((arg, i) => copy(arg, `参数 ${i + 1}`)).join("");
+    const envRows = Object.entries(env).map(([key, value]) => `<div class="sv-mcp-env"><div>键 ${copy(key, "变量名")}</div><div>值 ${copy(value, "变量值")}</div></div>`).join("");
+    fields.innerHTML = row("名称", copy(name, "名称")) + row("类型", "<code>STDIO</code>", "不选流式 HTTP；星愿当前没有 MCP HTTP 地址。") +
+      row("启动命令", copy(command, "启动命令"), "只填程序路径，不要加引号或拼接参数。") +
+      row("参数", `<div class="sv-mcp-stack">${argsRows}</div>`, "按顺序逐项添加，每项一行，不加引号。") +
+      row("环境变量", `<div class="sv-mcp-stack">${envRows}</div>`, "确保 MCP 读取这套记忆库。环境变量传递留空。") +
+      row("工作目录", copy(cwd, "工作目录")) +
+      '<div class="sv-help sv-mcp-note">MCP 供客户端调用记忆工具；要让星愿自动读取 Codex 闲聊，请另行开启「对话监控」。</div>';
+    fields.querySelectorAll("[data-mcp-copy]").forEach((button) => {
+      button.onclick = async () => {
+        try { await navigator.clipboard.writeText(button.dataset.mcpCopy); C.toast("已复制"); }
+        catch { C.toast("剪贴板不可用，可选中文本手动复制。", true); }
+      };
+    });
+  };
+  C.api(setupPath).then((memorySetup) => {
+    renderSetup(memorySetup);
+    toggle.disabled = false;
+    toggle.onchange = async () => {
+      feedback.textContent = "";
+      projectFeedback.textContent = "";
+      if (!toggle.checked) {
+        renderSetup(memorySetup);
+        promptText.value = makePrompt();
+        return;
+      }
+      toggle.disabled = copyPrompt.disabled = true;
+      projectFeedback.textContent = "正在检查已授权的项目和引擎…";
+      try {
+        renderSetup(await C.api(`${setupPath}?include_project=true`));
+        promptText.value = makePrompt(true);
+        projectFeedback.textContent = "配置和提示词现已包含项目。";
+      } catch (err) {
+        toggle.checked = false;
+        projectFeedback.textContent = `${err.message} 已保留仅记忆配置。`;
+      } finally {
+        toggle.disabled = copyPrompt.disabled = false;
+      }
+    };
+  }).catch(() => { if (fields.isConnected) fields.textContent = "无法读取本机配置，请在运行星愿的电脑上打开面板。"; });
 }
 
 // ———————————————— 技能 ————————————————
@@ -656,7 +753,7 @@ async function pageWatch(m) {
       row("静止多久算一轮结束（秒）", inp("watch.idle_sec", "number", "", "w-s")) + row("只盯最近几天的会话", inp("watch.hot_days", "number", "", "w-s")) +
       row("偏好重要度 ≥ 多少转成核心提案", inp("watch.core_importance", "number", "", "w-s"), "自动通道绝不直接改核心记忆。") +
       row("第一次启用时回读最近几天的旧对话", tog("watch.backfill_existing"), "默认从现在开始，不花钱回灌历史。") +
-      row("归纳出新星后让主模型整理星系", tog("watch.organize_after")));
+      row("归纳出新星后继续整理星系", tog("watch.organize_after")));
   bindAuto(m);
   const post = (cid, body) => C.safe(async () => { const r = await C.api(`/api/watch/client/${cid}`, { method: "POST", body });
     if (r.hook_result?.manual) alert(r.hook_result.help); else if (r.hook_result) C.toast(r.hook_result.removed !== undefined ? "钩子已卸载" : "钩子已安装：" + r.hook_result.path);
@@ -675,15 +772,26 @@ async function pageWatch(m) {
 // ———————————————— 宇宙之眼 / 宇宙之声 ————————————————
 function pageEye(m) {
   m.innerHTML = card("视频交互模型（宇宙之眼）", row("打开观看页", `<a class="sv-link" href="/eye">宇宙之眼 ↗</a>`) +
-      row("引擎", sel("eye.engine", [["frame", "通用帧模式（任意识图模型）"], ["qwen_omni", "千问全模态视频接口"]], "w-l")) +
+      row("引擎", sel("eye.engine", [["frame", "通用帧模式（任意识图模型）"], ["qwen_omni", "兼容视频接口"]], "w-l")) +
       row("通用帧模式的识图模型", `<b>${E(cfg.eye.frame_model || "未选择（沿用对话模型）")}</b> <a href="#" class="sv-link" id="goDef">去默认模型选择</a>`) +
       row("多帧怎么发", sel("eye.frame_compose", [["grid", "拼成一张分镜图（省钱）"], ["multi", "每帧一张图"]], "w-l")) +
       row("主动吐槽节奏", sel("eye.pace", [["off", "关"], ["calm", "安静"], ["normal", "正常"], ["chatty", "话多"]], "w-m")) +
       row("结束时沉淀成一颗星", tog("eye.star_on_end"))) +
-    card("千问视频接口", row("协议", sel("eye.qwen_protocol", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]], "w-m")) +
+    card("兼容视频接口", row("协议", sel("eye.qwen_protocol", [["openai", "OpenAI 兼容"], ["anthropic", "Anthropic 兼容"]], "w-m")) +
+      row("API 地址", inp("eye.qwen_base_url_openai", "url", "https://…/v1", "w-l") +
+        inp("eye.qwen_base_url_anthropic", "url", "https://…/v1", "w-l"),
+        "预填千问地址，可替换为其他兼容服务商。更换服务商时请同时核对模型 ID 和 API Key。") +
       row("模型", inp("eye.qwen_model", "text", "", "w-m")) + row("API Key", inp("eye.qwen_api_key", "secret", "", "w-m")) +
       row("帧序列传法", sel("eye.qwen_video_mode", [["video", "按视频传（失败自动退回多图）"], ["images", "每帧一张图"]], "w-l")));
   bindAuto(m);
+  const protocol = m.querySelector('[data-k="eye.qwen_protocol"]');
+  const addresses = ["openai", "anthropic"].map((key) => [key, m.querySelector(`[data-k="eye.qwen_base_url_${key}"]`)]);
+  const showAddress = () => addresses.forEach(([key, input]) => {
+    input.hidden = input.disabled = key !== protocol.value;
+    input.setAttribute("aria-label", key === "anthropic" ? "Anthropic 兼容 API 地址" : "OpenAI 兼容 API 地址");
+  });
+  protocol.addEventListener("change", showAddress);
+  showAddress();
   $("#goDef").onclick = (e) => { e.preventDefault(); page = "defaults"; renderNav(); render(); };
 }
 function pageVoice(m) {
@@ -699,9 +807,9 @@ async function pageGeneral(m) {
   const cats = await C.safe(() => C.api("/api/organize/categories")) || { categories: [] };
   const last = cats.last;
   const majors = [...new Set(cats.categories.map((x) => x.major))];
-  m.innerHTML = card("星系整理（主模型）",
-    `<div class="sv-help" style="margin:0 0 6px">星图是一个银河系：核心记忆是星系核，大类是恒星系，小类是行星系，每条记忆是一颗星球。主模型负责把内容相同的星融合、同类的星放到一起。</div>` +
-    row("立即整理星系", `<button class="primary" id="orgGo">整理星系</button>`, last ? `上次：${fmtT(last.t)} · 融合 ${last.fused}，分类 ${last.assigned}，合并类别 ${last.merged}${last.by_llm ? "" : "（按标签粗分）"}` : "还没整理过") +
+  m.innerHTML = card("星系整理",
+    `<div class="sv-help" style="margin:0 0 6px">核心记忆是星系核，大类是恒星系，小类是行星系，每条记忆是一颗星球。整理模型负责补分类、补标签、归纳相似记忆。</div>` +
+    row("立即整理星系", `<button class="primary" id="orgGo">整理星系</button>`, last ? `上次：${fmtT(last.t)} · 融合 ${last.fused}，分类 ${last.assigned}，补标签 ${last.tagged ?? 0}，合并类别 ${last.merged}${last.by_llm ? "" : "（按标签粗分）"}` : "还没整理过") +
     row("恒星系", `<span class="muted">${majors.length} 个</span>`, majors.slice(0, 30).map((x) => `<span class="tag">${E(x)}</span>`).join(" ") || "—")) +
     card("记忆亮度", row("亮度半衰期（天）", inp("memory.half_life_days", "number", "", "w-s"), "越新的星越亮，老星只是变暗、不会消失。") +
       row("最低亮度", inp("memory.brightness_floor", "number", "", "w-s")) + row("亮度在排序中的权重", inp("memory.brightness_weight", "number", "", "w-s")) +

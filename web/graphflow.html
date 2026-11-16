@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/static/favicon.ico">
+<title>星愿记忆 · GraphFlow</title>
+<script src="/static/theme.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/core.css">
+<link rel="stylesheet" href="/static/appearance.css?v=3">
+<link rel="stylesheet" href="/static/graphflow.css?v=4">
+</head>
+<body class="page graphflow-page">
+<header class="ctop">
+  <a class="back" href="/">← 星图</a>
+  <div class="brand">GraphFlow <small>项目代码</small></div>
+</header>
+
+<main class="gf-wrap">
+  <section class="gf-card" aria-labelledby="gf-title">
+    <div class="gf-head">
+      <div>
+        <h1 id="gf-title">查询项目代码</h1>
+        <p class="gf-muted">按关键词定位代码，或按文件和符号查看源码片段。当前阶段只读。</p>
+      </div>
+      <span id="gf-status" class="gf-status" role="status">正在检查引擎…</span>
+    </div>
+    <dl class="gf-meta">
+      <div><dt>工作区</dt><dd id="gf-workspace">—</dd></div>
+      <div><dt>引擎</dt><dd id="gf-provider">—</dd></div>
+    </dl>
+    <p class="gf-muted" id="gf-reason" hidden></p>
+    <form id="gf-form" aria-describedby="gf-hint">
+      <div class="gf-fields">
+        <div>
+          <label for="gf-query">关键词</label>
+          <input id="gf-query" name="query" type="search" placeholder="例如：整理游标" autocomplete="off">
+        </div>
+        <div>
+          <label for="gf-target">文件或符号</label>
+          <input id="gf-target" name="target" type="text" placeholder="例如：app/maintenance.py#函数名" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+      <p class="gf-muted gf-hint" id="gf-hint">关键词和文件目标二选一。文件可加 #符号，或 :起始行-结束行（最多 200 行）。</p>
+      <div class="gf-actions">
+        <label class="gf-toggle"><input id="gf-skeleton" name="skeleton" type="checkbox"> 只看代码结构</label>
+        <label class="gf-toggle"><input id="gf-context" type="checkbox"> 只看上下文与历史证据（关键词）</label>
+        <label class="gf-toggle"><input id="gf-impact" name="impact" type="checkbox"> 仅看影响范围（需要文件#符号）</label>
+        <button id="gf-submit" type="submit" class="primary" disabled>查询代码</button>
+      </div>
+    </form>
+    <p id="gf-error" class="gf-error" role="alert" hidden></p>
+  </section>
+
+  <section class="gf-card" aria-labelledby="gf-result-title" id="gf-result">
+    <div class="gf-result-head">
+      <h2 id="gf-result-title">查询结果</h2>
+      <span id="gf-result-status" class="gf-muted" role="status"></span>
+    </div>
+    <p id="gf-placeholder" class="gf-empty">查询结果将显示在这里。</p>
+    <pre id="gf-code" class="gf-code" tabindex="0" aria-label="查询结果正文" hidden></pre>
+  </section>
+
+  <details class="gf-card gf-edit" id="gf-dependency" hidden>
+    <summary>代码关系 <span class="gf-muted">代码、文档与历史共改</span></summary>
+    <form id="gf-dependency-form">
+      <label for="gf-dependency-target">文件相对路径（可留空查看概览）</label>
+      <input id="gf-dependency-target" placeholder="app/server.py" maxlength="500" spellcheck="false">
+      <div class="gf-actions"><button id="gf-dependency-load" type="submit">查看关系</button></div>
+    </form>
+    <p id="gf-dependency-status" class="gf-muted" role="status"></p>
+    <div id="gf-dependency-map" hidden>
+      <div class="gf-map-controls">
+        <label for="gf-dependency-kind">关系筛选</label>
+        <select id="gf-dependency-kind">
+          <option value="">全部关系</option>
+          <option value="defines">定义</option>
+          <option value="imports">导入</option>
+          <option value="calls">调用</option>
+          <option value="doc-links-code">文档关联</option>
+          <option value="co-edit">历史共改</option>
+        </select>
+        <button id="gf-dependency-export" type="button">导出离线 HTML</button>
+      </div>
+      <div class="gf-map-viewport" role="region" tabindex="0" aria-label="代码关系图，可滚动">
+        <svg id="gf-dependency-svg" xmlns="http://www.w3.org/2000/svg" aria-label="文件与符号节点"></svg>
+      </div>
+      <div class="gf-map-selection">
+        <p id="gf-dependency-selection" role="status"></p>
+        <button id="gf-dependency-neighborhood" type="button" disabled>查看此文件邻域</button>
+      </div>
+      <details class="gf-map-table">
+        <summary>文字关系表</summary>
+        <pre id="gf-dependency-result" class="gf-code" tabindex="0" aria-label="代码关系结果"></pre>
+      </details>
+    </div>
+  </details>
+
+  <details class="gf-card gf-edit" id="gf-artifact" hidden>
+    <summary>索引清单 <span class="gf-muted">仅路径和内容校验值</span></summary>
+    <p class="gf-muted">导入时核对本机源码，再预热当前进程的索引。清单不含源码，但包含项目文件名。</p>
+    <label for="gf-artifact-data">压缩清单</label>
+    <textarea id="gf-artifact-data" rows="4" maxlength="320000" spellcheck="false"></textarea>
+    <div class="gf-actions">
+      <button id="gf-artifact-import" type="button">校验并预热</button>
+      <button id="gf-artifact-export" type="button">生成清单</button>
+    </div>
+    <p id="gf-artifact-status" class="gf-muted" role="status"></p>
+  </details>
+
+  <details class="gf-card gf-edit">
+    <summary>编辑预览 <span class="gf-muted">只读 · 不写文件</span></summary>
+    <p class="gf-muted" id="gf-edit-help">先按行读取文件，再填入原文和替换文本。留空替换文本表示删除选中行。</p>
+    <form id="gf-edit-form" aria-describedby="gf-edit-help">
+      <label for="gf-edit-path">文件相对路径</label>
+      <input id="gf-edit-path" type="text" maxlength="500" required spellcheck="false" autocomplete="off">
+      <div class="gf-fields">
+        <div><label for="gf-edit-start">起始行（含）</label><input id="gf-edit-start" type="number" min="1" required></div>
+        <div><label for="gf-edit-end">结束行（含）</label><input id="gf-edit-end" type="number" min="1" required></div>
+      </div>
+      <div class="gf-fields">
+        <div><label for="gf-edit-expected">原始行文本</label><textarea id="gf-edit-expected" rows="5" maxlength="12000" spellcheck="false"></textarea></div>
+        <div><label for="gf-edit-replacement">替换文本</label><textarea id="gf-edit-replacement" rows="5" maxlength="12000" spellcheck="false"></textarea></div>
+      </div>
+      <div class="gf-actions">
+        <button id="gf-edit-check" type="button" disabled>检查是否过期</button>
+        <button id="gf-edit-submit" class="primary" type="submit" disabled>生成 diff</button>
+      </div>
+    </form>
+    <p id="gf-edit-status" class="gf-muted gf-hint" role="status"></p>
+    <p id="gf-edit-error" class="gf-error" role="alert" hidden></p>
+    <pre id="gf-edit-diff" class="gf-code" tabindex="0" aria-label="编辑预览 diff" hidden></pre>
+  </details>
+
+  <details class="gf-card gf-edit" id="gf-approval" hidden>
+    <summary>本机编辑审批 <span class="gf-muted">需要操作者密钥</span></summary>
+    <p class="gf-muted">MCP 提交的预览会显示在这里。先核对 diff，再确认应用或回滚。密钥不会保存到浏览器存储。</p>
+    <p id="gf-approval-setup" class="gf-muted" role="status" hidden></p>
+    <form id="gf-approval-form">
+      <label for="gf-operator-key">审批密钥</label>
+      <input id="gf-operator-key" type="password" autocomplete="off" required>
+      <div class="gf-actions"><button id="gf-queue-load" type="submit">读取审批队列</button></div>
+    </form>
+    <p id="gf-queue-status" class="gf-muted gf-hint" role="status"></p>
+    <div id="gf-queue-items" class="gf-queue-items"></div>
+    <pre id="gf-queue-diff" class="gf-code" tabindex="0" aria-label="待审批 diff" hidden></pre>
+    <div class="gf-actions" id="gf-queue-actions" hidden>
+      <button id="gf-queue-mutate" type="button"></button>
+    </div>
+  </details>
+  <details class="gf-card gf-edit" id="gf-test" hidden>
+    <summary>受控测试 <span class="gf-muted">仅运行预设测试</span></summary>
+    <p class="gf-muted">根据 Git 改动推荐测试项。核对程序与参数后确认启动；日志只展示已保存的部分。</p>
+    <p id="gf-test-setup" class="gf-muted" role="status" hidden></p>
+    <form id="gf-test-form">
+      <label for="gf-test-key">审批密钥</label>
+      <input id="gf-test-key" type="password" autocomplete="off" required>
+      <div class="gf-actions"><button id="gf-test-load" type="submit">加载测试计划与历史</button></div>
+    </form>
+    <p id="gf-test-status" class="gf-muted gf-hint" role="status"></p>
+    <div id="gf-test-items" class="gf-queue-items"></div>
+    <pre id="gf-test-plan" class="gf-code" tabindex="0" aria-label="测试计划" hidden></pre>
+    <div id="gf-test-task-row" hidden>
+      <label for="gf-test-task">关联任务编号（可选）</label>
+      <input id="gf-test-task" pattern="[0-9a-f]{32}" maxlength="32" autocomplete="off" spellcheck="false">
+      <p class="gf-muted">填入任务台账里的完整编号。只回填测试结果，不改变任务状态。</p>
+    </div>
+    <div class="gf-actions"><button id="gf-test-run" type="button" hidden>批准并运行…</button></div>
+    <p id="gf-test-link-status" class="gf-muted" role="status"></p>
+    <div id="gf-test-records" class="gf-queue-items"></div>
+    <pre id="gf-test-log" class="gf-code" tabindex="0" aria-label="测试日志" hidden></pre>
+    <div class="gf-actions"><button id="gf-test-next" type="button" hidden>下一页日志</button></div>
+  </details>
+  <details class="gf-card gf-edit" id="gf-planner" hidden>
+    <summary>项目规划 <span class="gf-muted">只生成步骤和审批停点</span></summary>
+    <form id="gf-planner-form">
+      <label for="gf-planner-task">要审查或变更的任务</label>
+      <textarea id="gf-planner-task" rows="3" maxlength="1200" required></textarea>
+      <div class="gf-fields">
+        <div><label for="gf-planner-target">文件#符号（可选）</label><input id="gf-planner-target" maxlength="500" autocomplete="off"></div>
+        <div><label for="gf-planner-intent">计划类型</label><select id="gf-planner-intent">
+          <option value="review">审查</option><option value="change">变更</option></select></div>
+      </div>
+      <div class="gf-actions">
+        <label class="gf-toggle"><input id="gf-planner-insight" type="checkbox"> 附加分析问题</label>
+        <button id="gf-planner-submit" type="submit">生成计划</button>
+      </div>
+    </form>
+    <p id="gf-planner-status" class="gf-muted gf-hint" role="status"></p>
+    <pre id="gf-planner-output" class="gf-code" tabindex="0" aria-label="项目计划" hidden></pre>
+  </details>
+  <details class="gf-card gf-edit" id="gf-workflow" hidden>
+    <summary>项目工作流 <span class="gf-muted">先预览，再只读重放</span></summary>
+    <p class="gf-muted">工作流不会改文件或运行测试。若有测试建议，请到「受控测试」单独确认。</p>
+    <form id="gf-workflow-form">
+      <label for="gf-workflow-select">工作流</label>
+      <select id="gf-workflow-select" required disabled></select>
+      <div class="gf-fields">
+        <div id="gf-workflow-target-row" hidden><label for="gf-workflow-target">文件或符号</label><input id="gf-workflow-target" maxlength="500" autocomplete="off"></div>
+        <div id="gf-workflow-query-row" hidden><label for="gf-workflow-query">关键词</label><input id="gf-workflow-query" maxlength="300" autocomplete="off"></div>
+      </div>
+      <div class="gf-actions">
+        <button id="gf-workflow-preview" type="submit" disabled>预览步骤</button>
+        <button id="gf-task-save" type="button" hidden disabled>存入任务台账</button>
+        <button id="gf-workflow-replay" class="primary" type="button" disabled>重放只读步骤</button>
+      </div>
+    </form>
+    <p id="gf-workflow-status" class="gf-muted gf-hint" role="status"></p>
+    <pre id="gf-workflow-output" class="gf-code" tabindex="0" aria-label="工作流计划和结果" hidden></pre>
+  </details>
+  <details class="gf-card gf-edit" id="gf-tasks" hidden>
+    <summary>项目任务台账 <span class="gf-muted">计划、结果与积压</span></summary>
+    <div class="gf-actions"><button type="button" id="gf-task-load">刷新积压</button></div>
+    <div class="gf-queue-items" id="gf-task-items"></div>
+    <form id="gf-task-detail-form">
+      <label for="gf-task-id">任务编号</label>
+      <input id="gf-task-id" required pattern="[0-9a-f]{32}" maxlength="32" autocomplete="off">
+      <div class="gf-actions"><button type="submit">查看任务</button></div>
+    </form>
+    <pre class="gf-code" id="gf-task-detail" tabindex="0" aria-label="任务与回填记录" hidden></pre>
+    <form id="gf-task-report" hidden>
+      <label for="gf-task-state">回填状态</label>
+      <select id="gf-task-state"></select>
+      <label for="gf-task-summary">一行结果摘要（不要粘贴源码或日志）</label>
+      <input id="gf-task-summary" required maxlength="400">
+      <label for="gf-task-refs">证据引用（每行一个，可留空）</label>
+      <textarea id="gf-task-refs" rows="3" placeholder="code:app/maintenance.py:159-162"></textarea>
+      <div class="gf-actions"><button type="submit">保存回填</button></div>
+    </form>
+    <p id="gf-task-status" class="gf-muted gf-hint" role="status"></p>
+    <details id="gf-legacy-tasks" hidden>
+      <summary>接手旧 GraphFlow 待办 <span class="gf-muted">只导入选中的编号</span></summary>
+      <p class="gf-muted">指定当前源码里的符号，预览后再确认。不会复制旧正文、修改原日志或执行工作流。</p>
+      <div class="gf-actions">
+        <button type="button" id="gf-legacy-load">读取旧待办</button>
+        <button type="button" id="gf-legacy-next" hidden>下一页旧待办</button>
+      </div>
+      <form id="gf-legacy-form" hidden>
+        <label for="gf-legacy-id">旧待办编号</label>
+        <select id="gf-legacy-id" required></select>
+        <label for="gf-legacy-target">当前源码目标（文件#符号）</label>
+        <input id="gf-legacy-target" placeholder="app/maintenance.py#consolidate" required maxlength="500" autocomplete="off">
+        <div class="gf-actions"><button id="gf-legacy-preview" type="submit">预览迁移</button></div>
+      </form>
+      <pre class="gf-code" id="gf-legacy-plan" tabindex="0" aria-label="旧待办迁移预览" hidden></pre>
+      <div class="gf-actions" id="gf-legacy-apply-row" hidden>
+        <button type="button" id="gf-legacy-apply">确认接手为待办</button>
+      </div>
+      <p id="gf-legacy-status" class="gf-muted" role="status"></p>
+    </details>
+  </details>
+</main>
+<script type="module" src="/static/graphflow.js?v=14"></script>
+</body>
+</html>

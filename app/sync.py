@@ -22,7 +22,7 @@ from urllib.parse import quote, unquote, urlparse
 import requests
 
 from . import config
-from .db import log_event
+from .db import init_db, log_event
 
 MAGIC = b"SSENC1"
 EXCLUDE_TOP = {"snapshots", "config.json", "config.json.tmp", "soul.db", "soul.db-wal", "soul.db-shm", "cache"}
@@ -125,6 +125,8 @@ def restore_bytes(data: bytes, passphrase: str = "") -> dict:
         target.parent.mkdir(parents=True, exist_ok=True)
         with zf.open(n) as src, open(target, "wb") as dst:
             shutil.copyfileobj(src, dst)
+    if "soul.db" in names:
+        init_db(force=True)
     log_event("restore", files=len(names), safety_snapshot=safety["name"])
     return {"ok": True, "files": len(names), "safety_snapshot": safety["name"]}
 

@@ -18,9 +18,9 @@ from typing import AsyncIterator
 
 import httpx
 
-from .. import config
+from .. import config, providers
 
-ENGINES = {"frame": "通用帧模式", "qwen_omni": "千问 Omni 视频接口"}
+ENGINES = {"frame": "通用帧模式", "qwen_omni": "兼容视频接口"}
 PROTOCOLS = ("openai", "anthropic", "responses")
 MIN_VIDEO_FRAMES = 4  # 千问视频输入至少要 4 帧；不足时按多图传
 
@@ -39,7 +39,7 @@ def resolve(cfg: dict | None = None, engine: str | None = None) -> dict:
     if engine == "qwen_omni":
         protocol = e.get("qwen_protocol") or "openai"
         base = e.get("qwen_base_url_anthropic") if protocol == "anthropic" else e.get("qwen_base_url_openai")
-        r = {"engine": engine, "protocol": protocol, "base_url": base or "", "api_key": e.get("qwen_api_key") or "",
+        r = {"engine": engine, "protocol": protocol, "base_url": providers.norm_base(base or ""), "api_key": e.get("qwen_api_key") or "",
              "model": e.get("qwen_model") or "qwen3.8-omni-flash", "video_mode": e.get("qwen_video_mode") or "video",
              "audio_out": bool(e.get("qwen_audio_out")) and protocol == "openai", "voice": e.get("qwen_voice") or "Cherry",
              "compose": "multi"}
@@ -51,6 +51,11 @@ def resolve(cfg: dict | None = None, engine: str | None = None) -> dict:
              "api_key": e.get("frame_api_key") or llm.get("api_key") or "",
              "model": e.get("frame_model") or llm.get("model") or "",
              "video_mode": "images", "audio_out": False, "voice": "", "compose": e.get("frame_compose") or "grid"}
+        if e.get("frame_model_ref"):
+            selected = providers.resolve_choice(cfg, "vision", e["frame_model_ref"])
+            # Do not send shared frames to a different provider if this choice was removed.
+            r.update({k: (selected or {}).get(k, fallback) for k, fallback in
+                      (("protocol", "openai"), ("base_url", ""), ("api_key", ""), ("model", ""))})
     if r["protocol"] not in PROTOCOLS:
         raise EyeConfigError(f"未知协议：{r['protocol']}")
     r["ready"] = bool(r["base_url"] and r["api_key"] and r["model"])

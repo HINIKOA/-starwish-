@@ -97,7 +97,7 @@ def import_xingxi(folder: str | Path) -> dict:
     res = {"stars": 0, "duplicates": 0, "proposals": 0, "diaries": 0, "raw_files": 0, "cards": 0}
 
     def _add(content, **kw):
-        r = stars.add_star(content, actor="import", **kw)
+        r = stars.add_star(content, actor="import", classify=False, **kw)
         res["duplicates" if r.get("duplicate") else "stars"] += 1
 
     cards = [p for p in folder.rglob("*.md") if "记忆卡" in p.name and "日记" not in p.parts]
@@ -210,7 +210,7 @@ def import_text(text: str, filename: str = "note.md", tags=None) -> dict:
         if len(t) < 2:
             continue
         r = stars.add_star(t, tags=([head[:16]] if head else []) + base_tags, source=f"import:file:{filename}",
-                           created_at=ts, actor="import")
+                           created_at=ts, actor="import", classify=False)
         res["duplicates" if r.get("duplicate") else "stars"] += 1
     log_event("import_text", file=filename, **res)
     return res
@@ -245,7 +245,7 @@ def import_chatgpt(data: bytes | str) -> dict:
         title = (conv.get("title") or "").strip() or "ChatGPT 对话"
         first_user = next((m["content"] for m in msgs if m["role"] == "user"), "")
         r = stars.add_star(f"[ChatGPT 对话] {title}\n主人问：{first_user[:300]}", summary=f"ChatGPT对话：{title}"[:60],
-                           tags=["chatgpt"], importance=2, source=f"archive:{rel}", created_at=ct, actor="import")
+                           tags=["chatgpt"], importance=2, source=f"archive:{rel}", created_at=ct, actor="import", classify=False)
         res["duplicates" if r.get("duplicate") else "stars"] += 1
         res["conversations"] += 1
         res["messages"] += len(msgs)

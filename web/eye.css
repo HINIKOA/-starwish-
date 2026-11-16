@@ -49,9 +49,13 @@
 .msg.sys .b{background:transparent;color:var(--muted);font-size:12px;border:1px dashed var(--line)}
 .msg .m{font-size:10.5px;color:var(--muted);margin:2px 4px}
 .stat{color:var(--muted);font-size:11.5px;margin-top:6px;min-height:16px}
-.sess{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:10px 0;background:rgba(14,17,32,.65);cursor:pointer}
+.diary-tools{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.sess{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:10px 0;background:var(--card)}
 .sess:hover{border-color:rgba(255,210,122,.45)}
 .sess .hhead b{color:var(--text)}
+.sess .hhead{flex-wrap:nowrap}
+.sess .diary-toggle{flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;text-align:left;background:none;border:0;padding:0}
+.sess .diary-delete{flex:none}
 .diary{font-size:13px;line-height:1.7;margin-top:8px}
 .diary div{padding:2px 0;border-bottom:1px dashed rgba(140,160,255,.08)}
 .diary .k{display:inline-block;min-width:42px;color:var(--accent2);font-size:11.5px}

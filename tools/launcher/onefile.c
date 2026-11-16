@@ -41,8 +41,21 @@ typedef struct {
 #pragma pack(pop)
 
 static HWND g_win = NULL, g_text = NULL, g_bar = NULL;
+static int g_mcp = 0;
 
-static void fail(const wchar_t *msg) { MessageBoxW(NULL, msg, TITLE, MB_ICONERROR); }
+static void fail(const wchar_t *msg) {
+    if (g_mcp) {
+        char line[512];
+        DWORD written;
+        int n = WideCharToMultiByte(CP_UTF8, 0, msg, -1, line, sizeof line, NULL, NULL);
+        if (n > 0) {
+            line[n - 1] = '\n';
+            WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, (DWORD)n, &written, NULL);
+        }
+        return;
+    }
+    MessageBoxW(NULL, msg, TITLE, MB_ICONERROR);
+}
 
 static void pump(void) {
     MSG m;
@@ -152,6 +165,24 @@ static void clean_old(const wchar_t *base, const wchar_t *keep) {
     FindClose(h);
 }
 
+static HANDLE lock_extraction(const wchar_t *base) {
+    wchar_t path[MAX_PATH * 2], lockfile[MAX_PATH * 2];
+    wcscpy(path, base);
+    if (!mkdirs(path)) return INVALID_HANDLE_VALUE;
+    if (_snwprintf(lockfile, MAX_PATH * 2, L"%ls\\.starwish-extract.lock", base) < 0)
+        return INVALID_HANDLE_VALUE;
+    ULONGLONG end = GetTickCount64() + 120000;
+    do {
+        HANDLE lock = CreateFileW(lockfile, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                                  FILE_ATTRIBUTE_HIDDEN, NULL);
+        if (lock != INVALID_HANDLE_VALUE) return lock;
+        DWORD error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION) break;
+        Sleep(100);
+    } while (GetTickCount64() < end);
+    return INVALID_HANDLE_VALUE;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
     (void)prev; (void)show;
     wchar_t exe[MAX_PATH * 2], dir[MAX_PATH * 2];
@@ -161,6 +192,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
     if (slash) *slash = 0;
 
     int mcp = args && wcsstr(args, L"--mcp") != NULL;
+    g_mcp = mcp;
     int notify = args && wcsstr(args, L"--notify") != NULL;
     int console = mcp || notify;   /* 需要标准输入输出的模式 */
 
@@ -180,7 +212,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
 
     /* 2. 缓存目录 */
     wchar_t local[MAX_PATH], base[MAX_PATH * 2], target[MAX_PATH * 2], tmp[MAX_PATH * 2], okf[MAX_PATH * 2];
-    if (FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local))) {
+    DWORD cache_len = GetEnvironmentVariableW(L"STARWISH_RUNTIME_CACHE_ROOT", local, MAX_PATH);
+    if (cache_len >= MAX_PATH || (cache_len && (cache_len < 4 || local[1] != L':' || local[2] != L'\\'))) {
+        CloseHandle(f);
+        fail(L"运行缓存必须使用本机绝对路径。");
+        return 4;
+    }
+    if (!cache_len && FAILED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, local))) {
         GetTempPathW(MAX_PATH, local);
     }
     _snwprintf(base, MAX_PATH * 2, L"%ls\\StarWish\\runtime", local);
@@ -188,13 +226,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
     _snwprintf(tmp, MAX_PATH * 2, L"%ls.tmp", target);
     _snwprintf(okf, MAX_PATH * 2, L"%ls\\.ok", target);
 
+    HANDLE lock = INVALID_HANDLE_VALUE;
     if (GetFileAttributesW(okf) == INVALID_FILE_ATTRIBUTES) {
+        lock = lock_extraction(base);
+        if (lock == INVALID_HANDLE_VALUE) {
+            CloseHandle(f);
+            fail(L"无法锁定运行缓存，请稍后重试。");
+            return 5;
+        }
+    }
+    if (lock != INVALID_HANDLE_VALUE && GetFileAttributesW(okf) == INVALID_FILE_ATTRIBUTES) {
         /* 首次（或升级后）解压 */
         HANDLE map = CreateFileMappingW(f, NULL, PAGE_READONLY, 0, 0, NULL);
         const unsigned char *view = map ? (const unsigned char *)MapViewOfFile(map, FILE_MAP_READ, 0, 0, 0) : NULL;
-        if (!view) { CloseHandle(f); fail(L"内存不足，无法准备运行环境。"); return 4; }
+        if (!view) {
+            if (map) CloseHandle(map);
+            CloseHandle(lock); CloseHandle(f);
+            fail(L"内存不足，无法准备运行环境。");
+            return 4;
+        }
         if (!console) show_progress(inst);
-        wchar_t b2[MAX_PATH * 2]; wcscpy(b2, base); mkdirs(b2);
         rmtree(tmp); rmtree(target);
         wchar_t t2[MAX_PATH * 2]; wcscpy(t2, tmp); mkdirs(t2);
         int ok = extract(view + t.offset, (size_t)t.size, tmp);
@@ -206,12 +257,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR args, int show) {
         }
         if (g_win) { DestroyWindow(g_win); g_win = NULL; pump(); }
         if (!ok) {
-            CloseHandle(f); rmtree(tmp);
+            CloseHandle(f); rmtree(tmp); CloseHandle(lock);
             fail(L"准备运行环境失败。\n请确认磁盘空间充足（约需 300MB），并检查杀毒软件是否拦截。");
             return 5;
         }
-        clean_old(base, tag);
+        if (!cache_len) clean_old(base, tag);
     }
+    if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
     CloseHandle(f);
 
     /* 3. 启动 */

@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS embeddings (
     vec BLOB NOT NULL,
     PRIMARY KEY (star_id, model)
 );
+CREATE TABLE IF NOT EXISTS archive_chunks (
+    archive_path TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    digest TEXT NOT NULL,
+    PRIMARY KEY (archive_path, start_line, end_line)
+);
+CREATE INDEX IF NOT EXISTS idx_archive_chunks_end ON archive_chunks(archive_path, end_line);
+CREATE TABLE IF NOT EXISTS star_archive_refs (
+    star_id INTEGER PRIMARY KEY,
+    archive_path TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER NOT NULL,
+    digest TEXT NOT NULL
+);
 """
 
 
@@ -73,11 +88,11 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
-def init_db() -> None:
+def init_db(*, force: bool = False) -> None:
     global _initialized_for, FTS_OK
     with _init_lock:
         key = str(config.DB_PATH)
-        if _initialized_for == key and config.DB_PATH.exists():
+        if not force and _initialized_for == key and config.DB_PATH.exists():
             return
         config.ensure_dirs()
         conn = _connect()

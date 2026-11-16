@@ -54,7 +54,8 @@ def start_mock(port):
         if "图像检测器" in sysmsg:
             reply = "红色" if body["model"] != "blind-model" else "我不太确定呢"
         elif not body.get("stream"):
-            reply = "我和主人一起看了测试电影，主人在飞船起飞时很激动。"
+            reply = (json.dumps({"major": "娱乐", "minor": "科幻电影", "tags": ["太空旅行"]}, ensure_ascii=False)
+                     if "只为这条记忆分类" in sysmsg else "我和主人一起看了测试电影，主人在飞船起飞时很激动。")
             return {"choices": [{"message": {"role": "assistant", "content": reply}}]}
         elif "主动开口" in sysmsg:
             reply = "哇，这个镜头切得真漂亮！"
@@ -207,9 +208,10 @@ def main():
 
         print("== 千问 Omni 视频接口（OpenAI 兼容）")
         c.put("/api/settings", json={"eye": {"engine": "qwen_omni", "qwen_api_key": "sk-qwen-abcdef123456",
-                                             "qwen_base_url_openai": U + "/v1"}})
+                                             "qwen_base_url_openai": U + "/v1/chat/completions"}})
         st2 = c.get("/api/eye/status").json()
         check("填上 Key 后千问引擎就绪", st2["engines"]["qwen_omni"]["ready"] and st2["engine"] == "qwen_omni")
+        check("兼容视频接口接受自定义完整地址", st2["engines"]["qwen_omni"]["base_url"] == U + "/v1")
         check("千问 Key 不外泄", "sk-qwen-abcdef" not in json.dumps(st2) and "sk-qwen-abcdef" not in c.get("/api/settings").text)
         S2 = c.post("/api/eye/session/start", json={"title": "千问测试", "source": "camera"}).json()
         sse(c, {"session": S2["id"], "text": "看看这段", "frames": [JPG] * 5})
@@ -235,7 +237,9 @@ def main():
         c.put("/api/settings", json={"eye": {"qwen_audio_out": False}})
 
         print("== 千问 Omni（Anthropic 兼容）")
-        c.put("/api/settings", json={"eye": {"qwen_protocol": "anthropic", "qwen_base_url_anthropic": U + "/anthropic"}})
+        c.put("/api/settings", json={"eye": {"qwen_protocol": "anthropic", "qwen_base_url_anthropic": U + "/anthropic/v1/messages"}})
+        check("切换协议后各自的 API 地址独立保留", c.get("/api/eye/status").json()["engines"]["qwen_omni"]["base_url"] ==
+              U + "/anthropic/v1" and c.get("/api/settings").json()["eye"]["qwen_base_url_openai"] == U + "/v1/chat/completions")
         _, _, evn = sse(c, {"session": S2["id"], "text": "Anthropic 协议看得到吗", "frames": [JPG, JPG]})
         an = mock.state.anth[-1]
         ab = an["body"]
@@ -278,6 +282,8 @@ def main():
         star = E.get("star") or {}
         check("结束后生成一颗星（LLM 写回忆）", star.get("id") and "宇宙之眼" in star.get("tags", []) and "飞船" in c.get(f"/api/stars/{star['id']}").json()["content"], str(E)[:300])
         check("会话标记结束并关联星星", E["ended_at"] and E["star_id"] == star.get("id"))
+        check("观看沉淀的星在创建时已有分类和主题标签", star["cat_major"] == "娱乐" and
+              star["cat_minor"] == "科幻电影" and "太空旅行" in star["tags"])
         code, d, _ = sse(c, {"session": sid, "text": "还在吗", "frames": [JPG]})
         check("结束后不能再问", code == 400)
         E2 = c.post(f"/api/eye/session/{S2['id']}/end", json={"make_star": False}).json()
@@ -288,9 +294,35 @@ def main():
         ev_log = c.get("/api/events?limit=300").json()
         check("事件日志记录 eye_start / eye_end", any(e.get("type") == "eye_start" for e in ev_log) and any(e.get("type") == "eye_end" for e in ev_log))
 
+        print("== 识图候选与画面日记清理")
+        c.put("/api/settings", json={
+            "providers": [{"id": "vision-fixture", "name": "Fixture", "base_url": U + "/v1",
+                           "api_key": "fixture-key", "protocol": "openai", "enabled": True,
+                           "models": [{"id": m, "kind": "vision", "enabled": True} for m in ("mock-vl", "second-vl")]}],
+            "model_choices": {"vision": ["vision-fixture::mock-vl", "vision-fixture::second-vl"]},
+            "eye": {"engine": "frame", "frame_model_ref": "vision-fixture::second-vl"},
+        })
+        v = c.get("/api/eye/status").json()
+        check("状态返回两项识图候选", [m["model"] for m in v["vision_choices"]] == ["mock-vl", "second-vl"])
+        s3 = c.post("/api/eye/session/start", json={"title": "保留进行中"}).json()["id"]
+        code, _, events = sse(c, {"session": s3, "text": "测试识图候选", "frames": [JPG]})
+        check("通用帧实际请求选择的模型", code == 200 and events[0]["model"] == "second-vl" and
+              mock.state.bodies[-1]["model"] == "second-vl")
+        c.put("/api/settings", json={"model_choices": {"vision": ["vision-fixture::mock-vl"]}})
+        check("失效的识图候选不自动切到其他服务商", not c.get("/api/eye/status").json()["engines"]["frame"]["ready"])
+        check("正在观看的日记不能删除", c.delete(f"/api/eye/session/{s3}").status_code == 409)
+        check("单条删除日记，不删星星及另存画面", c.delete(f"/api/eye/session/{sid}").json()["deleted"] == 1 and
+              c.get(f"/api/eye/session/{sid}").status_code == 404 and
+              c.get(f"/api/stars/{star['id']}").status_code == 200 and
+              any((soul / "eye" / "frames" / sid).glob("*.jpg")))
+        check("清空仅删除已结束的日记", c.delete("/api/eye/sessions").json()["deleted"] == 1 and
+              [x["id"] for x in c.get("/api/eye/sessions").json()] == [s3])
+
         print("== 仅主人")
         c.put("/api/settings", json={"core": {"owner_token": "owner-secret-xyz"}})
         check("设了主人令牌后，不带令牌访问被拒（403）", c.get("/api/eye/status").status_code == 403)
+        check("无主人令牌不能单删或清空日记", c.delete(f"/api/eye/session/{s3}").status_code == 403 and
+              c.delete("/api/eye/sessions").status_code == 403)
         check("带主人令牌可以访问", c.get("/api/eye/status", headers={"x-starwish-owner": "owner-secret-xyz"}).status_code == 200)
         c.put("/api/settings", json={"core": {"owner_token": ""}}, headers={"x-starwish-owner": "owner-secret-xyz"})
         c.put("/api/settings", json={"eye": {"enabled": False}})

@@ -6,9 +6,10 @@ import json
 import math
 import re
 import time
+from contextlib import nullcontext
 from datetime import datetime
 
-from . import config, semantic
+from . import archive, config, semantic
 from .db import (estimate_tokens, fts_query, get_conn, jaccard, log_event,
                  query_terms, tok_string)
 from . import db as _db
@@ -96,7 +97,10 @@ def _reembed(conn, sid: int, text: str) -> None:
 
 def add_star(content: str, summary: str = "", tags=None, importance: int = 3, source: str = "",
              session: str = "", created_at: float | None = None, merge_near: bool = False,
-             actor: str = "api") -> dict:
+             actor: str = "api", *, major: str = "", minor: str = "", classify: bool = True,
+             conn=None, emit=None, archive_ref=None) -> dict:
+    from . import maintenance, organize
+
     content = (content or "").strip()
     if not content:
         raise ValueError("内容为空")
@@ -105,7 +109,10 @@ def add_star(content: str, summary: str = "", tags=None, importance: int = 3, so
     summary = (summary or "").strip() or auto_summary(content)
     h = _hash(content)
     cfg = config.load_config()
-    with get_conn() as c:
+    major, minor, _ = organize.metadata({"major": major, "minor": minor})
+    emit = emit if emit is not None else log_event
+
+    def existing(c):
         dup = c.execute("SELECT * FROM stars WHERE hash=? AND deleted_at IS NULL AND fused_into IS NULL", (h,)).fetchone()
         if dup:
             return {**to_dict(dup, cfg), "duplicate": True}
@@ -123,15 +130,35 @@ def add_star(content: str, summary: str = "", tags=None, importance: int = 3, so
         if merge_near:
             near = find_near_duplicate(c, content, summary)
             if near is not None:
-                return merge_into(c, near, content, summary, tags, importance, source, cfg)
+                return merge_into(c, near, content, summary, tags, importance, source, cfg, emit=emit)
+        return None
+
+    if conn is None and classify and (not major or not tags) and maintenance.llm_ready(cfg):
+        with get_conn() as c:
+            duplicate = existing(c)
+            if duplicate:
+                return duplicate
+        auto_major, auto_minor, auto_tags = organize.classify_new(content, summary, tags, cfg)
+        if not major:
+            major, minor = auto_major, auto_minor
+        tags = _norm_tags(tags + auto_tags)
+
+    with (get_conn() if conn is None else nullcontext(conn)) as c:
+        if conn is None:
+            c.execute("BEGIN IMMEDIATE")
+        duplicate = existing(c)
+        if duplicate:
+            return duplicate
         now = time.time()
         cur = c.execute(
-            "INSERT INTO stars(content, summary, tags, created_at, updated_at, importance, source, session, hash)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO stars(content, summary, tags, created_at, updated_at, importance, source, session, hash, cat_major, cat_minor)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (content, summary, json.dumps(tags, ensure_ascii=False), created_at or now, now, importance,
-             source or "", session or "", h),
+             source or "", session or "", h, major, minor),
         )
         sid = cur.lastrowid
+        if archive_ref is not None:
+            c.execute("INSERT INTO star_archive_refs VALUES (?, ?, ?, ?, ?)", (sid, *archive_ref))
         _index(c, sid, content, summary, tags)
         try:
             semantic.store(c, sid, f"{summary}\n{content}", cfg)
@@ -139,8 +166,8 @@ def add_star(content: str, summary: str = "", tags=None, importance: int = 3, so
             pass
         row = c.execute("SELECT * FROM stars WHERE id=?", (sid,)).fetchone()
         d = to_dict(row, cfg)
-    log_event("star_add", id=sid, content=content, summary=summary, tags=tags, importance=importance,
-              source=source, session=session, created_at=created_at or now, actor=actor)
+    emit("star_add", id=sid, content=content, summary=summary, tags=tags, importance=importance,
+              source=source, session=session, created_at=created_at or now, actor=actor, major=major, minor=minor)
     return d
 
 
@@ -159,12 +186,13 @@ def find_near_duplicate(conn, content: str, summary: str = "", threshold: float 
     return best if best_s >= threshold else None
 
 
-def merge_into(conn, row, content, summary, tags, importance, source, cfg) -> dict:
+def merge_into(conn, row, content, summary, tags, importance, source, cfg, *, emit=log_event) -> dict:
     old_tags = json.loads(row["tags"] or "[]")
     new_tags = _norm_tags(old_tags + list(tags or []))
     new_content = row["content"]
     if jaccard(content, row["content"]) < 0.95 and content not in row["content"]:
         new_content = row["content"].rstrip() + "\n——\n" + content
+        conn.execute("DELETE FROM star_archive_refs WHERE star_id=?", (row["id"],))
     imp = max(int(row["importance"]), int(importance or 3))
     now = time.time()
     conn.execute("UPDATE stars SET content=?, tags=?, importance=?, updated_at=?, hash=? WHERE id=?",
@@ -172,7 +200,7 @@ def merge_into(conn, row, content, summary, tags, importance, source, cfg) -> di
     _index(conn, row["id"], new_content, row["summary"], new_tags)
     _reembed(conn, row["id"], f"{row['summary']}\n{new_content}")
     r2 = conn.execute("SELECT * FROM stars WHERE id=?", (row["id"],)).fetchone()
-    log_event("star_merge", id=row["id"], merged_content=content, source=source)
+    emit("star_merge", id=row["id"], merged_content=content, source=source)
     return {**to_dict(r2, cfg), "merged": True}
 
 
@@ -199,6 +227,8 @@ def update_star(sid: int, **fields) -> dict:
         imp = max(1, min(5, int(fields.get("importance", r["importance"]))))
         c.execute("UPDATE stars SET content=?, summary=?, tags=?, importance=?, updated_at=?, hash=? WHERE id=?",
                   (content, summary, json.dumps(tags, ensure_ascii=False), imp, time.time(), _hash(content), sid))
+        if content != r["content"] or summary != r["summary"]:
+            c.execute("DELETE FROM star_archive_refs WHERE star_id=?", (sid,))
         _index(c, sid, content, summary, tags)
         _reembed(c, sid, f"{summary}\n{content}")
         new = to_dict(c.execute("SELECT * FROM stars WHERE id=?", (sid,)).fetchone())
@@ -394,41 +424,31 @@ def recall(query: str, budget_tokens: int | None = None, bump: bool = True, limi
 def recall_detail(sid: int, bump: bool = True, raw_chars: int = 4000) -> dict | None:
     """第三层：单颗星的全文 + 原始对话片段（如有）。"""
     with get_conn() as c:
-        r = c.execute("SELECT * FROM stars WHERE id=?", (sid,)).fetchone()
+        if bump:
+            c.execute("BEGIN IMMEDIATE")
+        r = c.execute("SELECT * FROM stars WHERE id=? AND deleted_at IS NULL AND fused_into IS NULL", (sid,)).fetchone()
         if not r:
             return None
         if bump:
             c.execute("UPDATE stars SET recall_count=recall_count+1, last_recalled_at=? WHERE id=?", (time.time(), sid))
             r = c.execute("SELECT * FROM stars WHERE id=?", (sid,)).fetchone()
+        ref = _archive_ref(c, sid)
     d = to_dict(r)
-    d["raw"] = _raw_for(r["source"], raw_chars)
+    d["raw"] = archive.read_excerpt(*ref, raw_chars) if ref else ""
     if bump:
         log_event("recall_detail", id=sid)
     return d
 
 
-def _raw_for(source: str, limit: int) -> str:
-    """source 形如 archive:<相对路径> 时，读回原始对话（只读）。"""
-    if not source or not source.startswith("archive:"):
-        return ""
-    rel = source.split(":", 1)[1].split("#", 1)[0]
-    p = (config.SOUL_DIR / rel).resolve()
-    if config.SOUL_DIR not in p.parents or not p.exists():
-        return ""
-    try:
-        txt = p.read_text("utf-8", errors="replace")
-    except Exception:
-        return ""
-    if p.suffix == ".jsonl":
-        out = []
-        for ln in txt.splitlines():
-            try:
-                m = json.loads(ln)
-                out.append(f"{m.get('role', '?')}: {m.get('content', '')}")
-            except Exception:
-                pass
-        txt = "\n".join(out)
-    return txt[:limit]
+def _archive_ref(conn, sid: int):
+    return conn.execute("SELECT archive_path, start_line, end_line, digest FROM star_archive_refs WHERE star_id=?",
+                        (sid,)).fetchone()
+
+
+def raw_excerpt(sid: int, limit: int) -> str:
+    with get_conn() as conn:
+        ref = _archive_ref(conn, sid)
+    return archive.read_excerpt(*ref, limit) if ref else ""
 
 
 def stats() -> dict:

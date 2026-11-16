@@ -169,6 +169,10 @@ def main():
           all(k in js for k in ("搜索模型平台", "添加服务商", "pvEye", ">检测<", "同步模型", "手动添加")))
     pres = c.get("/api/providers/presets").json()
     check("预设服务商 ≥ 10 家，地址已填好", len(pres) >= 10 and all(p["base_url"] for p in pres if p["preset"] != "custom"))
+    protocols = {p["preset"]: p["protocol"] for p in pres}
+    check("新建 OpenAI 和自定义默认用 Responses，其余兼容预设不变",
+          protocols["openai"] == protocols["custom"] == "responses" and
+          protocols["deepseek"] == "openai" and protocols["anthropic"] == "anthropic")
 
     # 拉取模型：地址少了 /v1 自动补上
     r = c.post("/api/providers/models", json={"base_url": UP, "api_key": KEY}).json()
@@ -209,6 +213,10 @@ def main():
     check("掩码 Key 原样回传时保留原 Key", config.load_config()["providers"][1]["api_key"] == "sk-qw-0987654321")
     check("用服务商 id 拉模型时自动用已保存的 Key", c.post("/api/providers/models", json={"id": "ds"}).status_code == 200)
     check("检测「默认模型」", c.post("/api/providers/check", json={"role": "chat"}).json()["ok"])
+    c.put("/api/settings", json={"defaults": {"embed": "ds::deepseek-chat"}})
+    vector_check = c.post("/api/providers/check", json={"role": "embed"}).json()
+    check("向量用途检测不依赖模型名称推断", vector_check.get("ok") and "32 维" in vector_check["msg"])
+    c.put("/api/settings", json={"defaults": {"embed": s2["defaults"]["embed"]}})
     from app import maintenance
     CALLS.clear()
     out = maintenance.chat([{"role": "user", "content": "hi"}])
