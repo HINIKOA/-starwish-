@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import config, graphflow, graphflow_context, graphflow_diagnostics, graphflow_edit_queue, graphflow_edits, graphflow_planner, graphflow_tasks, graphflow_tests, graphflow_workflows
 from . import graphflow_artifacts
 from . import graphflow_legacy_tasks
+from . import graphflow_workspace_check
 
 router = APIRouter()
 
@@ -88,6 +89,14 @@ def graphflow_status(request: Request):
               "test_enabled": graphflow_tests.enabled(), "tasks_enabled": graphflow_tasks.enabled(),
               "legacy_tasks_enabled": graphflow_legacy_tasks.enabled(),
               "operator_key_configured": graphflow_edit_queue.operator_ready()}
+    claim = request.headers.get(graphflow_workspace_check.HEADER)
+    if claim is not None:
+        try:
+            match = graphflow_workspace_check.matches(graphflow.checked_workspace(), claim)
+        except (graphflow.GraphFlowError, OSError, RuntimeError):
+            status["workspace_check"] = "unavailable"
+        else:
+            status["workspace_check"] = "matched" if match else "mismatch"
     return JSONResponse(status, headers={"Cache-Control": "no-store"})
 
 

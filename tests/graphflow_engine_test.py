@@ -15,6 +15,25 @@ from tools import build_windows, graphflow_codex, graphflow_codex_probe, graphfl
 
 
 class GraphFlowEngineTest(unittest.TestCase):
+    def test_external_embedding_assets_copy_only_required_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            models = root / "external-models"
+            source = models / "embed" / "small"
+            source.mkdir(parents=True)
+            (source / "model.onnx").write_bytes(b"onnx fixture")
+            with self.assertRaisesRegex(SystemExit, "--models-dir"):
+                build_windows.embedding_assets(models)
+            (source / "tokenizer.json").write_bytes(b"tokenizer fixture")
+            (source / "not-for-release.txt").write_bytes(b"external extra")
+            stage = root / "app"
+            stage.mkdir()
+            with patch.dict(os.environ, {"STARWISH_MODELS_DIR": str(models)}):
+                build_windows.copy_app(stage)
+            built = stage / "models" / "embed" / "small"
+            self.assertEqual(sorted(path.name for path in built.iterdir()), ["model.onnx", "tokenizer.json"])
+            self.assertEqual((built / "model.onnx").read_bytes(), b"onnx fixture")
+
     def test_onefile_payload_preserves_engine_and_excludes_folder_launcher(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

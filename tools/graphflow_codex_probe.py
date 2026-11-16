@@ -8,13 +8,19 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 from collections import Counter
 from contextlib import contextmanager
+from http.client import HTTPConnection, HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app import graphflow_workspace_check
 
 if __package__:
     from .graphflow_codex import _hook_command
@@ -58,6 +64,67 @@ def migration_inventory(codex, project, environment=None):
                         "graphflow_candidates": dict(sorted(candidates.items())),
                         "unverified_enabled_servers": sorted(unverified),
                         "scope": "effective_config_identity", "unrelated_servers_started": False}
+
+
+def panel_status(url: str, workspace: Path) -> dict:
+    origin = urlsplit(url)
+    if (origin.scheme != "http" or origin.hostname not in {"127.0.0.1", "::1"}
+            or origin.username is not None or origin.password is not None
+            or origin.path not in {"", "/"} or origin.query or origin.fragment or not origin.port):
+        raise ValueError("Panel must be an HTTP loopback origin with an explicit port.")
+    connection = HTTPConnection(origin.hostname, origin.port, timeout=3)
+    try:
+        connection.request("GET", "/api/graphflow/status", headers={
+            "Accept": "application/json", graphflow_workspace_check.HEADER: graphflow_workspace_check.new_claim(workspace)})
+        response = connection.getresponse()
+        if response.status != 200:
+            return {"status": "unexpected_http", "http_status": response.status}
+        body = response.read(8193)
+        if len(body) > 8192:
+            return {"status": "invalid_response"}
+        data = json.loads(body)
+        flags = ("available", "edit_queue", "test_enabled", "operator_key_configured")
+        if not isinstance(data, dict) or any(type(data.get(name)) is not bool for name in flags):
+            return {"status": "invalid_response"}
+        check = data.get("workspace_check")
+        return {"status": "reachable", "workspace_name_matches": data.get("workspace") == workspace.name,
+                "workspace_check": check if check in ("matched", "mismatch", "unavailable") else "unsupported",
+                **{name: data[name] for name in flags}}
+    except (OSError, HTTPException):
+        return {"status": "unreachable"}
+    except ValueError:
+        return {"status": "invalid_response"}
+    finally:
+        connection.close()
+
+
+def site_preflight(codex, project, workspace, panel_url):
+    panel = panel_status(panel_url, workspace)
+    _, migration = migration_inventory(codex, project)
+    actions = []
+    if not migration["starwish_configured"]:
+        actions.append("configure_starwish_mcp")
+    if "enabled" in migration["graphflow_candidates"].values():
+        actions.append("review_and_disable_independent_graphflow")
+    hook = None
+    if not actions:
+        hook = probe(codex, project, workspace, hooks_only=True, explain_trust=True)
+        if not hook["expected_hook_matches"]:
+            actions.append("check_project_hook_definition")
+        elif hook["project_session_start"] != [{"enabled": True, "trust": "trusted"}]:
+            actions.append("review_and_trust_project_hook")
+    if panel["status"] != "reachable":
+        actions.append("start_or_check_local_panel")
+    elif not (panel["available"] and panel["workspace_check"] == "matched"):
+        actions.append("check_panel_engine_and_workspace")
+    else:
+        if not (panel["edit_queue"] and panel["test_enabled"]):
+            actions.append("configure_panel_edit_queue_and_tests")
+        if not panel["operator_key_configured"]:
+            actions.append("configure_panel_operator_key")
+    return {"panel": panel, "migration_inventory": migration, "hook": hook, "actions": actions,
+            "status": "needs_setup" if actions else "ready_for_operator_verification",
+            "model_turn_started": False, "mcp_started": False, "operator_actions_performed": False}
 
 
 @contextmanager
@@ -495,12 +562,14 @@ def main():
                         help="With --hooks-only, report whether the exact hook definition is trusted in the user config.")
     modes.add_argument("--project-only", action="store_true", help="Exercise project tools without calling memory tools.")
     modes.add_argument("--config-only", action="store_true", help="Inspect effective registrations without starting MCP.")
+    modes.add_argument("--panel-preflight", metavar="LOOPBACK_URL",
+                       help="Report panel prerequisites and Codex hook/registration without starting MCP or running tests.")
     args = parser.parse_args()
     if args.isolate_other_hooks and not args.verify_hook:
         parser.error("--isolate-other-hooks requires --verify-hook.")
     if args.explain_hook_trust and not args.hooks_only:
         parser.error("--explain-hook-trust requires --hooks-only.")
-    inspection_mode = args.hooks_only or args.verify_hook or args.config_only
+    inspection_mode = args.hooks_only or args.verify_hook or args.config_only or args.panel_preflight is not None
     if inspection_mode and (args.symbol is not None or args.fixture_marker is not None):
         parser.error("Configuration and hook inspection do not accept fixture arguments.")
     if not inspection_mode and (not args.symbol or "#" not in args.symbol or not all(args.symbol.split("#", 1))):
@@ -517,6 +586,8 @@ def main():
         paths = (str(args.codex.resolve(strict=True)), args.project.resolve(strict=True), args.workspace.resolve(strict=True))
         if args.config_only:
             _, result = migration_inventory(*paths[:2])
+        elif args.panel_preflight is not None:
+            result = site_preflight(*paths, args.panel_preflight)
         elif args.verify_hook:
             result = verify_hook(*paths, isolate_other_hooks=args.isolate_other_hooks)
         else:

@@ -97,6 +97,11 @@ Windows 发布构建可用 `python tools/build_windows.py --with-graphflow` 随�
 加 `--graphflow-offline` 时只用已有 npm 缓存。引擎安装后先跑切片和图谱自检，
 再保留各实际安装依赖的许可/归属文件及 `THIRD-PARTY.json` 清单。发布包不含 Node.js、
 Git 或 npm 缓存；运行时仍需本机 Node.js 和 Git，但不需 npm 或单独注册 GraphFlow。
+GitHub 源码不包含运行模型。Windows 构建可用
+`--models-dir <绝对模型目录>`（也可设置 `STARWISH_MODELS_DIR`），该目录需包含
+`embed/small/model.onnx` 和 `embed/small/tokenizer.json`，如已安装的可信星愿
+运行目录中的 `models`。构建只复制这两个必需文件；模型来源不得位于将被重建
+的输出目录内。仅从源码运行 GraphFlow 项目工具不需要向量模型。
 优先使用显式 `STARWISH_GRAPHFLOW_PREFIX`，否则优先随包引擎，再找用户目录。
 检查暂存目录可运行 `python tools/graphflow_engine.py bundle-windows --prefix <绝对应用目录>`；
 该命令只准备引擎，不生成 Windows 启动器。
@@ -439,6 +444,18 @@ Codex 新进程实际加载的用户配置路径、配置档、该定义的信�
 Windows 上是否存在仅大小写或分隔符不同的键。只输出诊断状态，不输出哈希、
 其他配置或命令，也不开启会话。若记录缺失，在桌面以对应目录的会话重新检查，
 或从该目录启动同一 Codex 后使用 `/hooks` 单独审查项目的 `SessionStart`。
+
+现场只读预检可一次核对面板、客户端注册和 Hook：
+
+```powershell
+$codex = (Get-Command codex.exe).Source
+python tools/graphflow_codex_probe.py --codex $codex --project 'D:/path/to/codex-project' --workspace (Get-Location).Path --panel-preflight http://127.0.0.1:17860
+```
+
+预检仅访问回环面板的状态接口，用一次性校验值核对规范化 Git 根目录，
+不返回绝对路径；旧版本不支持校验时，不以目录同名代替。它不替代正式项目的
+符号查询，也不会启动 MCP、运行模型或签收人工审批。`ready_for_operator_verification`
+仅表示可开始网页和 Hook 的现场验收，不表示已迁移。
 
 ```powershell
 $codex = (Get-Command codex.exe).Source
@@ -898,6 +915,28 @@ Hook 验收。
 看到第二页及正确源码预览；确认导入由 API 回归验证，未在浏览器重跑完结路径。
 源码更新前完整 GraphFlow 回归 91 项（89 通过、2 项可选打包测试跳过），
 归档完整性、整理分类和两种 MCP STDIO 接入的专项验证通过。
+
+公开源码干净检出续：从 GitHub 的 `6fb3e47` 重拉，独立目录按锁安装固定引擎
+并通过源码切片和关系图自检。隔离浏览器完整通过旧待办翻页、改变目标注销旧预览、
+重新预览、确认入账；独立审计确认恰好一条待办且日志与源码不变。
+启用可选 Windows 打包测试时，首次复现缺少源码仓库未分发的 ONNX 模型。
+构建器新增独立模型目录输入，并在清理输出前检查两个必需文件及路径。
+在干净检出只叠加该构建补丁和对应测试，使用现有可信模型目录重跑：92 项
+GraphFlow 测试全部通过（无跳过）。实际编译目录版和单文件版，真实 Codex
+从两种入口完成源码切片和只读宏重放，单文件也通过并发冷启动；两种 STDIO
+实现的接入专项通过。使用既有嵌入式 Python 和 npm 缓存，不等于重新发布安装包。
+
+现场预检续：新增 `--panel-preflight`，只读取本机面板、实际 Codex 注册和
+Hook。实机返回面板不可达、星愿已配置、无可识别独立 GraphFlow、项目
+Hook 定义正确但持久信任缺失；环境拒绝启动正式服务的命令，未改正式配置或
+批准操作。下一步启动面板、审查并持久信任项目 Hook，再做人工签收。
+
+现场工作区核对续：预检已加精确回环校验，同名但不同 Git 根拒绝，老面板不支持
+时也不报就绪。挑战值每次不同，面板只返回匹配结果，不回显路径或挑战值，
+且仍遵守回环同源限制。实际复查面板仍不可达，Hook 持久信任缺失；未授权
+编辑、测试或更改实际客户端设置。
+完整回归 95 项（93 通过、2 项可选 Windows 打包测试跳过），包括同名 Git 根
+拒绝、只返回结论、旧面板不报就绪和跨站请求拒绝。
 
 不要重置已有工作树或修改 GraphFlow 管理的项目规则块。
 

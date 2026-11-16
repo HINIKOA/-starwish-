@@ -18,7 +18,7 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import config, graphflow
+from app import config, graphflow, graphflow_workspace_check
 from app.graphflow_routes import router
 from tools import graphflow_codex, graphflow_codex_probe
 
@@ -66,6 +66,101 @@ def local_model():
 
 
 class CodexProfileTest(unittest.TestCase):
+    def test_site_preflight_reports_missing_prerequisites_without_actions(self):
+        inventory = {"starwish_configured": True, "graphflow_candidates": {}, "unrelated_servers_started": False}
+        hook = {"expected_hook_matches": True, "project_session_start": [{"enabled": True, "trust": "untrusted"}]}
+        with (patch.object(graphflow_codex_probe, "migration_inventory", return_value=({}, inventory)),
+              patch.object(graphflow_codex_probe, "panel_status", return_value={"status": "unreachable"}),
+              patch.object(graphflow_codex_probe, "probe", return_value=hook) as inspect_hook):
+            report = graphflow_codex_probe.site_preflight("codex", Path("."), Path("."), "http://127.0.0.1:17860")
+        self.assertEqual(report["actions"], ["review_and_trust_project_hook", "start_or_check_local_panel"])
+        self.assertFalse(report["mcp_started"] or report["model_turn_started"] or report["operator_actions_performed"])
+        inspect_hook.assert_called_once_with("codex", Path("."), Path("."), hooks_only=True, explain_trust=True)
+
+    def test_panel_status_only_requests_fixed_local_json_and_does_not_follow_redirects(self):
+        urls = []
+        status = {"workspace": "fixture", "available": True, "edit_queue": True, "test_enabled": False,
+                  "operator_key_configured": False, "extra": "do-not-report"}
+        expected = Path("fixture")
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                urls.append(self.path)
+                if len(urls) > 1:
+                    self.send_response(302)
+                    self.send_header("Location", "https://outside.invalid")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+                claim = self.headers.get(graphflow_workspace_check.HEADER, "")
+                check = "matched" if graphflow_workspace_check.matches(expected, claim) else "mismatch"
+                self.wfile.write(json.dumps({**status, "workspace_check": check}).encode())
+
+            def log_message(self, *_):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_port}"
+                report = graphflow_codex_probe.panel_status(url, Path("fixture"))
+                self.assertEqual(report, {"status": "reachable", "workspace_name_matches": True, "available": True,
+                                          "workspace_check": "matched",
+                                          "edit_queue": True, "test_enabled": False, "operator_key_configured": False})
+                self.assertEqual(graphflow_codex_probe.panel_status(url, Path("fixture")),
+                                 {"status": "unexpected_http", "http_status": 302})
+                for invalid in ("http://example.invalid:80", "http://127.0.0.1", url + "/custom", url + "?q=one"):
+                    with self.assertRaises(ValueError):
+                        graphflow_codex_probe.panel_status(invalid, Path("fixture"))
+                self.assertEqual(urls, ["/api/graphflow/status"] * 2)
+            finally:
+                server.shutdown()
+                worker.join(timeout=5)
+
+    def test_panel_rejects_same_named_git_project_and_only_reports_match(self):
+        with tempfile.TemporaryDirectory() as root:
+            expected = Path(root, "one", "fixture").resolve()
+            other = Path(root, "two", "fixture").resolve()
+            for repo in (expected, other):
+                (repo / ".git").mkdir(parents=True)
+            ready = FastAPI()
+            ready.include_router(router)
+            endpoint = "/api/graphflow/status"
+            claim = graphflow_workspace_check.new_claim(expected)
+            headers = {graphflow_workspace_check.HEADER: claim}
+            self.assertNotIn(str(expected), claim)
+            self.assertNotEqual(claim, graphflow_workspace_check.new_claim(expected))
+            with TestClient(ready, base_url="http://127.0.0.1:17860", client=("127.0.0.1", 54000)) as client:
+                for repo, verdict in ((expected, "matched"), (other, "mismatch")):
+                    with self.subTest(repo=repo), patch.dict(os.environ, {"STARWISH_GRAPHFLOW_WORKSPACE": str(repo)}):
+                        response = client.get(endpoint, headers=headers)
+                        self.assertEqual(response.json()["workspace"], expected.name)
+                        self.assertEqual(response.json()["workspace_check"], verdict)
+                        self.assertNotIn(claim, response.text)
+                        self.assertNotIn(str(repo), response.text)
+                        self.assertTrue("workspace_check" not in client.get(endpoint).json())
+                        self.assertEqual(client.get(endpoint, headers={
+                            **headers, "Origin": "http://elsewhere.invalid"}).status_code, 403)
+            inventory = {"starwish_configured": True, "graphflow_candidates": {}}
+            hook = {"expected_hook_matches": True, "project_session_start": [{"enabled": True, "trust": "trusted"}]}
+            for verdict in ("mismatch", "unsupported", "matched"):
+                panel = {"status": "reachable", "available": True, "workspace_name_matches": True,
+                         "workspace_check": verdict, "edit_queue": True, "test_enabled": True,
+                         "operator_key_configured": True}
+                with (patch.object(graphflow_codex_probe, "migration_inventory", return_value=({}, inventory)),
+                      patch.object(graphflow_codex_probe, "panel_status", return_value=panel),
+                      patch.object(graphflow_codex_probe, "probe", return_value=hook)):
+                    result = graphflow_codex_probe.site_preflight("codex", expected, expected, "http://127.0.0.1:17860")
+                if verdict == "matched":
+                    self.assertEqual(result["actions"], [])
+                    self.assertEqual(result["status"], "ready_for_operator_verification")
+                    self.assertFalse(result["operator_actions_performed"])
+                else:
+                    self.assertEqual(result["actions"], ["check_panel_engine_and_workspace"])
+                    self.assertEqual(result["status"], "needs_setup")
+
     def test_migration_inventory_uses_only_identity_fields(self):
         rows = [
             {"name": "starwish", "enabled": True, "transport": {"args": ["graphflow"]}},

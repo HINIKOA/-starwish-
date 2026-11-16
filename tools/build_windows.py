@@ -185,7 +185,17 @@ def pack_onefile(folder: Path, dest: Path, version: str, stub: bytes) -> Path:
     return dest
 
 
-def copy_app(out: Path):
+def embedding_assets(models_dir: Path | None = None) -> tuple[Path, Path]:
+    root = models_dir or Path(os.environ.get("STARWISH_MODELS_DIR") or (ROOT / "models"))
+    small = root.resolve() / "embed" / "small"
+    files = (small / "model.onnx", small / "tokenizer.json")
+    if any(not path.is_file() or not path.stat().st_size for path in files):
+        raise SystemExit("缺少内置向量模型：请用 --models-dir 指向含 embed/small/model.onnx 和 tokenizer.json 的模型目录。")
+    return files
+
+
+def copy_app(out: Path, *, models_dir: Path | None = None):
+    files = embedding_assets(models_dir)
     for name in COPY:
         s = ROOT / name
         if not s.exists():
@@ -197,10 +207,10 @@ def copy_app(out: Path):
             shutil.copy2(s, d)
     copy_graphflow_tools(out)
     strip_dev_text(out)
-    small = ROOT / "models" / "embed" / "small"
-    if not (small / "model.onnx").exists():
-        raise SystemExit("缺少内置向量模型 models/embed/small/model.onnx")
-    shutil.copytree(small, out / "models" / "embed" / "small")
+    small = out / "models" / "embed" / "small"
+    small.mkdir(parents=True)
+    for path in files:
+        shutil.copy2(path, small / path.name)
     (out / "MCP接入.bat").write_bytes(
         "@echo off\r\nchcp 65001 >nul\r\nREM 供 Claude Desktop / Cursor 等以 MCP stdio 方式调用\r\n"
         'cd /d "%~dp0"\r\n"runtime\\python.exe" mcp_server.py\r\n'.encode("utf-8"))
@@ -264,6 +274,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cache", default=str(ROOT / "build" / "cache"))
     ap.add_argument("--out", default=str(ROOT / "dist"))
+    ap.add_argument("--models-dir", type=Path, help="模型目录，缺省使用 STARWISH_MODELS_DIR 或源码下的 models")
     ap.add_argument("--no-voice-models", action="store_true")
     ap.add_argument("--no-onefile", action="store_true", help="只生成文件夹版")
     ap.add_argument("--cc", default="x86_64-w64-mingw32-gcc", help="Windows x64 MinGW-compatible C compiler")
@@ -274,11 +285,14 @@ def main():
     if a.graphflow_offline and not a.with_graphflow:
         ap.error("--graphflow-offline requires --with-graphflow")
     cache, out = Path(a.cache), Path(a.out) / APP_NAME
+    files = embedding_assets(a.models_dir)
+    if any(path.resolve().is_relative_to(out.resolve()) for path in files):
+        ap.error("--models-dir must be outside the build output directory")
     cache.mkdir(parents=True, exist_ok=True)
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
-    copy_app(out)
+    copy_app(out, models_dir=a.models_dir)
     if a.with_graphflow:
         if __package__:
             from .graphflow_engine import bundle_windows
