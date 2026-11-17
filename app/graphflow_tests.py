@@ -10,7 +10,6 @@ import secrets
 import shutil
 import signal
 import sqlite3
-import stat
 import subprocess
 import tempfile
 import threading
@@ -95,14 +94,22 @@ def _changed(workspace: Path) -> list[str]:
 
 
 def _approval_inputs(workspace: Path, changes: list[str]) -> list:
-    if not changes:
-        return []
     if len(changes) > graphflow.MAX_FILES:
         raise GraphFlowError("改动文件过多，无法生成测试审批。", 413)
     git = shutil.which("git")
     if not git:
         raise GraphFlowError("测试审批需要 Git。", 503)
     try:
+        head = subprocess.run([git, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], cwd=workspace,
+                              capture_output=True, timeout=10)
+        if head.returncode == 0 and re.fullmatch(rb"[0-9a-f]{40}(?:[0-9a-f]{24})?", head.stdout.strip()):
+            revision = head.stdout.strip().decode("ascii")
+        elif head.returncode == 1 and not head.stdout.strip() and not head.stderr.strip():
+            revision = None  # A new repository can have an index but no HEAD.
+        else:
+            raise GraphFlowError("无法校验测试审批的 Git 提交。", 503)
+        if not changes:
+            return [revision, []]
         index = subprocess.run([git, "ls-files", "--stage", "-z"], cwd=workspace, capture_output=True,
                                check=True, timeout=10).stdout
         entries = {}
@@ -123,16 +130,11 @@ def _approval_inputs(workspace: Path, changes: list[str]) -> list:
                 continue
             source = workspace.joinpath(*path.split("/"))
             try:
-                resolved = source.resolve(strict=False)
-                if resolved != source or resolved.is_relative_to(soul):
-                    raise GraphFlowError("测试审批无法读取链接或灵魂包中的改动文件。", 409)
-                metadata = source.stat()
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink > 1:
-                    raise GraphFlowError("测试审批不支持非常规文件或硬链接。", 409)
+                metadata = graphflow._source_metadata(source, soul)
                 allowance = min(graphflow.MAX_FILE_BYTES, graphflow.MAX_BYTES - total)
                 if metadata.st_size > allowance:
                     raise GraphFlowError("改动超出测试审批的内容校验预算。", 413)
-                with source.open("rb") as handle:
+                with graphflow._open_source(source, soul, metadata) as handle:
                     data = handle.read(allowance + 1)
                 if len(data) > allowance:
                     raise GraphFlowError("改动超出测试审批的内容校验预算。", 413)
@@ -140,8 +142,12 @@ def _approval_inputs(workspace: Path, changes: list[str]) -> list:
                 digest = hashlib.sha256(data).hexdigest()
             except FileNotFoundError:
                 digest = None
+            except GraphFlowError as exc:
+                if exc.status_code not in (404, 409):
+                    raise
+                raise GraphFlowError("测试审批无法校验该改动文件。", 409) from exc
             inputs.append([path, stage, digest])
-        return inputs
+        return [revision, inputs]
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
         raise GraphFlowError("无法校验测试审批的 Git 改动。", 503) from exc
 
@@ -305,7 +311,8 @@ def _read_runs(workspace: Path, columns: str, predicate: str = "", args: tuple =
                     CASE WHEN state='running' AND deadline<? THEN 'interrupted' ELSE state END AS visible_state,
                     ROW_NUMBER() OVER (ORDER BY started DESC,id) AS position FROM runs
             ), visible AS (
-                SELECT r.id,r.profile,v.visible_state AS state,r.exit_code,r.duration_ms,r.output,r.truncated,r.started
+                SELECT r.id,r.profile,v.visible_state AS state,r.exit_code,r.duration_ms,r.output,r.truncated,
+                       r.started,r.approval_sha256
                 FROM ranked v JOIN runs r ON r.id=v.id
                 WHERE v.visible_state='running' OR (v.started>=? AND v.position<=?)
             )
@@ -335,6 +342,30 @@ def evidence_record(workspace: Path, run_id: str) -> dict:
     if not rows:
         raise GraphFlowError("未找到已结束的测试记录。", 404)
     return dict(rows[0])
+
+
+def evidence_plan_states(workspace: Path, run_ids: list[str]) -> dict[str, str]:
+    ids = list(dict.fromkeys(run_ids))
+    states = dict.fromkeys(ids, "unavailable")
+    if not ids or not enabled():
+        return states
+    ids = [run_id for run_id in ids if re.fullmatch(r"[0-9a-f]{32}", run_id)]
+    if not ids:
+        return states
+    slots = ",".join("?" for _ in ids)
+    try:
+        records = _read_runs(workspace, "id,profile,approval_sha256",
+                             f"WHERE id IN ({slots}) AND state!='running'", tuple(ids), limit=len(ids))
+        if not records:
+            return states
+        current = {item["profile"]: item["approval_sha256"] for item in plan(workspace)["profiles"]}
+    except GraphFlowError:
+        return states
+    for record in records:
+        saved, live = record["approval_sha256"], current.get(record["profile"])
+        if live and isinstance(saved, str) and re.fullmatch(r"[0-9a-f]{64}", saved):
+            states[record["id"]] = "matching_plan" if live == saved else "changed_plan"
+    return states
 
 
 def logs(workspace: Path, run_id: str, offset: int = 0, *, page_size: int = MAX_PAGE_CHARS) -> dict:

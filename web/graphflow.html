@@ -206,6 +206,14 @@
         <button id="gf-workflow-replay" class="primary" type="button" disabled>重放只读步骤</button>
       </div>
     </form>
+    <div id="gf-workflow-pin-controls" hidden>
+      <label for="gf-workflow-pin-key">固定宏审批密钥</label>
+      <input id="gf-workflow-pin-key" type="password" autocomplete="off">
+      <div class="gf-actions">
+        <button id="gf-workflow-pin" type="button" disabled>固定此代码包</button>
+        <button id="gf-workflow-unpin" type="button" hidden>取消固定</button>
+      </div>
+    </div>
     <p id="gf-workflow-status" class="gf-muted gf-hint" role="status"></p>
     <pre id="gf-workflow-output" class="gf-code" tabindex="0" aria-label="工作流计划和结果" hidden></pre>
   </details>
@@ -251,6 +259,6 @@
     </details>
   </details>
 </main>
-<script type="module" src="/static/graphflow.js?v=14"></script>
+<script type="module" src="/static/graphflow.js?v=16"></script>
 </body>
 </html>

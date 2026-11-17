@@ -8,7 +8,6 @@ import os
 import re
 import secrets
 import shutil
-import stat
 import subprocess
 import threading
 import time
@@ -57,15 +56,11 @@ def _read_tracked(workspace: Path, path: str) -> bytes:
         if len(rows) != 1 or os.fsdecode(name) != path or not re.fullmatch(rb"100(?:644|755) [0-9a-f]+ 0", meta):
             raise GraphFlowError("目标必须是已跟踪、无冲突的常规文件。", 404)
         source = workspace.joinpath(*relative.parts)
-        resolved = source.resolve(strict=True)
-        if resolved != source or resolved.is_relative_to(config.SOUL_DIR.resolve()):
-            raise GraphFlowError("无法读取目标：路径指向工作区外或灵魂包。", 404)
-        info = source.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
-            raise GraphFlowError("不支持非常规文件或硬链接。", 404)
+        soul = config.SOUL_DIR.resolve()
+        info = graphflow._source_metadata(source, soul)
         if info.st_size > graphflow.MAX_FILE_BYTES:
             raise GraphFlowError("目标文件超出预览大小限制。", 413)
-        with source.open("rb") as handle:
+        with graphflow._open_source(source, soul, info) as handle:
             data = handle.read(graphflow.MAX_FILE_BYTES + 1)
         if len(data) > graphflow.MAX_FILE_BYTES:
             raise GraphFlowError("目标文件超出预览大小限制。", 413)

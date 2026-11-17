@@ -504,7 +504,9 @@ class CodexProfileTest(unittest.TestCase):
             self.assertEqual(verified["starwish"], "connected")
             self.assertEqual(installed["legacy"]["graphflow"], "disabled")
             self.assertIn("unapproved-test-rejected", installed["checks"])
-            self.assertTrue({"edit-diff-without-receipt", "impact-symbol", "impact-caller", "change-plan-approval-gates",
+            self.assertTrue({"task-backlog", "single-file-index-refresh", "edit-diff-without-receipt",
+                             "impact-symbol", "impact-caller",
+                             "change-plan-approval-gates",
                              "workflow-preview", "read-only-macro-replay"}
                             <= set(installed["checks"]))
             self.assertFalse(installed["memory_tools_called"] or installed["model_turn_started"])
@@ -752,6 +754,7 @@ class CodexProfileTest(unittest.TestCase):
                         self.assertEqual(before_undo["evidence"][0]["source_state"], "matching_bytes")
                         self.assertEqual(before_undo["historical_test_verification"]["state"], "passed")
                         self.assertEqual(before_undo["historical_test_verification"]["run_id"], outcome["run_id"])
+                        self.assertEqual(before_undo["historical_test_verification"]["plan_state"], "matching_plan")
                         brief = call("gf_read", targets=["@brief"])
                         self.assertIn("calculate_fixture reviewed.", brief)
                         self.assertIn("[passed]", brief)
@@ -811,7 +814,7 @@ class CodexProfileTest(unittest.TestCase):
                 self.assertEqual(context["outcomes"][0]["task_id"], task["id"])
                 self.assertEqual(context["outcomes"][0]["evidence"][0]["source_state"], "changed")
                 self.assertEqual(context["outcomes"][0]["historical_test_verification"],
-                                 before_undo["historical_test_verification"])
+                                 {**before_undo["historical_test_verification"], "plan_state": "changed_plan"})
                 git_commit = ["git", "-c", "user.name=StarWish", "-c", "user.email=fixture@example.test",
                               "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git", "commit", "-qm"]
                 subprocess.run([*git_commit, "fixture history"], cwd=repo, check=True, capture_output=True)
@@ -823,6 +826,29 @@ class CodexProfileTest(unittest.TestCase):
                 self.assertEqual(history["pairs"], [{"files": ["caller.js", "declaration.js"],
                                                       "co_commit_count": 2, "confidence": 1.0}])
                 self.assertFalse(history["persisted"])
+                (repo / "barrel.js").write_bytes(b"export { collectEntry } from './declaration.js';\n")
+                (repo / "forwarded.js").write_bytes(b"import { collectEntry } from './barrel.js';\ncollectEntry();\n")
+                (repo / "other.js").write_bytes(b"export function collectEntry() { return 56; }\n")
+                subprocess.run(["git", "add", "--", "barrel.js", "forwarded.js", "other.js"],
+                               cwd=repo, check=True, capture_output=True)
+                with patch.dict(os.environ, request_env), patch.object(config, "SOUL_DIR", root / "soul"):
+                    api = FastAPI()
+                    api.include_router(router)
+                    with TestClient(api, base_url="http://127.0.0.1:17860", client=("127.0.0.1", 54000)) as panel:
+                        def check_forwarded(resolution, chain):
+                            target = {"target": "declaration.js#collectEntry"}
+                            result = json.loads(call("graphflow_impact", **target))
+                            response = panel.post("/api/graphflow/impact", json=target)
+                            self.assertEqual(response.status_code, 200, response.text)
+                            self.assertEqual(result["impacts"], response.json()["impacts"])
+                            record = next(row for row in result["impacts"][0]["importers"]
+                                          if row["file"] == "forwarded.js")
+                            self.assertEqual(record["resolution"], resolution)
+                            self.assertEqual(record.get("reexport_chain"), chain)
+
+                        check_forwarded("reexport_module", [{"file": "barrel.js", "line": 1}])
+                        (repo / "barrel.js").write_bytes(b"export { collectEntry } from './other.js';\n")
+                        check_forwarded("other_module", None)
                 trace = repo / ".graphflow" / "trajectories.jsonl"
                 trace_data = "\n".join(json.dumps({"kind": "read", "ok": True, "sessionId": "fixture-private-session",
                                                     "ts": str(n), "items": ["caller.js", "declaration.js"]})

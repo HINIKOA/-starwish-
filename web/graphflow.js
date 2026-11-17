@@ -243,8 +243,9 @@ for (const [index, button] of artifactButtons.entries()) {
 
 function formatImpact(payload) {
   if (!Array.isArray(payload.impacts)) throw new Error("服务未返回影响分析结果。");
-  const lines = ["静态分析：调用点为候选，可能误报或漏报。导入指向其他模块时，仍可能经由重导出关联。"];
-  const resolutions = { direct_module: "直接指向目标模块", other_module: "指向其他模块", unresolved: "未解析" };
+  const lines = ["静态分析：调用点为候选；未确认重导出不代表没有依赖。"];
+  const resolutions = { direct_module: "直接指向目标模块", reexport_module: "经命名重导出指向目标",
+    other_module: "指向其他模块", unresolved: "未解析" };
   for (const item of payload.impacts) {
     lines.push("", `${payload.file}:${item.line}–${item.end_line} · ${item.symbol}`);
     lines.push(`调用候选：${item.total_call_sites}（显示 ${item.call_sites.length} 条）`);
@@ -255,7 +256,8 @@ function formatImpact(payload) {
     for (const site of item.importers) {
       const kind = resolutions[site.resolution];
       const detail = kind ? ` · ${kind}${site.resolved_file ? `：${site.resolved_file}` : ""}` : "";
-      lines.push(`  ${site.file}:${site.line}${detail}`);
+      const chain = site.reexport_chain?.map(({ file, line }) => `${file}:${line}`).join(" → ");
+      lines.push(`  ${site.file}:${site.line}${detail}${chain ? `（${chain}）` : ""}`);
     }
   }
   if (payload.truncated) lines.push("", "匹配符号较多，仅显示前 6 项。");
@@ -668,6 +670,9 @@ const workflowPreview = byId("gf-workflow-preview");
 const workflowReplay = byId("gf-workflow-replay");
 const workflowStatus = byId("gf-workflow-status");
 const workflowOutput = byId("gf-workflow-output");
+const workflowPin = byId("gf-workflow-pin");
+const workflowUnpin = byId("gf-workflow-unpin");
+const workflowPinKey = byId("gf-workflow-pin-key");
 const operations = { read: "读取代码", read_batch: "批量读取代码", impact: "分析影响", changes: "查看 Git 改动",
   cochange: "分析 Git 历史共改（仅建议）", test_plan: "生成测试建议（不运行）" };
 let workflowCatalog = null;
@@ -676,6 +681,12 @@ let workflowReceipt = null;
 let workflowSaveRequest = null;
 
 function workflowControls() {
+  const persistence = workflowCatalog?.find((item) => item.name === workflowSelect.value)?.persistence;
+  byId("gf-workflow-pin-controls").hidden = !persistence;
+  workflowPin.hidden = persistence !== "candidate";
+  workflowPin.disabled = workflowBusy || !workflowReceipt || !workflowPinKey.value;
+  workflowUnpin.hidden = persistence !== "pinned";
+  workflowUnpin.disabled = workflowBusy || !workflowPinKey.value;
   workflowSelect.disabled = workflowBusy || !workflowCatalog?.length;
   workflowPreview.disabled = workflowSelect.disabled;
   workflowReplay.disabled = workflowBusy || !workflowReceipt;
@@ -716,24 +727,52 @@ async function workflowAction(fn) {
   }
 }
 
-function workflowRequest(action, body) {
+function workflowRequest(action, body, operator = false) {
+  const headers = { "Content-Type": "application/json" };
+  if (operator) headers["X-StarWish-Operator-Key"] = workflowPinKey.value;
   return request(`/api/graphflow/workflow/${action}`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    method: "POST", headers, body: JSON.stringify(body),
   });
 }
 
+async function refreshWorkflows() {
+  const current = workflowSelect.value;
+  const items = await request("/api/graphflow/workflow/catalog");
+  workflowCatalog = items;
+  workflowSelect.replaceChildren();
+  for (const item of items) {
+    workflowSelect.add(new Option(item.title + (item.persistence === "pinned" ? " · 已固定" : ""), item.name));
+  }
+  if (items.some((item) => item.name === current)) workflowSelect.value = current;
+  workflowInputState();
+}
+
 workflows.addEventListener("toggle", () => {
-  if (!workflows.open || workflowCatalog) return;
-  workflowAction(async () => {
-    const items = await request("/api/graphflow/workflow/catalog");
-    workflowCatalog = items;
-    for (const item of items) workflowSelect.add(new Option(item.title, item.name));
-    workflowInputState();
-  });
+  if (!workflows.open) return;
+  workflowAction(refreshWorkflows);
 });
 workflowSelect.addEventListener("change", workflowInputState);
 workflowTarget.addEventListener("input", clearWorkflowReceipt);
 workflowQuery.addEventListener("input", clearWorkflowReceipt);
+workflowPinKey.addEventListener("input", workflowControls);
+
+workflowPin.addEventListener("click", () => {
+  if (!workflowReceipt) return;
+  workflowAction(async () => {
+    const { name, plan_sha256 } = workflowReceipt;
+    await workflowRequest("pin", { name, plan_sha256 }, true);
+    await refreshWorkflows();
+    workflowStatus.textContent = "已固定。即使关闭轨迹采集，也能预览和重放。";
+  });
+});
+
+workflowUnpin.addEventListener("click", () => {
+  workflowAction(async () => {
+    await workflowRequest("unpin", { name: workflowSelect.value }, true);
+    await refreshWorkflows();
+    workflowStatus.textContent = "已取消固定。近期轨迹仍满足条件时，候选仍可使用。";
+  });
+});
 
 byId("gf-workflow-form").addEventListener("submit", (event) => {
   event.preventDefault();

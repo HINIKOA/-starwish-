@@ -17,9 +17,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.request
@@ -106,10 +109,70 @@ def runtime(cache: Path, out: Path):
     rt = out / "runtime"
     with zipfile.ZipFile(pyzip) as z:
         z.extractall(rt)
+    runtime_pth(rt)
+    install_wheels(wheels(cache), rt / "Lib" / "site-packages")
+
+
+def runtime_pth(rt: Path):
     tag = "".join(PY_VER.split(".")[:2])
     (rt / f"python{tag}._pth").write_text(
         f"python{tag}.zip\n.\nLib\\site-packages\n..\nimport site\n", encoding="utf-8")
-    install_wheels(wheels(cache), rt / "Lib" / "site-packages")
+
+
+def _plain_runtime_path(path: Path, directory: bool = False) -> bool:
+    info = path.lstat()
+    type_check = stat.S_ISDIR if directory else stat.S_ISREG
+    return type_check(info.st_mode) and not (
+        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def runtime_inputs(directory: Path) -> tuple[Path, tuple[Path, ...]]:
+    source = directory.resolve()
+    tag = "".join(PY_VER.split(".")[:2])
+    site = source / "Lib" / "site-packages"
+    required = {"python.exe", "pythonw.exe", f"python{tag}.dll", f"python{tag}.zip", "LICENSE.txt"}
+    try:
+        core = tuple(sorted(p for p in source.iterdir()
+                            if p.name in required or p.suffix.lower() in {".dll", ".pyd"}))
+        if not required.issubset(p.name for p in core) or not all(_plain_runtime_path(p) for p in core):
+            raise ValueError
+        if not all(_plain_runtime_path(p, directory=True) for p in (site.parent, site)):
+            raise ValueError
+        for root, dirs, files in os.walk(site, onerror=_raise_runtime_walk_error):
+            if any(not _plain_runtime_path(Path(root) / name, directory=True) for name in dirs):
+                raise ValueError
+            if any(not _plain_runtime_path(Path(root) / name) for name in files):
+                raise ValueError
+        probe = (
+            "import platform, sys, pathlib; "
+            f"assert platform.python_version() == {PY_VER!r} and platform.machine().upper() == 'AMD64' "
+            "and sys.platform == 'win32' and sys.maxsize > 2**32; "
+            "import fastapi, mcp, uvicorn, sqlite3, webview, onnxruntime, sherpa_onnx; "
+            "site = pathlib.Path(sys.argv[1]); "
+            "assert all(pathlib.Path(m.__file__).resolve().is_relative_to(site) "
+            "for m in (fastapi, mcp, uvicorn, webview, onnxruntime, sherpa_onnx))"
+        )
+        subprocess.run([str(source / "python.exe"), "-I", "-B", "-c", probe, str(site)],
+                       cwd=source, check=True, timeout=30, capture_output=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"--runtime-dir requires a complete, trusted Windows x64 Python {PY_VER} runtime.") from exc
+    return site, core
+
+
+def _raise_runtime_walk_error(error: OSError) -> None:
+    raise error
+
+
+def copy_runtime(out: Path, inputs: tuple[Path, tuple[Path, ...]]):
+    site, core = inputs
+    destination = out / "runtime"
+    destination.mkdir()
+    for path in core:
+        shutil.copy2(path, destination / path.name)
+    shutil.copytree(site, destination / "Lib" / "site-packages",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    runtime_pth(destination)
 
 
 def launcher(out: Path, *, cc="x86_64-w64-mingw32-gcc", windres="x86_64-w64-mingw32-windres"):
@@ -143,6 +206,46 @@ def read_trailer(exe: Path) -> dict:
     return {"offset": off, "size": size, "tag": tr[24:].split(b"\0")[0].decode(), "total": total}
 
 
+def release_source(commit: str) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit):
+        raise SystemExit("--release-commit requires a full lowercase Git commit hash.")
+    try:
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=15).strip()
+        changes = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"],
+                                          cwd=ROOT, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit("Cannot verify the release checkout.") from exc
+    if head != commit or changes.strip():
+        raise SystemExit("--release-commit requires a clean checkout at the specified commit.")
+    return head
+
+
+def write_release_manifest(exe: Path, version: str, source_commit: str | None = None) -> Path:
+    trailer = read_trailer(exe)
+    offset, size = trailer["offset"], trailer["size"]
+    if offset < 2 or size == 0 or offset + size + 64 != trailer["total"]:
+        raise ValueError("Invalid Windows artifact ranges.")
+    artifact, payload = hashlib.sha256(), hashlib.sha256()
+    with exe.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            start = stream.tell() - len(chunk)
+            left, right = max(0, offset - start), min(len(chunk), offset + size - start)
+            if left < right:
+                payload.update(chunk[left:right])
+            artifact.update(chunk)
+    digest = payload.hexdigest()
+    if trailer["tag"] != f"{version}-{digest[:10]}":
+        raise ValueError("Windows artifact payload and version tag do not match.")
+    info = {"artifact": exe.name, "version": version, "platform": "windows-amd64",
+            "bytes": trailer["total"], "sha256": artifact.hexdigest(), "payload_sha256": digest,
+            "cache_tag": trailer["tag"], "source_commit": source_commit}
+    dest = exe.with_suffix(".json")
+    temp = dest.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temp, dest)
+    return dest
+
+
 def onefile(folder: Path, dest: Path, version: str, *, cc="x86_64-w64-mingw32-gcc",
             windres="x86_64-w64-mingw32-windres") -> Path:
     import tempfile
@@ -157,7 +260,6 @@ def onefile(folder: Path, dest: Path, version: str, *, cc="x86_64-w64-mingw32-gc
 
 
 def pack_onefile(folder: Path, dest: Path, version: str, stub: bytes) -> Path:
-    import hashlib
     import tempfile
     if not stub.startswith(b"MZ"):
         raise ValueError("The onefile stub must be a Windows executable.")
@@ -226,7 +328,25 @@ def copy_graphflow_tools(out: Path):
         shutil.copy2(ROOT / "tools" / "graphflow_runtime" / name, lock / name)
 
 
-def voice_models(out: Path):
+def voice_assets(directory: Path) -> tuple[Path, ...]:
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from app.voice.models import MODELS
+
+    source = directory.resolve()
+    files = tuple(source / spec["file"] for spec in MODELS.values())
+    if any(path.is_symlink() or not path.is_file() or path.stat().st_size <= 1000 for path in files):
+        raise SystemExit("--voice-models-dir requires both local, non-empty StarWish voice ONNX files.")
+    return files
+
+
+def voice_models(out: Path, files: tuple[Path, ...] = ()):
+    if files:
+        destination = out / "models" / "voice"
+        destination.mkdir(parents=True, exist_ok=True)
+        for path in files:
+            shutil.copy2(path, destination / path.name)
+        return
     os.environ["STARWISH_MODELS_DIR"] = str(out / "models")
     sys.path.insert(0, str(ROOT))
     from app import config
@@ -275,8 +395,12 @@ def main():
     ap.add_argument("--cache", default=str(ROOT / "build" / "cache"))
     ap.add_argument("--out", default=str(ROOT / "dist"))
     ap.add_argument("--models-dir", type=Path, help="模型目录，缺省使用 STARWISH_MODELS_DIR 或源码下的 models")
-    ap.add_argument("--no-voice-models", action="store_true")
+    ap.add_argument("--runtime-dir", type=Path, help="复用可信的本机嵌入式 Python runtime，不下载 wheels")
+    voice = ap.add_mutually_exclusive_group()
+    voice.add_argument("--no-voice-models", action="store_true")
+    voice.add_argument("--voice-models-dir", type=Path, help="使用本机已有的两个声纹 ONNX 模型，不下载")
     ap.add_argument("--no-onefile", action="store_true", help="只生成文件夹版")
+    ap.add_argument("--release-commit", help="仅允许在对应的干净 Git 检出中标记发布来源")
     ap.add_argument("--cc", default="x86_64-w64-mingw32-gcc", help="Windows x64 MinGW-compatible C compiler")
     ap.add_argument("--windres", default="x86_64-w64-mingw32-windres", help="Windows x64 resource compiler")
     ap.add_argument("--with-graphflow", action="store_true", help="随包内置固定 GraphFlow 引擎（需要 Windows x64 Node.js/npm）")
@@ -284,10 +408,20 @@ def main():
     a = ap.parse_args()
     if a.graphflow_offline and not a.with_graphflow:
         ap.error("--graphflow-offline requires --with-graphflow")
+    if a.release_commit is not None and a.no_onefile:
+        ap.error("--release-commit requires the single-file artifact")
+    source_commit = release_source(a.release_commit) if a.release_commit is not None else None
     cache, out = Path(a.cache), Path(a.out) / APP_NAME
     files = embedding_assets(a.models_dir)
-    if any(path.resolve().is_relative_to(out.resolve()) for path in files):
-        ap.error("--models-dir must be outside the build output directory")
+    voice_files = voice_assets(a.voice_models_dir) if a.voice_models_dir is not None else ()
+    if any(path.resolve().is_relative_to(out.resolve()) for path in (*files, *voice_files)):
+        ap.error("model inputs must be outside the build output directory")
+    runtime_files = None
+    if a.runtime_dir is not None:
+        source, output = a.runtime_dir.resolve(), out.resolve()
+        if source.is_relative_to(output) or output.is_relative_to(source):
+            ap.error("--runtime-dir must not overlap the build output directory")
+        runtime_files = runtime_inputs(source)
     cache.mkdir(parents=True, exist_ok=True)
     if out.exists():
         shutil.rmtree(out)
@@ -300,16 +434,22 @@ def main():
             from graphflow_engine import bundle_windows
 
         print("GraphFlow:", bundle_windows(out.resolve(), offline=a.graphflow_offline))
-    runtime(cache, out)
+    if runtime_files is None:
+        runtime(cache, out)
+    else:
+        copy_runtime(out, runtime_files)
     launcher(out, cc=a.cc, windres=a.windres)
     if not a.no_voice_models:
-        voice_models(out)
+        voice_models(out, voice_files)
     size = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print(f"完成：{out}  共 {size / 1e6:.1f} MB")
     if not a.no_onefile:
         sys.path.insert(0, str(ROOT))
         from app import __version__
-        onefile(out, out.parent / ONEFILE_NAME, __version__, cc=a.cc, windres=a.windres)
+        exe = onefile(out, out.parent / ONEFILE_NAME, __version__, cc=a.cc, windres=a.windres)
+        if source_commit is not None:
+            release_source(source_commit)
+        print("校验清单：", write_release_manifest(exe, __version__, source_commit))
 
 
 if __name__ == "__main__":

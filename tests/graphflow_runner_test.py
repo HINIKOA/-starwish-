@@ -135,6 +135,28 @@ class ControlledTestRun(unittest.TestCase):
         self.assertEqual(deleted["matched"], staged["matched"])
         self.assertNotEqual(deleted["approval_sha256"], staged["approval_sha256"])
 
+    def test_head_change_invalidates_approval_with_identical_worktree(self):
+        commit = ("-c", "user.name=StarWish", "-c", "user.email=fixture@example.test",
+                  "-c", "commit.gpgsign=false", "-c", "core.hooksPath=.git", "commit", "-qm")
+        self.git(*commit, "initial fixture")
+        profiles = {"unit": {"argv": [sys.executable, "-c", "pass"]}}
+        with patch.dict(os.environ, {runner.PROFILES_ENV: json.dumps(profiles)}):
+            for dirty in (False, True):
+                with self.subTest(dirty=dirty):
+                    if dirty:
+                        (self.repo / "app.py").write_text("a = 2\n", encoding="utf-8")
+                    previous = self.plan()
+                    changes = runner._changed(self.repo)
+                    self.git(*commit, "new approval baseline", "--allow-empty")
+                    self.assertEqual(runner._changed(self.repo), changes)
+                    current = self.plan()
+                    self.assertEqual(current["matched"], previous["matched"])
+                    self.assertNotEqual(current["approval_sha256"], previous["approval_sha256"])
+                    with patch.object(runner, "_execute") as execute, self.assertRaises(GraphFlowError) as stale:
+                        runner.run(self.repo, "unit", previous["approval_sha256"])
+                    self.assertEqual(stale.exception.status_code, 409)
+                    execute.assert_not_called()
+
     def test_http_approval_and_mcp_read_boundary(self):
         app = FastAPI()
         app.include_router(router)
@@ -265,22 +287,22 @@ class ControlledTestRun(unittest.TestCase):
                 self.fail(graphflow.status()["reason"])
             self.skipTest("GraphFlow engine not installed")
         sources = {
-            "source.js": "export const number = 1;\n",
-            "middle.js": "import { number } from './source.js';\nexport const result = number;\n",
+            "z-source.js": "export const number = 1;\n",
+            "middle.js": "import { number } from './z-source.js';\nexport const result = number;\n",
             "middle.test.js": "import { result } from './middle.js';\nconsole.log(result);\n",
             "unrelated.test.js": "console.log(0);\n",
-            "untracked.test.js": "import { number } from './source.js';\nconsole.log(number);\n",
+            "untracked.test.js": "import { number } from './z-source.js';\nconsole.log(number);\n",
         }
         for name, text in sources.items():
             (self.repo / name).write_text(text, encoding="utf-8")
-        self.git("add", "source.js", "middle.js", "middle.test.js", "unrelated.test.js")
+        self.git("add", "z-source.js", "middle.js", "middle.test.js", "unrelated.test.js")
         self.git("-c", "user.name=StarWish", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false",
                  "-c", "core.hooksPath=.git", "commit", "-qm", "fixture")
-        (self.repo / "source.js").write_text("export const number = 2;\n", encoding="utf-8")
+        (self.repo / "z-source.js").write_text("export const number = 2;\n", encoding="utf-8")
         profile = {"indirect": {"argv": [sys.executable, "-c", "print('approved')"], "paths": ["middle.test.js"]}}
         with patch.dict(os.environ, {runner.PROFILES_ENV: json.dumps(profile), "STARWISH_GRAPHFLOW_ASSISTANT": "1"}):
             with patch.object(runner, "_execute") as execute:
-                report = gf_exec(cmd="affected-tests", changedFiles=["./source.js"])
+                report = gf_exec(cmd="affected-tests", changedFiles=["./z-source.js"])
                 self.assertIn("- middle.test.js", report)
                 self.assertNotIn("unrelated.test.js", report)
                 self.assertNotIn("untracked.test.js", report)
@@ -289,6 +311,28 @@ class ControlledTestRun(unittest.TestCase):
                 item, = runner.plan(self.repo)["profiles"]
                 self.assertTrue(item["via_impact"])
                 self.assertEqual(item["matched"], ["middle.test.js"])
+                execute.assert_not_called()
+            with patch.object(graphflow, "MAX_FILES", 4), patch.object(runner, "_execute") as execute:
+                self.assertEqual(graphflow.read(query="number", anchors_only=True)["index"]["files"], 4)
+                self.assertNotIn("z-source.js", graphflow._active_snapshot.files)
+                report = gf_exec(cmd="affected-tests", changedFiles=["./z-source.js"])
+                self.assertIn("- middle.test.js", report)
+                self.assertIn("结果不完整", report)
+                app = FastAPI()
+                app.include_router(router)
+                with TestClient(app, base_url="http://127.0.0.1:17860", client=("127.0.0.1", 54000)) as client:
+                    path = "/api/graphflow/test/"
+                    response = client.get(path + "plan", headers={"X-StarWish-Operator-Key": self.key})
+                    self.assertEqual(response.status_code, 200)
+                    limited_plan = response.json()
+                    self.assertEqual(limited_plan["impact_status"], "partial")
+                    limited_item, = limited_plan["profiles"]
+                    self.assertEqual(limited_item["matched"], ["middle.test.js"])
+                    body = {key: limited_item[key] for key in ("profile", "approval_sha256")}
+                    self.assertEqual(client.post(path + "run", json=body).status_code, 403)
+                with self.assertRaises(GraphFlowError) as rejected:
+                    gf_exec(cmd="affected-tests", changedFiles=["untracked.test.js"])
+                self.assertEqual(rejected.exception.status_code, 404)
                 execute.assert_not_called()
             (self.repo / "middle.js").write_text("export const result = 0;\n", encoding="utf-8")
             self.git("add", "middle.js")

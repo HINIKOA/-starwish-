@@ -33,7 +33,7 @@ def build(query: str, budget_tokens: int = 750, rootDir: str = "") -> dict:
         code_status = f"unavailable_{exc.status_code}"
     history_unavailable = False
     try:
-        outcomes = graphflow_tasks.find_completed(query, check_code=True)
+        outcomes = graphflow_tasks.find_completed(query, check_evidence=True)
     except GraphFlowError as exc:
         if exc.status_code != 503:
             raise

@@ -15,6 +15,54 @@ from tools import build_windows, graphflow_codex, graphflow_codex_probe, graphfl
 
 
 class GraphFlowEngineTest(unittest.TestCase):
+    def test_reused_runtime_checks_dependencies_and_does_not_copy_donor_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            donor, out = root / "donor", root / "out"
+            site = donor / "Lib" / "site-packages"
+            site.mkdir(parents=True)
+            out.mkdir()
+            (donor / "python.exe").write_bytes(b"exe fixture")
+            with self.assertRaisesRegex(SystemExit, "--runtime-dir"):
+                build_windows.runtime_inputs(donor)
+            for name in ["pythonw.exe", "python312.dll", "python312.zip", "LICENSE.txt",
+                         "python312._pth", "config.json"]:
+                (donor / name).write_bytes(b"donor fixture")
+            (site / "dependency.py").write_bytes(b"dependency fixture")
+            (site / "cached.pyc").write_bytes(b"do not reuse bytecode")
+            with patch.object(build_windows.subprocess, "run") as probe:
+                inputs = build_windows.runtime_inputs(donor)
+                self.assertIn("import fastapi, mcp", probe.call_args.args[0][4])
+                probe.side_effect = subprocess.CalledProcessError(1, ["python.exe"])
+                with self.assertRaisesRegex(SystemExit, "--runtime-dir"):
+                    build_windows.runtime_inputs(donor)
+            build_windows.copy_runtime(out, inputs)
+            runtime = out / "runtime"
+            self.assertFalse((runtime / "config.json").exists())
+            self.assertIn("Lib\\site-packages", (runtime / "python312._pth").read_text("utf-8"))
+            self.assertFalse((runtime / "Lib" / "site-packages" / "cached.pyc").exists())
+            self.assertEqual((runtime / "Lib" / "site-packages" / "dependency.py").read_bytes(), b"dependency fixture")
+
+    def test_local_voice_models_require_both_and_copy_only_expected_files(self):
+        from app.voice import models
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, out = root / "voice-input", root / "out"
+            source.mkdir()
+            names = [spec["file"] for spec in models.MODELS.values()]
+            (source / names[0]).write_bytes(b"x" * 1001)
+            with self.assertRaisesRegex(SystemExit, "--voice-models-dir"):
+                build_windows.voice_assets(source)
+            (source / names[1]).write_bytes(b"y" * 1001)
+            (source / "private.txt").write_bytes(b"not a model")
+            with patch.object(models, "install") as installer:
+                build_windows.voice_models(out, build_windows.voice_assets(source))
+                installer.assert_not_called()
+            result = out / "models" / "voice"
+            self.assertEqual(sorted(path.name for path in result.iterdir()), sorted(names))
+            self.assertEqual((result / names[1]).read_bytes(), b"y" * 1001)
+
     def test_external_embedding_assets_copy_only_required_files(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -51,9 +99,27 @@ class GraphFlowEngineTest(unittest.TestCase):
                 self.assertEqual(stream.read(len(stub)), stub)
                 payload = stream.read(trailer["size"])
             self.assertEqual(trailer["tag"], "0.1.0-" + hashlib.sha256(payload).hexdigest()[:10])
+            manifest = json.loads(build_windows.write_release_manifest(artifact, "0.1.0").read_text("utf-8"))
+            self.assertEqual(manifest["sha256"], hashlib.sha256(artifact.read_bytes()).hexdigest())
+            self.assertEqual(manifest["payload_sha256"], hashlib.sha256(payload).hexdigest())
+            self.assertEqual(manifest["bytes"], artifact.stat().st_size)
+            self.assertIsNone(manifest["source_commit"])
+            with self.assertRaisesRegex(ValueError, "version tag"):
+                build_windows.write_release_manifest(artifact, "0.2.0")
             with zipfile.ZipFile(artifact) as archive:
                 self.assertEqual(archive.namelist(), ["engines/graphflow-3.9.2/THIRD-PARTY.json"])
                 self.assertEqual(archive.read(archive.namelist()[0]), b"[]")
+
+    def test_release_source_requires_the_exact_clean_commit(self):
+        commit = "a" * 40
+        with self.assertRaisesRegex(SystemExit, "full lowercase"):
+            build_windows.release_source("123")
+        for head, changes in ((commit, b" M tracked\n"), ("b" * 40, b""), (commit, b"?? other\n")):
+            with patch.object(build_windows.subprocess, "check_output", side_effect=[head, changes]):
+                with self.assertRaisesRegex(SystemExit, "clean checkout"):
+                    build_windows.release_source(commit)
+        with patch.object(build_windows.subprocess, "check_output", side_effect=[commit + "\n", b""]):
+            self.assertEqual(build_windows.release_source(commit), commit)
 
     def test_configuration_prefers_portable_python_over_uv(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -83,6 +149,10 @@ class GraphFlowEngineTest(unittest.TestCase):
             for folder in (portable, repo, soul, home):
                 folder.mkdir()
             build_windows.copy_app(portable)
+            voice_source = os.environ.get("STARWISH_WINDOWS_VOICE_MODELS")
+            voice_files = build_windows.voice_assets(Path(voice_source)) if voice_source else ()
+            if voice_files:
+                build_windows.voice_models(portable, voice_files)
             engine.bundle_windows(portable, offline=True)
             shutil.copytree(donor, portable / "runtime")
             original = b"def verify_portable():\n    return 42\n"
@@ -105,6 +175,7 @@ class GraphFlowEngineTest(unittest.TestCase):
             self.assertEqual(report["starwish"], "connected")
             self.assertIn("edit-diff-without-receipt", report["checks"])
             self.assertIn("read-only-macro-replay", report["checks"])
+            self.assertIn("task-backlog-disabled", report["checks"])
             self.assertFalse(report["model_turn_started"] or report["memory_tools_called"])
             self.assertEqual(source.read_bytes(), original)
             self.assertFalse((root / "state" / "StarWish" / f"graphflow-{engine.graphflow.VERSION}").exists())
@@ -114,6 +185,11 @@ class GraphFlowEngineTest(unittest.TestCase):
                 build_windows.launcher(portable, cc=cc, windres=windres)
                 single = build_windows.onefile(portable, root / "single file.exe", engine.graphflow.VERSION,
                                                cc=cc, windres=windres)
+                if voice_files:
+                    with zipfile.ZipFile(single) as archive:
+                        for model in voice_files:
+                            packed = archive.read(f"models/voice/{model.name}")
+                            self.assertEqual(hashlib.sha256(packed).digest(), hashlib.sha256(model.read_bytes()).digest())
                 failed = subprocess.run([str(single), "--mcp"], cwd=portable,
                                         env={**env, "STARWISH_RUNTIME_CACHE_ROOT": "relative-cache"},
                                         capture_output=True, timeout=10, encoding="utf-8")

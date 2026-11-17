@@ -1,16 +1,18 @@
 """对话抽屉（v0.11.0）：主人用自然语言指挥 AI 管理星愿。
 
 - 用「默认对话模型」（主模型）+ 工具调用；面板是主人通道：改核心记忆直接生效（上锁时转提案）。
-- 有上下文：历史存 soul/agent/chat.json，按上下文窗口（默认 400,000 tokens）取用；
+- 有上下文：普通聊天和每个授权项目使用独立历史，按上下文窗口（默认 400,000 tokens）取用；
   累计到阈值（默认 380,000）自动压缩旧历史（摘要 + 最近几轮），任务抽屉里能看到。
 - 没配主模型时：支持 /状态 /归纳 /整理 /搜索 关键词 /清空 几个离线指令。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 import time
+from pathlib import Path
 
 from . import config, context, core, graphflow, graphflow_context, graphflow_diagnostics, graphflow_edits, graphflow_planner, graphflow_tasks, graphflow_tests, graphflow_workflows, jobs, maintenance, stars
 from . import graphflow_skill_feedback
@@ -157,33 +159,79 @@ def tools() -> list[dict]:
 
 # ---------------- 历史 ----------------
 _hl = threading.Lock()
+_MEMORY_HISTORY = "chat-memory.json"
+_LEGACY_HISTORY = "chat.json"
+_PROJECT_PREFIX = "chat-project-"
 
 
-def history_path():
-    d = config.soul_path("agent")
-    d.mkdir(parents=True, exist_ok=True)
-    return d / "chat.json"
+def _assistant_workspace() -> Path | None:
+    if os.environ.get("STARWISH_GRAPHFLOW_ASSISTANT") == "1":
+        try:
+            return graphflow.checked_workspace()
+        except (graphflow.GraphFlowError, OSError, RuntimeError):
+            pass
+    return None
 
 
-def load_history() -> list[dict]:
-    p = history_path()
+def _history_path(workspace: Path | None) -> Path:
+    if workspace is None:
+        return config.soul_path("agent", _MEMORY_HISTORY)
+    key = hashlib.sha256(os.fsencode(workspace)).hexdigest()
+    return config.soul_path("agent", _PROJECT_PREFIX + key + ".json")
+
+
+def history_path() -> Path:
+    return _history_path(_assistant_workspace())
+
+
+def _read_history(path: Path) -> list[dict]:
     try:
-        h = json.loads(p.read_text("utf-8")) if p.exists() else []
+        h = json.loads(path.read_text("utf-8"))
         return [m for m in h if isinstance(m, dict) and m.get("role") in ("system", "user", "assistant")]
     except Exception:
         return []
 
 
-def save_history(h: list[dict]) -> None:
+def _load_history(path: Path) -> list[dict]:
+    if path.name != _MEMORY_HISTORY or path.exists():
+        return _read_history(path)
+    legacy = _read_history(path.with_name(_LEGACY_HISTORY))
+    # Earlier summaries may have compacted away the project tool markers.
+    for message in legacy:
+        if message["role"] == "system":
+            return []
+        if message["role"] == "assistant":
+            last_line = str(message.get("content", "")).rpartition("\n")[2]
+            if last_line.startswith("（已执行：") and any(
+                name.startswith(("graphflow_", "gf_")) for name in last_line[5:].rstrip("）").split("、")
+            ):
+                return []
+    return legacy
+
+
+def load_history() -> list[dict]:
+    return _load_history(history_path())
+
+
+def _save_history(p: Path, h: list[dict]) -> None:
     with _hl:
-        p = history_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(h, ensure_ascii=False), "utf-8")
         os.replace(tmp, p)
 
 
 def clear_history() -> None:
-    save_history([])
+    _save_history(history_path(), [])
+
+
+def reset_history() -> None:
+    directory = config.soul_path("agent")
+    with _hl:
+        for name in (_MEMORY_HISTORY, _LEGACY_HISTORY):
+            (directory / name).unlink(missing_ok=True)
+        for path in directory.glob(_PROJECT_PREFIX + "*.json"):
+            path.unlink(missing_ok=True)
 
 
 # ---------------- 工具执行 ----------------
@@ -390,10 +438,10 @@ EFFORT_WORDS = {"默认": "default", "自动": "default", "关闭": "none", "关
 EFFORT_WORDS_HELP = ["默认", "关闭", "最少", "低", "中", "高", "超高", "最高"]
 
 
-def offline(text: str) -> dict | None:
+def offline(text: str, *, history_file: Path | None = None) -> dict | None:
     t = text.strip()
     if t in ("/清空", "/clear"):
-        clear_history()
+        _save_history(history_file if history_file is not None else history_path(), [])
         return {"ok": True, "reply": "对话历史已清空。", "actions": []}
     if t in ("/状态", "/status"):
         r = run_tool("get_status", {})
@@ -430,18 +478,27 @@ def chat(text: str, cfg: dict | None = None, max_rounds: int = 6) -> dict:
     text = (text or "").strip()
     if not text:
         raise ValueError("说点什么吧")
-    hist = load_history()
-    off = offline(text)
+    workspace = _assistant_workspace()
+    path = _history_path(workspace)
+
+    def require_scope():
+        if path != history_path():
+            raise RuntimeError("项目授权已变化，请重新发起对话。")
+
+    hist = _load_history(path)
+    off = offline(text, history_file=path)
     ready = context.main_ready(cfg)
     if off is not None or not ready:
         out = off or {"ok": False, "reply": "还没有配置默认对话模型（设置 → 默认模型）。" + HELP, "actions": []}
         if text not in ("/清空", "/clear"):
-            save_history(load_history() + [{"role": "user", "content": text, "t": time.time()},
-                                           {"role": "assistant", "content": out["reply"], "t": time.time()}])
+            require_scope()
+            _save_history(path, hist + [{"role": "user", "content": text, "t": time.time()},
+                                        {"role": "assistant", "content": out["reply"], "t": time.time()}])
         return out
-    with jobs.run("agent", "对话指令：" + text[:40]) as j:
+    with jobs.run("agent", "项目对话指令" if workspace is not None else "对话指令：" + text[:40]) as j:
         sys_msg = {"role": "system", "content": SYSTEM.replace("<<CORE>>", core.core_text() or "（空）")}
         user = {"role": "user", "content": text}
+        require_scope()
         hist, info = context.compact_if_needed(hist, cfg, "chat", "对话抽屉",
                                                extra_tokens=context.msg_tokens(sys_msg) + context.msg_tokens(user))
         use = context.trim_history([{"role": m["role"], "content": m["content"]} for m in hist],
@@ -453,7 +510,9 @@ def chat(text: str, cfg: dict | None = None, max_rounds: int = 6) -> dict:
         effort = upstream.norm_effort(cfg["llm"].get("agent_effort"))
         effort_note = ""
         for _ in range(max_rounds):
+            require_scope()
             data = context.main_complete(msgs, cfg, tools=tools(), temperature=0.3, effort=effort)
+            require_scope()
             if data.get("effort_dropped") and not effort_note:
                 effort_note = "（当前模型不支持思考等级，这次按模型默认回答。）"
             msg = (data.get("choices") or [{}])[0].get("message") or {}
@@ -467,6 +526,7 @@ def chat(text: str, cfg: dict | None = None, max_rounds: int = 6) -> dict:
                     am[k] = msg[k]
             msgs.append(am)
             for tc in calls:
+                require_scope()
                 f = tc.get("function") or {}
                 nm = f.get("name", "")
                 try:
@@ -481,8 +541,9 @@ def chat(text: str, cfg: dict | None = None, max_rounds: int = 6) -> dict:
         else:
             reply = "工具调用次数到上限了，先停在这里。" + (f"（已执行 {len(actions)} 个操作）" if actions else "")
         note = ("\n（已执行：" + "、".join(a["tool"] for a in actions) + "）") if actions else ""
-        save_history(hist + [{"role": "user", "content": text, "t": time.time()},
-                             {"role": "assistant", "content": reply + note, "t": time.time()}])
-        j["detail"] = (reply[:200] + note)[:500]
+        require_scope()
+        _save_history(path, hist + [{"role": "user", "content": text, "t": time.time()},
+                                    {"role": "assistant", "content": reply + note, "t": time.time()}])
+        j["detail"] = (("项目对话已完成。" if workspace is not None else reply[:200]) + note)[:500]
         return {"ok": True, "reply": reply, "actions": actions, "compacted": info, "effort": effort,
                 "effort_note": effort_note}

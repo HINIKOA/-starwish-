@@ -368,11 +368,13 @@ def main():
     hist = c.get("/api/agent/history").json()
     check("历史持久化 + 显示 token 与压缩阈值", len(hist["history"]) == 4 and hist["compact_at"] == 380000)
     config.update_config({"llm": {"compact_tokens": 2000, "context_tokens": 8000}})
-    agent_hist = json.loads((TMP / "soul" / "agent" / "chat.json").read_text("utf-8"))
+    from app import agent
+    history_path = agent.history_path()
+    agent_hist = json.loads(history_path.read_text("utf-8"))
     agent_hist = [{"role": "user", "content": "旧话 " + "长" * 900}, {"role": "assistant", "content": "好"}] * 3 + agent_hist
-    (TMP / "soul" / "agent" / "chat.json").write_text(json.dumps(agent_hist, ensure_ascii=False), "utf-8")
+    history_path.write_text(json.dumps(agent_hist, ensure_ascii=False), "utf-8")
     r = c.post("/api/agent/chat", json={"text": "继续"}).json()
-    check("对话抽屉累计到阈值 → 自动压缩", r.get("compacted") and json.loads((TMP / "soul" / "agent" / "chat.json").read_text("utf-8"))[0]["role"] == "system")
+    check("对话抽屉累计到阈值 → 自动压缩", r.get("compacted") and json.loads(history_path.read_text("utf-8"))[0]["role"] == "system")
     config.update_config({"llm": {"compact_tokens": 380000, "context_tokens": 400000}})
     c.delete("/api/agent/history")
     config.update_config({"llm": {"api_key": "", "base_url": ""}})

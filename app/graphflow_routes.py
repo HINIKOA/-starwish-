@@ -215,6 +215,15 @@ class WorkflowReplayRequest(WorkflowRequest):
     plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class WorkflowUnpinRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    name: str = Field(pattern=r"^trace_[0-9a-f]{16}$")
+
+
+class WorkflowPinRequest(WorkflowUnpinRequest):
+    plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def _workflow(request: Request, operation, **args):
     require_local_project(request)
     try:
@@ -236,6 +245,16 @@ def graphflow_workflow_preview(request: Request, body: WorkflowRequest):
 @router.post("/api/graphflow/workflow/replay")
 def graphflow_workflow_replay(request: Request, body: WorkflowReplayRequest):
     return _workflow(request, graphflow_workflows.replay, **body.model_dump())
+
+
+@router.post("/api/graphflow/workflow/pin")
+def graphflow_workflow_pin(request: Request, body: WorkflowPinRequest):
+    return _approval(request, graphflow_workflows.pin_trajectory, body.name, body.plan_sha256, feature_enabled=True)
+
+
+@router.post("/api/graphflow/workflow/unpin")
+def graphflow_workflow_unpin(request: Request, body: WorkflowUnpinRequest):
+    return _approval(request, graphflow_workflows.unpin_trajectory, body.name, feature_enabled=True)
 
 
 class TaskCreateRequest(WorkflowReplayRequest):

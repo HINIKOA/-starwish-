@@ -186,6 +186,126 @@ class GraphFlowTest(unittest.TestCase):
                     self.assertIn("error", agent.run_tool("gf_read", args))
 
     @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_explicit_tail_targets_use_budget_without_changing_keyword_scope(self):
+        import mcp_server
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            sources = {
+                "a.ts": "export function caller() { return 0; }\n",
+                "b.ts": "export function baseline() { return 1; }\n",
+                "y.ts": "export function tailOther() { return 73; }\n",
+                "z.ts": "export function tailTarget() { return 31901; }\n",
+                "soul/local.ts": "export function excluded() { return 777; }\n",
+                "untracked.ts": "export function untracked() { return 999; }\n",
+            }
+            for name, content in sources.items():
+                path = root / name
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "add", "--", *[name for name in sources if name != "untracked.ts"]],
+                           cwd=root, check=True)
+            with patch.dict(os.environ, {"STARWISH_GRAPHFLOW_WORKSPACE": str(root)}), patch.object(graphflow, "MAX_FILES", 2):
+                if not graphflow.status()["available"]:
+                    if os.environ.get("STARWISH_GRAPHFLOW_REQUIRE_ENGINE") == "1":
+                        self.fail(graphflow.status()["reason"])
+                    self.skipTest("GraphFlow engine not installed")
+                app = FastAPI()
+                app.include_router(router)
+                with TestClient(app, base_url="http://127.0.0.1:17860", client=("127.0.0.1", 54000)) as client:
+                    read = client.post("/api/graphflow/read", json={"target": "z.ts:1-1"}).json()
+                    self.assertIn("31901", read["text"])
+                    self.assertTrue(read["index"]["partial"])
+                    self.assertEqual(read["index"]["files"], 2)
+                    detail = client.post("/api/graphflow/impact", json={"target": "z.ts#tailTarget"}).json()
+                    self.assertTrue(detail["impacts"])
+                    self.assertTrue(detail["index"]["partial"])
+                    for name, status in (("untracked.ts", 404), ("soul/local.ts", 400)):
+                        with self.subTest(name=name):
+                            response = client.post("/api/graphflow/read", json={"target": name})
+                            self.assertEqual(response.status_code, status)
+                batch = mcp_server.gf_read(["y.ts#tailOther", "z.ts#tailTarget"])
+                self.assertIn("31901", batch)
+                self.assertIn("return 73", batch)
+                self.assertEqual(graphflow.reindex(file_path="z.ts")["unparsed"], 0)
+                graph = graphflow.dependency_graph("z.ts")
+                self.assertTrue(any(node["file"] == "z.ts" for node in graph["nodes"]))
+                base = graphflow.read(query="tailTarget", anchors_only=True)
+                self.assertTrue(base["index"]["partial"])
+                self.assertEqual(base["matches"], [])
+                self.assertEqual(set(graphflow._active_snapshot.files), {"a.ts", "b.ts"})
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_explicit_files_never_bypass_snapshot_byte_limits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            repo, dest = root / "repo", root / "snapshot"
+            repo.mkdir()
+            dest.mkdir()
+            git = shutil.which("git")
+            subprocess.run([git, "init", "-q"], cwd=repo, check=True)
+            for name, size in {"a.py": 7, "b.py": 3, "y.py": 11, "z.py": 4}.items():
+                (repo / name).write_bytes(b"x" * size)
+            subprocess.run([git, "add", "--", "*.py"], cwd=repo, check=True)
+            with patch.object(graphflow, "MAX_BYTES", 10), patch.object(graphflow, "MAX_FILE_BYTES", 10):
+                partial, files, stats = graphflow._refresh_snapshot(repo, dest, git, {}, ("y.py", "z.py", "b.py"))
+            self.assertTrue(partial)
+            self.assertEqual(stats["files"], 2)
+            self.assertEqual(set(files), {"b.py", "z.py"})
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
+    def test_snapshot_evicts_tracked_file_that_becomes_a_hardlink(self):
+        from app import config, graphflow_edits, graphflow_tests
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            repo, dest, soul = root / "repo", root / "snapshot", root / "soul"
+            for folder in (repo, dest, soul):
+                folder.mkdir()
+            git = shutil.which("git")
+            subprocess.run([git, "init", "-q"], cwd=repo, check=True, capture_output=True)
+            tracked = repo / "module.py"
+            tracked.write_bytes(b"def public_fixture():\n    return 42\n")
+            subprocess.run([git, "add", "module.py"], cwd=repo, check=True, capture_output=True)
+            outside = soul / "module.py"
+            outside.write_bytes(b"def fixture_outside():\n    return 'synthetic private placeholder'\n")
+            with patch.object(config, "SOUL_DIR", soul):
+                _, before, _ = graphflow._refresh_snapshot(repo, dest, git, {})
+                self.assertEqual(set(before), {"module.py"})
+                tracked.unlink()
+                try:
+                    os.link(outside, tracked)
+                except (NotImplementedError, OSError):
+                    self.skipTest("filesystem does not support hardlinks")
+                _, after, stats = graphflow._refresh_snapshot(repo, dest, git, before, ("module.py",))
+                self.assertEqual(after, {})
+                self.assertEqual(stats["removed"], 1)
+                self.assertFalse((dest / "module.py").exists())
+                with self.assertRaises(graphflow.GraphFlowError) as edit:
+                    graphflow_edits._read_tracked(repo, "module.py")
+                self.assertEqual(edit.exception.status_code, 404)
+                with self.assertRaises(graphflow.GraphFlowError) as approval:
+                    graphflow_tests._approval_inputs(repo, ["module.py"])
+                self.assertEqual(approval.exception.status_code, 409)
+                self.assertIn(b"synthetic private placeholder", outside.read_bytes())
+
+    def test_verified_source_does_not_yield_a_replaced_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            source = root / "source.py"
+            replacement = root / "replacement.py"
+            source.write_bytes(b"original fixture")
+            replacement.write_bytes(b"replacement fixture")
+            soul = root / "soul"
+            checked = graphflow._source_metadata(source, soul)
+            replacement.replace(source)
+            with self.assertRaises(graphflow.GraphFlowError) as changed:
+                with graphflow._open_source(source, soul, checked):
+                    self.fail("changed file was made available to the reader")
+            self.assertEqual(changed.exception.status_code, 409)
+
+    @unittest.skipUnless(shutil.which("git"), "Git is required")
     def test_snapshot_and_real_slicing(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "repo"
@@ -351,6 +471,15 @@ class GraphFlowTest(unittest.TestCase):
             "direct.ts": "import { calculate } from './target';\nexport const value = calculate();\n",
             "wrong.ts": "import { calculate } from './other';\nexport const value = calculate();\n",
             "forwarded.ts": "import { calculate } from './barrel';\nexport const value = calculate();\n",
+            "alias.ts": "export { calculate as renamed } from './target';\n",
+            "facade.ts": "import { renamed as local } from './alias';\nexport { local as calculate };\n",
+            "multi.ts": "import { calculate } from './facade';\nexport const value = calculate();\n",
+            "wildcard.ts": "export * from './target';\n",
+            "wildcard-user.ts": "import { calculate } from './wildcard';\ncalculate();\n",
+            "default-user.ts": "import calculate from './barrel';\ncalculate();\n",
+            "cycle1.ts": "export { calculate } from './cycle2';\n",
+            "cycle2.ts": "export { calculate } from './cycle1';\n",
+            "cyclic-user.ts": "import { calculate } from './cycle1';\ncalculate();\n",
             "external.ts": "import { calculate } from 'some-package';\nexport const value = calculate();\n",
         }
         with tempfile.TemporaryDirectory() as temp:
@@ -367,15 +496,24 @@ class GraphFlowTest(unittest.TestCase):
                 def destinations():
                     impact = graphflow.impact("target.ts#calculate")["impacts"][0]
                     self.assertGreaterEqual(impact["total_importers"], len(impact["importers"]))
-                    return {row["file"]: (row["resolution"], row["resolved_file"]) for row in impact["importers"]}
+                    return {row["file"]: (row["resolution"], row["resolved_file"], row.get("reexport_chain"))
+                            for row in impact["importers"]}
 
                 before = destinations()
-                self.assertEqual(before["direct.ts"], ("direct_module", "target.ts"))
-                self.assertEqual(before["wrong.ts"], ("other_module", "other.ts"))
-                self.assertEqual(before["forwarded.ts"], ("other_module", "barrel.ts"))
-                self.assertEqual(before["external.ts"], ("unresolved", None))
+                self.assertEqual(before["direct.ts"], ("direct_module", "target.ts", None))
+                self.assertEqual(before["wrong.ts"], ("other_module", "other.ts", None))
+                self.assertEqual(before["forwarded.ts"],
+                                 ("reexport_module", "barrel.ts", [{"file": "barrel.ts", "line": 1}]))
+                self.assertEqual(before["multi.ts"], ("reexport_module", "facade.ts",
+                                 [{"file": "facade.ts", "line": 2}, {"file": "alias.ts", "line": 1}]))
+                self.assertEqual(before["wildcard-user.ts"], ("other_module", "wildcard.ts", None))
+                self.assertEqual(before["default-user.ts"], ("other_module", "barrel.ts", None))
+                self.assertEqual(before["cyclic-user.ts"], ("other_module", "cycle1.ts", None))
+                self.assertEqual(before["external.ts"], ("unresolved", None, None))
+                (root / "barrel.ts").write_text("export { calculate } from './other';\n", encoding="utf-8")
+                self.assertEqual(destinations()["forwarded.ts"], ("other_module", "barrel.ts", None))
                 (root / "other.ts").unlink()
-                self.assertEqual(destinations()["wrong.ts"], ("unresolved", None))
+                self.assertEqual(destinations()["wrong.ts"], ("unresolved", None, None))
 
     def test_http_origin_and_body(self):
         app = FastAPI()

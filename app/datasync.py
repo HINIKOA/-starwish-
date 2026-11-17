@@ -388,8 +388,9 @@ def reset_data() -> dict:
             pass
     for f in (config.CORE_JSON, config.CORE_MD):
         f.unlink(missing_ok=True)
-    for f in ("agent/chat.json", "agent/organizer.json"):
-        config.soul_path(f).unlink(missing_ok=True)
+    from . import agent
+    agent.reset_history()
+    config.soul_path("agent", "organizer.json").unlink(missing_ok=True)
     core.load_core()
     log_event("data_reset", safety_snapshot=snap["name"])
     return {"ok": True, "safety_snapshot": snap["name"]}

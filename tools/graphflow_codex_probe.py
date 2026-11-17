@@ -32,7 +32,8 @@ LEGACY = {"graphflow", "user-graphflow"}
 REQUIRED = {"graphflow_context", "graphflow_read", "get_core", "recall_index"}
 COMPAT = {"gf_read", "gf_edit", "gf_exec", "gf_macro", "graphflow_diagnose", "graphflow_artifact", "graphflow_graph",
           "graphflow_skill_insights", "graphflow_skill_guide", "graphflow_run", "graphflow_report_outcome",
-          "graphflow_insight", "graphflow_impact", "graphflow_plan", "graphflow_workflow_preview"}
+          "graphflow_insight", "graphflow_impact", "graphflow_plan", "graphflow_workflow_preview", "graphflow_index",
+          "graphflow_task_backlog"}
 APPROVAL_ONLY = {"graphflow_edit_apply", "graphflow_edit_rollback", "graphflow_test_run"}
 HOOK_HINT = "use the starwish MCP graphflow_context tool first"
 _ENGINE_MARKER = re.compile(r"(?<![a-z0-9])graphflow(?![a-z0-9])", re.IGNORECASE)
@@ -455,6 +456,12 @@ def probe(codex, project, workspace, symbol=None, marker=None, *, hooks_only=Fal
                                                           for name in sorted(LEGACY)}, "checks": checks,
                       "migration_inventory": migration}
             if project_only:
+                refreshed = json.loads(call("graphflow_index", mode="incremental", filePath=path,
+                                            rootDir=str(workspace)))
+                require(refreshed.get("mode") == "file" and refreshed.get("cache_scope") == "process"
+                        and refreshed.get("parsed_or_reused") == 1 and refreshed.get("unparsed") == 0,
+                        "Single-file index refresh did not warm the requested source in the temporary MCP.")
+                checks.append("single-file-index-refresh")
                 if preview_line is not None:
                     verify_edit_preview(call, workspace, path, preview_line)
                     checks.append("edit-diff-without-receipt")
@@ -507,6 +514,23 @@ def probe(codex, project, workspace, symbol=None, marker=None, *, hooks_only=Fal
                         and "effective registration not checked" in doctor and "Tasks: " in doctor,
                         "Project doctor did not report scoped diagnostics.")
                 checks.append("project-doctor")
+                if diagnostic["tasks"]["status"] == "disabled":
+                    reply = rpc("mcpServer/tool/call", {**scope, "server": "starwish",
+                                                        "tool": "graphflow_task_backlog", "arguments": {}})
+                    require(reply.get("isError") is True, "Disabled task backlog was not rejected.")
+                    checks.append("task-backlog-disabled")
+                else:
+                    backlog = json.loads(call("graphflow_task_backlog"))
+                    counts = backlog["counts"]
+                    total = sum(counts.values())
+                    require(set(counts) == {"pending", "blocked"}
+                            and all(type(value) is int and value >= 0 for value in counts.values())
+                            and 0 <= backlog["older_than_24h"] <= total
+                            and len(backlog["items"]) == min(20, total)
+                            and backlog["more"] is (total > 20)
+                            and all(item.get("state") in counts for item in backlog["items"]),
+                            "Task backlog did not return the expected scoped summary.")
+                    checks.append("task-backlog")
                 guide = json.loads(call("graphflow_skill_guide", rootDir=str(workspace)))
                 require(guide.get("server") == "starwish", "Project guide did not identify StarWish.")
                 brief = call("gf_read", targets=["@brief"], rootDir=str(workspace))

@@ -221,7 +221,9 @@ def catalog() -> list[dict]:
     except GraphFlowError:
         pass  # An optional trajectory source must not hide installed workflows.
     return [{"name": name, "title": spec["title"], "parameters": sorted(_params(spec)),
-             "steps": len(spec["steps"])} for name, spec in sorted(specs.items())]
+             "steps": len(spec["steps"]),
+             **({"persistence": spec["persistence"]} if "persistence" in spec else {})}
+            for name, spec in sorted(specs.items())]
 
 
 def _resolve(workspace: Path, name: str) -> dict:
@@ -233,11 +235,12 @@ def _resolve(workspace: Path, name: str) -> dict:
     return spec
 
 
-def preview(name: str, target: str = "", query: str = "") -> dict:
+def preview(name: str, target: str = "", query: str = "", *, workspace: Path | None = None) -> dict:
     if (not isinstance(name, str) or not _NAME.fullmatch(name)
             or not isinstance(target, str) or not isinstance(query, str)):
         raise GraphFlowError("工作流名称或参数格式不正确。")
-    workspace = graphflow._workspace()
+    if workspace is None:
+        workspace = graphflow._workspace()
     spec = _resolve(workspace, name)
     inputs = {"target": target.strip(), "query": query.strip()}
     if {key for key, value in inputs.items() if value} != _params(spec):
@@ -259,6 +262,23 @@ def preview(name: str, target: str = "", query: str = "") -> dict:
     proposal = {"name": name, "title": spec["title"], "steps": steps, "read_only": True}
     digest = hashlib.sha256(json.dumps([str(workspace), proposal], ensure_ascii=True, sort_keys=True).encode())
     return {**proposal, "plan_sha256": digest.hexdigest()}
+
+
+def pin_trajectory(workspace: Path, name: str, plan_sha256: str) -> dict:
+    if not graphflow_trajectories.ID.fullmatch(name) or name in _specs(workspace):
+        raise GraphFlowError("只能固定轨迹代码包。")
+    plan = preview(name, workspace=workspace)
+    if plan["plan_sha256"] != plan_sha256:
+        raise GraphFlowError("宏预览已变化，请重新预览。", 409)
+    graphflow_trajectories.pin(workspace, name, plan["steps"][0]["targets"])
+    return {"name": name, "persistence": "pinned"}
+
+
+def unpin_trajectory(workspace: Path, name: str) -> dict:
+    if not graphflow_trajectories.ID.fullmatch(name):
+        raise GraphFlowError("只能取消固定轨迹代码包。")
+    graphflow_trajectories.unpin(workspace, name)
+    return {"name": name, "persistence": "unpinned"}
 
 
 def _clip(text: str, budget: int) -> tuple[str, bool]:

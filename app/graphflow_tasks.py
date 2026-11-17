@@ -258,7 +258,18 @@ def _annotate_code_evidence(workspace, outcomes: list[dict]) -> None:
                                          "matching_bytes" if digest == reference["sha256"] else "changed")
 
 
-def find_completed(query: str, *, check_code: bool = False) -> list[dict]:
+def _annotate_test_evidence(workspace, outcomes: list[dict]) -> None:
+    references = []
+    for outcome in outcomes:
+        references.extend(item for item in outcome["evidence"] if item.get("kind") == "test")
+        if "historical_test_verification" in outcome:
+            references.append(outcome["historical_test_verification"])
+    states = graphflow_tests.evidence_plan_states(workspace, [item["run_id"] for item in references])
+    for item in references:
+        item["plan_state"] = states[item["run_id"]]
+
+
+def find_completed(query: str, *, check_evidence: bool = False) -> list[dict]:
     if not enabled():
         return []
     query = query.casefold()
@@ -286,8 +297,9 @@ def find_completed(query: str, *, check_code: bool = False) -> list[dict]:
         for outcome in outcomes:
             if outcome["task_id"] in linked:
                 outcome["historical_test_verification"] = linked[outcome["task_id"]]
-    if check_code:
+    if check_evidence:
         _annotate_code_evidence(workspace, outcomes)
+        _annotate_test_evidence(workspace, outcomes)
     return outcomes
 
 

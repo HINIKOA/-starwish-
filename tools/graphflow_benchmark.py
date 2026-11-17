@@ -48,7 +48,11 @@ def run(file_count: int, repeats: int) -> dict:
         git_run("init", "-q")
         source = repo / "a_probe.ts"
         source.write_text("export function starwishBenchmarkProbe() { return 101; }\n", encoding="utf-8")
-        for n in range(file_count - 2):
+        has_tail_test = file_count > 2
+        if has_tail_test:
+            (repo / "a_tail.test.ts").write_text("import { tailProbe } from './z_probe';\nexport const value = tailProbe;\n",
+                                                encoding="utf-8")
+        for n in range(file_count - 2 - int(has_tail_test)):
             imports = f"import {{ bench{n - 1} }} from './module_{n - 1:05d}';\n" if n else ""
             expression = f"bench{n - 1}() + {n}" if n else "0"
             module = f"{imports}export function bench{n}(): number {{ return {expression}; }}\n"
@@ -75,14 +79,6 @@ def run(file_count: int, repeats: int) -> dict:
             estimate = estimate_tokens(json.dumps(context, ensure_ascii=False))
             require(estimate == context["tokenBudget"]["estimated"] and estimate <= 256,
                     "Context exceeded its declared token budget.")
-            if partial:
-                try:
-                    graphflow.read_batch(["z_probe.ts"])
-                except graphflow.GraphFlowError as exc:
-                    require(exc.status_code == 404 and "索引仅部分覆盖" in str(exc),
-                            "Missing tail did not indicate partial coverage.")
-                else:
-                    raise RuntimeError("Tail file escaped the index limit.")
             source.write_text("export function starwishBenchmarkProbe() { return 202; }\n", encoding="utf-8")
             changed, changed_ms = measure(graphflow.reindex)
             require(changed["index"]["updated"] == 1 and changed["parsed_or_reused"] == 1,
@@ -90,12 +86,25 @@ def run(file_count: int, repeats: int) -> dict:
             after = graphflow.read_batch([target])
             require("return 202" in after["text"] and "return 101" not in after["text"],
                     "Symbol lookup returned stale code after the edit.")
+            tail, tail_ms = measure(lambda: graphflow.read_batch(["z_probe.ts:1-1"]), repeats)
+            require("export const tailProbe = 1;" in tail["text"] and tail["index"]["partial"] == partial
+                    and tail["index"]["files"] == expected, "Explicit tail read ignored the target or limits.")
+            if partial:
+                baseline_tail = graphflow.read(query="tailProbe", anchors_only=True)
+                require(not any(item.get("file") == "z_probe.ts" for item in baseline_tail["matches"]),
+                        "Explicit tail lookup permanently changed the general index selection.")
+            routing_ms = None
+            if has_tail_test:
+                routed, routing_ms = measure(lambda: graphflow.affected_tests(repo, ["z_probe.ts"], explicit=True), repeats)
+                require(routed["tests"] == ["a_tail.test.ts"] and routed["partial"] == partial,
+                        "Test routing did not follow the explicit tail file under the same capacity limit.")
             require(not (root / "soul").exists(), "The code benchmark created memory state.")
             return {"provider": cold["provider"], "platform": platform.system(), "source_files": file_count,
                     "indexed": expected, "partial": partial, "context_estimated_tokens": estimate,
                     "reparsed": changed["parsed_or_reused"], "milliseconds": {
                         "cold_index": cold_ms, "warm_index": warm_ms, "symbol_read": read_ms,
-                        "context": context_ms, "one_file_refresh": changed_ms}}
+                        "context": context_ms, "explicit_tail_read": tail_ms, "tail_test_routing": routing_ms,
+                        "one_file_refresh": changed_ms}}
         finally:
             graphflow._clear_snapshot()
 

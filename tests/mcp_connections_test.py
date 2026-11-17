@@ -71,7 +71,20 @@ async def exercise(client, setup, fallback):
         live = await wait(lambda s: s["state"] == "connected" and s["connected"] == 1)
         assert live["sessions"][0]["version"] == "1.0", live
         listing = await send(proc, "tools/list", request_id=2)
-        assert "recall_index" in {tool["name"] for tool in listing["tools"]}
+        tools = {tool["name"]: tool for tool in listing["tools"]}
+        assert "recall_index" in tools
+        contracts = {
+            "graphflow_index": {"mode": (["incremental", "full"], "incremental")},
+            "graphflow_plan": {
+                "mode": (["simple", "insight"], "simple"),
+                "intent": (["review", "change"], "review"),
+            },
+        }
+        for name, fields in contracts.items():
+            properties = tools[name]["inputSchema"]["properties"]
+            for field, (choices, default) in fields.items():
+                assert properties[field]["enum"] == choices, (name, field, properties[field])
+                assert properties[field]["default"] == default, (name, field, properties[field])
         result = await send(proc, "tools/call", {"name": "recall_index", "arguments": {}}, 3)
         assert not result.get("isError"), result
         if "STARWISH_GRAPHFLOW_WORKSPACE" in setup["env"]:

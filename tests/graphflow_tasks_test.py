@@ -261,6 +261,49 @@ class TaskLedgerTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertNotIn("source_state", tasks.detail(task_id)["events"][0]["evidence"][0])
 
+    def test_context_compares_historical_test_plan_without_running_or_publishing_it(self):
+        task_id = self.create()["id"]
+        plan, = graphflow_tests.plan(self.repo)["profiles"]
+        run = graphflow_tests.run(self.repo, "unit", plan["approval_sha256"])
+        run_id = run["run_id"]
+        tasks.record_verification(self.repo, task_id, run_id)
+        tasks.report(task_id, 0, "completed", "Test plan freshness fixture.", [f"test:{run_id}"])
+        test_path = tasks.state_path(self.repo, "-tests", create=False)
+        ledger_path = tasks.state_path(self.repo, "-tasks", create=False)
+        original = test_path.read_bytes(), ledger_path.read_bytes()
+        initial = self.source.read_bytes()
+
+        def recall(expected):
+            item, = graphflow_context.build("freshness", 1000)["outcomes"]
+            self.assertEqual(item["task_id"], task_id)
+            proof = item["evidence"][0]
+            linked = item["historical_test_verification"]
+            for row in (proof, linked):
+                self.assertEqual((row["run_id"], row["state"], row["plan_state"]), (run_id, "passed", expected))
+            self.assertNotIn(plan["approval_sha256"], json.dumps(item))
+            self.assertNotIn("log_not_in_ledger", json.dumps(item))
+
+        with patch.object(graphflow, "read", return_value={"index": {"partial": False}, "matches": []}), \
+             patch.object(graphflow_tests, "_execute") as execute:
+            with patch.object(graphflow_tests, "plan", wraps=graphflow_tests.plan) as live_plan:
+                recall("matching_plan")
+                live_plan.assert_called_once()
+            self.source.write_bytes(initial + b"# different worktree\n")
+            recall("changed_plan")
+            self.source.write_bytes(initial)
+            recall("matching_plan")
+            with patch.dict(os.environ, {graphflow_tests.PROFILES_ENV: json.dumps(
+                {"unit": {"argv": [sys.executable, "-c", "pass"]}})}
+            ):
+                recall("changed_plan")
+            with patch.dict(os.environ, {graphflow_tests.PROFILES_ENV: ""}):
+                recall("unavailable")
+            with patch.object(graphflow_tests, "_RETENTION_SECONDS", 0):
+                recall("unavailable")
+            execute.assert_not_called()
+        self.assertEqual((test_path.read_bytes(), ledger_path.read_bytes()), original)
+        self.assertNotIn("plan_state", tasks.detail(task_id)["test_verifications"][0])
+
     def test_topic_read_scope_and_missing_ledger(self):
         path = tasks.state_path(self.repo, "-tasks", create=False)
         with self.assertRaises(graphflow.GraphFlowError) as missing:

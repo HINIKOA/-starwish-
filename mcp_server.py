@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from typing import Literal
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -303,8 +304,9 @@ def graphflow_diagnose(rootDir: str = "", nodeLimit: int | None = None, edgeLimi
     return _j(graphflow_diagnostics.inspect(rootDir, nodeLimit, edgeLimit, configPath))
 
 
-def graphflow_index(mode: str = "incremental", filePath: str = "", rootDir: str = "") -> str:
-    """刷新星愿进程内的隔离索引。filePath 可选，必须是工作区相对路径。不会改仓库。"""
+def graphflow_index(mode: Literal["incremental", "full"] = "incremental", filePath: str = "",
+                    rootDir: str = "") -> str:
+    """以 incremental（默认）或 full 刷新进程内隔离索引，不改仓库。filePath 须为工作区相对路径；只查状态用 graphflow_diagnose。"""
     return _j(graphflow.reindex(mode, filePath, rootDir))
 
 
@@ -314,9 +316,9 @@ def graphflow_insight(task: str, rootDir: str = "", query: str = "", target: str
     return _j(graphflow_insights.review(task, rootDir, query, target, intent, configPath, plan_sha256, observations))
 
 
-def graphflow_plan(task: str, mode: str = "simple", rootDir: str = "", query: str = "",
-                   target: str = "", intent: str = "review", configPath: str = "") -> str:
-    """生成带依赖和人工审批停点的计划，不运行任何步骤。可用 simple 或 insight。"""
+def graphflow_plan(task: str, mode: Literal["simple", "insight"] = "simple", rootDir: str = "", query: str = "",
+                   target: str = "", intent: Literal["review", "change"] = "review", configPath: str = "") -> str:
+    """用 simple（默认）或 insight 生成带依赖和人工审批停点的计划；两种模式都只预览、不执行。"""
     return _j(graphflow_planner.build(task, mode, rootDir, query, target, intent, configPath))
 
 
@@ -379,9 +381,11 @@ SCHEMAS = {
         "sessionId": {"type": "string", "maxLength": 128},
         "rootDir": {"type": "string"}}},
     "graphflow_plan": {"type": "object", "additionalProperties": False, "properties": {
-        "task": {"type": "string", "maxLength": 1200}, "mode": {"type": "string", "enum": ["simple", "insight"]},
+        "task": {"type": "string", "maxLength": 1200},
+        "mode": {"type": "string", "enum": ["simple", "insight"], "default": "simple"},
         "rootDir": {"type": "string"}, "query": {"type": "string", "maxLength": 300},
-        "target": {"type": "string", "maxLength": 500}, "intent": {"type": "string", "enum": ["review", "change"]},
+        "target": {"type": "string", "maxLength": 500},
+        "intent": {"type": "string", "enum": ["review", "change"], "default": "review"},
         "configPath": {"type": "string"}}, "required": ["task"]},
     "graphflow_index": {"type": "object", "additionalProperties": False, "properties": {
         "mode": {"type": "string", "enum": ["incremental", "full"], "default": "incremental"},

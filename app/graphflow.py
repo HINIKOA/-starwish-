@@ -12,6 +12,8 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from itertools import chain
 from pathlib import Path, PurePosixPath
 
 from . import config
@@ -25,6 +27,7 @@ MAX_READ_TARGETS = 12
 MAX_AFFECTED_INPUTS = 128
 GRAPH_NODE_LIMIT = 100
 GRAPH_EDGE_LIMIT = 160
+_REPARSE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 SOURCE_SUFFIXES = frozenset(
     ".py .pyi .js .jsx .mjs .cjs .ts .tsx .mts .cts .go .rs .c .h .cpp .hpp .cc .cxx .hxx .cs .css .html .md".split()
 )
@@ -117,7 +120,35 @@ def _safe_source(value: str) -> PurePosixPath | None:
     return path if path.suffix.casefold() in SOURCE_SUFFIXES else None
 
 
-def _refresh_snapshot(workspace: Path, dest: Path, git: str, previous: dict[str, bytes]) -> tuple[bool, dict[str, bytes], dict]:
+def _regular_source(info: os.stat_result) -> bool:
+    return (stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and not (getattr(info, "st_file_attributes", 0) & _REPARSE))
+
+
+def _source_metadata(source: Path, soul: Path) -> os.stat_result:
+    resolved = source.resolve()
+    if resolved != source or resolved.is_relative_to(soul):
+        raise GraphFlowError("源码须位于授权项目内，不允许链接或灵魂包路径。", 404)
+    info = source.lstat()
+    if not _regular_source(info):
+        raise GraphFlowError("源码须为普通文件，不允许硬链接或重解析点。", 404)
+    return info
+
+
+@contextmanager
+def _open_source(source: Path, soul: Path, checked: os.stat_result):
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(source, flags), "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        # Verify the opened file even on hosts without O_NOFOLLOW.
+        if (not _regular_source(opened) or not os.path.samestat(checked, opened)
+                or not os.path.samestat(opened, _source_metadata(source, soul))):
+            raise GraphFlowError("打开源码时文件身份已变化。", 409)
+        yield stream
+
+
+def _refresh_snapshot(workspace: Path, dest: Path, git: str, previous: dict[str, bytes],
+                      preferred: tuple[str, ...] = ()) -> tuple[bool, dict[str, bytes], dict]:
     process = subprocess.run(
         [git, "ls-files", "--cached", "-z"], cwd=workspace, capture_output=True,
         timeout=10, check=False,
@@ -129,32 +160,36 @@ def _refresh_snapshot(workspace: Path, dest: Path, git: str, previous: dict[str,
     used = 0
     partial = False
     soul = config.SOUL_DIR.resolve()
-    for raw in process.stdout.split(b"\0"):
+    tracked = process.stdout.split(b"\0")
+    requested = dict.fromkeys(os.fsencode(path) for path in preferred)
+    if requested:
+        present = {raw for raw in tracked if raw in requested}
+        # Explicit targets get the first slots, never an exemption from Git or size checks.
+        ordered = chain((raw for raw in requested if raw in present),
+                        (raw for raw in tracked if raw not in requested))
+    else:
+        ordered = iter(tracked)
+    for raw in ordered:
         value = os.fsdecode(raw)
         relative = _safe_source(value)
         if relative is None or value in files:
             continue
         source = workspace.joinpath(*relative.parts)
         try:
-            resolved = source.resolve(strict=True)
-            if resolved != source or resolved.is_relative_to(soul):
-                continue
-            metadata = source.stat()
-            if not stat.S_ISREG(metadata.st_mode):
-                continue
+            metadata = _source_metadata(source, soul)
             if metadata.st_size > MAX_FILE_BYTES:
                 partial = True
                 continue
             if len(files) >= MAX_FILES or used + metadata.st_size > MAX_BYTES:
                 partial = True
                 break
-            with source.open("rb") as handle:
+            with _open_source(source, soul, metadata) as handle:
                 data = handle.read(MAX_FILE_BYTES + 1)
             if len(data) > MAX_FILE_BYTES or used + len(data) > MAX_BYTES:
                 partial = True
                 continue
             data.decode("utf-8")
-        except (OSError, UnicodeError, RuntimeError):
+        except (GraphFlowError, OSError, UnicodeError, RuntimeError):
             continue
         digest = hashlib.sha256(data).digest()
         files[value] = digest
@@ -193,8 +228,8 @@ class _Snapshot:
         self.files: dict[str, bytes] = {}
         self.warmed: dict[str, bytes] = {}
 
-    def refresh(self, git: str) -> tuple[bool, dict]:
-        partial, self.files, stats = _refresh_snapshot(self.workspace, self.root, git, self.files)
+    def refresh(self, git: str, preferred: tuple[str, ...] = ()) -> tuple[bool, dict]:
+        partial, self.files, stats = _refresh_snapshot(self.workspace, self.root, git, self.files, preferred)
         self.warmed = {path: digest for path, digest in self.warmed.items() if self.files.get(path) == digest}
         return partial, stats
 
@@ -321,23 +356,99 @@ if (input.rename) {
     const { computeBlastRadius } = require(path.join(path.dirname(process.argv[1]), 'blast-radius.js'));
     const { resolveRelativeImportPath } = require(path.join(path.dirname(process.argv[1]), 'ast-engine.js'));
     const known = index.getFileSet();
+    const moduleNames = new Map();
+    let parse;
+    try { ({ parse } = require('node:module').createRequire(process.argv[1])('@babel/parser')); } catch {}
+    const esm = /\\.(?:[cm]?[jt]s|[jt]sx)$/i;
+    const identifier = node => node?.name ?? node?.value;
+    function namedExports(module) {
+        if (moduleNames.has(module)) return moduleNames.get(module);
+        if (!parse || moduleNames.size >= 32 || !esm.test(module) || !known.has(module)) return null;
+        const names = new Map();
+        const named = new Set();
+        const details = {names, named};
+        moduleNames.set(module, details);
+        const content = index.getFileAnalysis(module)?.content;
+        if (!content) return details;
+        let statements;
+        try {
+            const plugins = /\\.[cm]?tsx?$/i.test(module) ? ['typescript'] : [];
+            if (/\\.(?:[cm]?js|[jt]sx)$/i.test(module)) plugins.push('jsx');
+            statements = parse(content, {sourceType: 'module', plugins}).program.body;
+        } catch { return details; }
+        const imports = new Map();
+        for (const stmt of statements) {
+            if (stmt.type !== 'ImportDeclaration' || stmt.importKind === 'type') continue;
+            for (const spec of stmt.specifiers) {
+                if (spec.type === 'ImportSpecifier' && spec.importKind !== 'type') {
+                    const binding = identifier(spec.imported);
+                    imports.set(identifier(spec.local), {module: stmt.source.value, binding});
+                    named.add(JSON.stringify([stmt.loc.start.line, stmt.source.value, binding]));
+                }
+            }
+        }
+        for (const stmt of statements) {
+            if (stmt.type !== 'ExportNamedDeclaration' || stmt.exportKind === 'type') continue;
+            const line = stmt.loc.start.line;
+            const decl = stmt.declaration;
+            if (decl) {
+                for (const local of [decl.id, ...(decl.declarations ?? []).map(item => item.id)]) {
+                    if (local?.type === 'Identifier') names.set(local.name, {binding: local.name, line});
+                }
+            }
+            for (const spec of stmt.specifiers) {
+                if (spec.type !== 'ExportSpecifier' || spec.exportKind === 'type') continue;
+                const binding = identifier(spec.local);
+                const origin = stmt.source ? {module: stmt.source.value, binding} : imports.get(binding) ?? {binding};
+                names.set(identifier(spec.exported), {...origin, line});
+                if (stmt.source) named.add(JSON.stringify([line, stmt.source.value, binding]));
+            }
+        }
+        return details;
+    }
+    function forwardingChain(start, name) {
+        const chain = [];
+        const visited = new Set();
+        let module = start;
+        let binding = name;
+        for (let step = 0; step <= 4; step++) {
+            const key = JSON.stringify([module, binding]);
+            if (visited.has(key)) return null;
+            visited.add(key);
+            const link = namedExports(module)?.names.get(binding);
+            if (!link) return null;
+            if (!link.module) return module === file && link.binding === name && chain.length ? chain : null;
+            if (step === 4 || link.binding === 'default') return null;
+            chain.push({file: module, line: link.line});
+            const next = resolveRelativeImportPath(index.rootDir, module, link.module, known);
+            if (!next) return null;
+            module = next;
+            binding = link.binding;
+        }
+        return null;
+    }
     const impacts = matches.slice(0, 6).map((match) => {
-        const blast = computeBlastRadius(index, file, match.name, 8, match.parentClass);
+        const blast = computeBlastRadius(index, file, match.name, 24, match.parentClass);
         const importers = blast.importers.slice(0, 24).map(({ file: importer, line, rawImport }) => {
             const declaration = index.getFileAnalysis(importer)?.ast.imports
                 .find((item) => item.line === line && item.raw === rawImport);
             const resolved = declaration
                 ? resolveRelativeImportPath(index.rootDir, importer, declaration.module, known) : undefined;
             const resolved_file = resolved && known.has(resolved) ? resolved : null;
+            const chain = resolved_file && resolved_file !== file && esm.test(file) && !match.parentClass
+                && namedExports(importer)?.named.has(JSON.stringify([line, declaration.module, match.name]))
+                ? forwardingChain(resolved_file, match.name) : null;
             return { file: importer, line, resolved_file,
-                resolution: resolved_file === file ? 'direct_module' : resolved_file ? 'other_module' : 'unresolved' };
+                resolution: resolved_file === file ? 'direct_module' :
+                    chain ? 'reexport_module' : resolved_file ? 'other_module' : 'unresolved',
+                ...(chain ? {reexport_chain: chain} : {}) };
         });
         return {
             symbol: match.parentClass ? match.parentClass + '.' + match.name : match.name,
             line: match.line,
             end_line: match.endLine,
             total_call_sites: blast.totalCallSites,
-            call_sites: blast.callSites.map(({ file, line, caller }) => ({ file, line, caller })),
+            call_sites: blast.callSites.slice(0, 8).map(({ file, line, caller }) => ({ file, line, caller })),
             total_importers: blast.importers.length,
             importers,
         };
@@ -345,8 +456,18 @@ if (input.rename) {
     process.stdout.write(JSON.stringify({ impacts, truncated: matches.length > 6 }));
 } else {
     const result = slicer.executeSurgicalRead(input);
-    const output = input.anchorsOnly ? result.matchedSymbols.slice(0, 12) :
+    let output = input.anchorsOnly ? result.matchedSymbols.slice(0, 12) :
         Array.from(result.text).slice(0, 24001).join('');
+    if (input.captureTargets && !input.anchorsOnly) {
+        const resolved = new Set(result.resolvedKeys);
+        const index = slicer.getWorkspaceAstIndex(input.rootDir);
+        const keys = input.targets.filter((target) => {
+            if (!resolved.has(target)) return false;
+            const range = target.match(/^(.+?):(\\d+)-(\\d+)$/);
+            return !range || Number(range[3]) <= (index.getFileAnalysis(range[1])?.ast.totalLines ?? 0);
+        });
+        output = {text: output, keys};
+    }
     process.stdout.write(JSON.stringify(output));
 }
 """
@@ -356,10 +477,10 @@ def assistant_enabled() -> bool:
     return os.environ.get("STARWISH_GRAPHFLOW_ASSISTANT") == "1" and status()["available"]
 
 
-def _sync_snapshot(workspace: Path, git: str) -> tuple[_Snapshot, bool, dict]:
+def _sync_snapshot(workspace: Path, git: str, preferred: tuple[str, ...] = ()) -> tuple[_Snapshot, bool, dict]:
     snapshot = _workspace_snapshot(workspace)
     try:
-        partial, stats = snapshot.refresh(git)
+        partial, stats = snapshot.refresh(git, preferred)
     except Exception:
         # Never reuse a partially refreshed snapshot.
         _clear_snapshot()
@@ -418,7 +539,7 @@ def read(query: str = "", target: str = "", skeleton: bool = False, impact_only:
 def read_batch(targets: list[str] | None = None, q: str = "", topK: int = 6, skeleton: bool = False,
                dedup: bool = False, topicId: str = "", rootDir: str = "", sessionId: str = "",
                resumeFromTurnId: str = "") -> dict:
-    from . import graphflow_legacy_journal, graphflow_tasks
+    from . import graphflow_legacy_journal, graphflow_tasks, graphflow_trajectories
 
     if (not isinstance(dedup, bool) or not isinstance(topicId, str)
             or not isinstance(resumeFromTurnId, str) or not isinstance(skeleton, bool)):
@@ -471,12 +592,18 @@ def read_batch(targets: list[str] | None = None, q: str = "", topK: int = 6, ske
             else:
                 raise GraphFlowError("该任务没有保存代码定位，请提供 targets 或 q。")
     normalized = list(dict.fromkeys(row[1] for row in resolved))
+    capture = (graphflow_trajectories.capture_enabled() and not q and not topic
+               and 1 <= len(normalized) <= graphflow_trajectories.MAX_TARGETS
+               and all(row[2] for row in resolved) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", sessionId))
     result = _read(workspace, q, normalized, list(dict.fromkeys(row[2] for row in resolved if row[2])), skeleton, topK,
-                   include_snapshot_digest=dedup)
+                   include_snapshot_digest=dedup, capture_targets=bool(capture))
+    capture_keys = result.pop("_capture_keys", [])
     snapshot_digest = result.pop("_snapshot_digest", b"")
     if dedup and _duplicate_read([str(workspace), sessionId, topic, q, normalized, skeleton, topK],
                                  result["text"], snapshot_digest):
         result.update(text="本会话的读取结果未变化。需要正文时可关闭 dedup 后重读。", deduplicated=True)
+    elif capture and capture_keys == normalized:
+        graphflow_trajectories.record(workspace, sessionId, normalized)
     if topic:
         notice = "已匹配旧话题；下方仅为当前源码。" if legacy_topic else "星愿项目任务已定位。"
         result.update(text=f"// [Topic Resume: {topic}] {notice}\n\n{result['text']}",
@@ -499,12 +626,13 @@ def _duplicate_read(identity: list, body: str, snapshot_digest: bytes) -> bool:
 
 
 def _read(workspace: Path, query: str, targets: list[str], files: list[str], skeleton: bool, top_k: int,
-          *, impact: dict | None = None, anchors_only: bool = False, include_snapshot_digest: bool = False) -> dict:
+          *, impact: dict | None = None, anchors_only: bool = False, include_snapshot_digest: bool = False,
+          capture_targets: bool = False) -> dict:
     node, entry, git = _engine()
     if not _gate.acquire(blocking=False):
         raise GraphFlowError("已有代码查询运行中，请稍后再试。", 429)
     try:
-        snapshot, partial, index_stats = _sync_snapshot(workspace, git)
+        snapshot, partial, index_stats = _sync_snapshot(workspace, git, tuple(files))
         if any(file not in snapshot.files for file in files):
             reason = "目标不在当前可查询的受版本控制文件范围内。"
             if partial:
@@ -517,6 +645,8 @@ def _read(workspace: Path, query: str, targets: list[str], files: list[str], ske
                    "anchorsOnly": anchors_only}
         if impact:
             options["impact"] = impact
+        if capture_targets:
+            options["captureTargets"] = True
         result = _call_bridge(snapshot, node, entry, **options)
         if anchors_only and isinstance(result, list):
             return {"matches": result, "index": index_stats}
@@ -526,6 +656,9 @@ def _read(workspace: Path, query: str, targets: list[str], files: list[str], ske
                 raise GraphFlowError("目标文件中没有找到指定符号。", 404)
             return {"file": impact["file"], "impacts": impacts, "truncated": result["truncated"],
                     "provider": PROVIDER, "index": index_stats, "analysis": "static_heuristic"}
+        keys = []
+        if capture_targets and isinstance(result, dict):
+            keys, result = result.get("keys", []), result.get("text")
         if not isinstance(result, str):
             raise GraphFlowError("GraphFlow 返回了无效的查询结果。", 503)
         if "@brief" in targets:
@@ -537,6 +670,8 @@ def _read(workspace: Path, query: str, targets: list[str], files: list[str], ske
         if partial:
             result += "\n（部分文件超出大小或数量限制，结果可能不完整。）"
         response = {"text": result, "provider": PROVIDER, "index": index_stats}
+        if capture_targets:
+            response["_capture_keys"] = keys
         if include_snapshot_digest:
             digest = hashlib.sha256()
             for path, file_digest in sorted(snapshot.files.items()):
@@ -572,7 +707,7 @@ def dependency_graph(target: str = "", node_limit: int = 20, edge_limit: int = 3
     if not _gate.acquire(blocking=False):
         raise GraphFlowError("已有代码查询或索引运行中，请稍后再试。", 429)
     try:
-        snapshot, partial, stats = _sync_snapshot(workspace, git)
+        snapshot, partial, stats = _sync_snapshot(workspace, git, (target,) if target else ())
         if target and target not in snapshot.files:
             suffix = "索引仅部分覆盖，未找到不代表文件不存在。" if partial else ""
             raise GraphFlowError("目标不在当前可查询的文件范围内。" + suffix, 404)
@@ -694,14 +829,18 @@ def affected_tests(workspace: Path, changes: list[str], *, explicit: bool = Fals
     if not _gate.acquire(blocking=False):
         raise GraphFlowError("已有代码查询运行中，请稍后再试。", 429)
     try:
-        snapshot, partial, _ = _sync_snapshot(workspace, git)
         limited = changes[:MAX_AFFECTED_INPUTS]
-        if explicit and any(path not in snapshot.files for path in limited):
-            raise GraphFlowError("显式改动必须是可查询的受版本控制文件。", 404)
+        snapshot, partial, _ = _sync_snapshot(workspace, git, tuple(limited))
+        missing = any(path not in snapshot.files for path in limited)
+        if explicit and missing:
+            reason = "显式改动必须是可查询的受版本控制文件。"
+            if partial:
+                reason += "索引仅部分覆盖，请缩小改动范围。"
+            raise GraphFlowError(reason, 404)
         tests = _call_bridge(snapshot, node, entry, changedFiles=limited)
         if not isinstance(tests, list) or any(not isinstance(path, str) or path not in snapshot.files for path in tests):
             raise GraphFlowError("GraphFlow 返回了无效的测试定位结果。", 503)
-        return {"tests": sorted(set(tests)), "partial": partial or len(changes) > len(limited)}
+        return {"tests": sorted(set(tests)), "partial": partial or missing or len(changes) > len(limited)}
     except subprocess.TimeoutExpired as exc:
         raise GraphFlowError("测试定位超时。", 504) from exc
     except (OSError, UnicodeError) as exc:
@@ -723,7 +862,7 @@ def reindex(mode: str = "incremental", file_path: str = "", root_dir: str = "") 
     try:
         if mode == "full":
             _clear_snapshot()
-        snapshot, _, stats = _sync_snapshot(workspace, git)
+        snapshot, _, stats = _sync_snapshot(workspace, git, (file,) if file else ())
         if file and file not in snapshot.files:
             raise GraphFlowError("目标不在可索引的受版本控制文件范围内。", 404)
         files = [file] if file else [name for name in snapshot.files if name not in snapshot.warmed]
