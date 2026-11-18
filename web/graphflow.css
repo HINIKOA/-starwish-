@@ -46,6 +46,12 @@ body.graphflow-page { overflow: auto; }
 }
 .gf-status[data-state="ready"] { color: var(--ok); }
 .gf-status[data-state="unavailable"] { color: var(--accent); }
+.gf-workspace-access { display: grid; gap: 8px; margin-block: 14px; padding-block: 10px; border-block-end: 1px solid var(--line); }
+.gf-workspace-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.gf-workspace-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.gf-workspace-list li > div { flex: 1 1 190px; overflow-wrap: anywhere; }
+.gf-workspace-list small { display: block; }
+#gf-workspace-path { flex: 1 1 190px; min-width: 0; }
 .gf-meta {
   display: grid;
   gap: 4px;

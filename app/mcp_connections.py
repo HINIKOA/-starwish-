@@ -80,18 +80,26 @@ class Presence:
             except OSError:
                 pass
 
+    def _set_client(self, client):
+        if isinstance(client, dict):
+            name = client.get("title") or client.get("name")
+            self.info["name"] = name.strip()[:120] if isinstance(name, str) and name.strip() else "MCP client"
+            version = client.get("version")
+            self.info["version"] = version.strip()[:48] if isinstance(version, str) else ""
+
+    def mark_connected(self, client):
+        with self.lock:
+            self._set_client(client)
+            self.info["state"] = "connected"
+            self._write()
+
     def observe(self, method, params=None):
         if method not in {"initialize", "notifications/initialized"}:
             return
         with self.lock:
             if method == "initialize":
                 self.initializing = True
-                client = params.get("clientInfo") if isinstance(params, dict) else None
-                if isinstance(client, dict):
-                    name = client.get("title") or client.get("name")
-                    self.info["name"] = name.strip()[:120] if isinstance(name, str) and name.strip() else "MCP client"
-                    version = client.get("version")
-                    self.info["version"] = version.strip()[:48] if isinstance(version, str) else ""
+                self._set_client(params.get("clientInfo") if isinstance(params, dict) else None)
             elif self.initializing:
                 self.info["state"] = "connected"
             else:

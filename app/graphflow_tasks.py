@@ -269,7 +269,20 @@ def _annotate_test_evidence(workspace, outcomes: list[dict]) -> None:
         item["plan_state"] = states[item["run_id"]]
 
 
-def find_completed(query: str, *, check_evidence: bool = False) -> list[dict]:
+def _context_trust(outcome: dict) -> str:
+    linked = outcome.get("historical_test_verification")
+    if linked is not None:
+        if linked["state"] == "passed" and linked["exit_code"] == 0 and linked["plan_state"] == "matching_plan":
+            return "historical_operator_pass"
+        return "recheck_required"
+    if any(item.get("source_state") == "matching_bytes" for item in outcome["evidence"]):
+        return "code_reference_only"
+    if any(item["kind"] == "code" for item in outcome["evidence"]):
+        return "recheck_required"
+    return "reported_reference_only"
+
+
+def find_completed(query: str, *, check_evidence: bool = False, evidence_only: bool = False) -> list[dict]:
     if not enabled():
         return []
     query = query.casefold()
@@ -287,19 +300,31 @@ def find_completed(query: str, *, check_evidence: bool = False) -> list[dict]:
                              WHERE t.state='completed' ORDER BY t.updated DESC LIMIT 200""")
         for row in rows:
             evidence = json.loads(row["evidence"])
+            if not isinstance(evidence, list):
+                continue
             searchable = f"{row['summary']} {row['inputs']} {row['evidence']}".casefold()
             score = sum(len(term) for term in terms if term in searchable)
             if score:
-                hits.append((score, row["updated"], {"task_id": row["id"], "summary": row["summary"],
-                                                     "evidence": evidence[:2], "reported": True}))
-        outcomes = [hit[2] for hit in sorted(hits, key=lambda hit: hit[:2], reverse=True)[:4]]
-        linked = latest_verifications(db, [outcome["task_id"] for outcome in outcomes])
+                outcome = {"task_id": row["id"], "evidence": evidence[:2], "reported": True}
+                if not evidence_only:
+                    outcome["summary"] = row["summary"]
+                hits.append((score, row["updated"], outcome))
+        ranked = [hit[2] for hit in sorted(hits, key=lambda hit: hit[:2], reverse=True)]
+        if evidence_only:
+            linked = latest_verifications(db, [outcome["task_id"] for outcome in ranked])
+            outcomes = [item for item in ranked if item["evidence"] or item["task_id"] in linked][:4]
+        else:
+            outcomes = ranked[:4]
+            linked = latest_verifications(db, [outcome["task_id"] for outcome in outcomes])
         for outcome in outcomes:
             if outcome["task_id"] in linked:
                 outcome["historical_test_verification"] = linked[outcome["task_id"]]
-    if check_evidence:
+    if check_evidence or evidence_only:
         _annotate_code_evidence(workspace, outcomes)
         _annotate_test_evidence(workspace, outcomes)
+    if evidence_only:
+        for outcome in outcomes:
+            outcome["trust"] = _context_trust(outcome)
     return outcomes
 
 

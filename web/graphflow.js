@@ -12,6 +12,15 @@ const code = byId("gf-code");
 const placeholder = byId("gf-placeholder");
 let available = false;
 let busy = false;
+let activeWorkspace = "";
+let workspaceRevision = 0;
+let legacyWorkspace = "";
+let workspaces = [];
+let workspaceBusy = false;
+let workspaceListSignature = "";
+let autoAuthorize = false;
+let workspacePolicyLoaded = false;
+const workspaceReads = new Set(["status", "read", "impact", "context", "graph"].map((name) => `/api/graphflow/${name}`));
 const edit = byId("gf-edit-form");
 const editSubmit = byId("gf-edit-submit");
 const editCheck = byId("gf-edit-check");
@@ -24,6 +33,7 @@ let revision = 0;
 let previewId = "";
 
 async function request(url, options) {
+  if (activeWorkspace && workspaceReads.has(url)) url += `?workspace_id=${encodeURIComponent(activeWorkspace)}`;
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -45,16 +55,18 @@ function showError(message = "") {
 function setAvailability(state) {
   available = state.available === true;
   status.dataset.state = available ? "ready" : "unavailable";
-  status.textContent = available ? "引擎可用" : "引擎不可用";
+  status.textContent = available ? "引擎可用" : state.authorization_required ? "待授权工作区" : "引擎不可用";
   byId("gf-workspace").textContent = state.workspace || "未配置";
   byId("gf-provider").textContent = state.provider || "—";
   reason.textContent = state.reason || "";
   reason.hidden = !state.reason;
   submit.disabled = !available;
-  editAvailable = Boolean(state.workspace);
+  const fixed = Boolean(state.workspace) && !state.read_only_workspace;
+  byId("gf-edit-section").hidden = Boolean(activeWorkspace);
+  editAvailable = fixed;
   updateEditButtons();
   const setup = (section, form, hint, enabled, disabledMessage) => {
-    byId(section).hidden = !state.workspace;
+    byId(section).hidden = !fixed;
     const ready = enabled && state.operator_key_configured === true;
     byId(form).hidden = !ready;
     byId(hint).textContent = !enabled ? disabledMessage
@@ -65,9 +77,9 @@ function setAvailability(state) {
     "网页服务尚未启用编辑审批。若要接收桌面 MCP 的预览，桌面 MCP 也需启用同一审批队列。");
   setup("gf-test", "gf-test-form", "gf-test-setup", state.test_enabled === true,
     "网页服务尚未配置预设测试。");
-  byId("gf-workflow").hidden = !state.workspace;
-  byId("gf-planner").hidden = !state.workspace;
-  byId("gf-artifact").hidden = !available;
+  byId("gf-workflow").hidden = !fixed;
+  byId("gf-planner").hidden = !fixed;
+  byId("gf-artifact").hidden = !available || !fixed;
   byId("gf-dependency").hidden = !available;
   byId("gf-tasks").hidden = byId("gf-task-save").hidden = state.tasks_enabled !== true || !state.workspace;
   byId("gf-legacy-tasks").hidden = state.legacy_tasks_enabled !== true || !state.workspace;
@@ -200,18 +212,20 @@ graphForm.addEventListener("submit", async (event) => {
   graphMap.hidden = true;
   graphMessage.textContent = "正在构建代码关系…";
   button.disabled = true;
+  const workspaceAtStart = workspaceRevision;
   try {
     const graph = await request("/api/graphflow/graph", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target: graphTarget.value.trim() }),
     });
+    if (workspaceAtStart !== workspaceRevision) return;
     currentGraph = graph;
     selectedNode = -1;
     graphFilter.value = "";
     renderDependencyGraph();
     graphMap.hidden = !graph.nodes.length;
   } catch (failure) {
-    graphMessage.textContent = failure.message;
+    if (workspaceAtStart === workspaceRevision) graphMessage.textContent = failure.message;
   } finally {
     button.disabled = false;
     if (restoreFocus) button.focus();
@@ -294,6 +308,7 @@ form.addEventListener("submit", async (event) => {
 
   showError();
   busy = true;
+  const workspaceAtStart = workspaceRevision;
   submit.disabled = true;
   submit.textContent = "查询中…";
   code.textContent = "";
@@ -308,6 +323,7 @@ form.addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(compact ? { query } : impact ? { target } : { query, target, skeleton: byId("gf-skeleton").checked }),
     });
+    if (workspaceAtStart !== workspaceRevision) return;
     const text = compact ? JSON.stringify(payload, null, 2) : impact ? formatImpact(payload) : payload.text;
     if (typeof text !== "string") throw new Error("服务未返回查询正文。");
     if (text.trim()) {
@@ -320,6 +336,7 @@ form.addEventListener("submit", async (event) => {
       resultStatus.textContent = "未找到匹配";
     }
   } catch (failure) {
+    if (workspaceAtStart !== workspaceRevision) return;
     showError(failure.message);
     placeholder.textContent = "未能获取查询结果。";
     resultStatus.textContent = "查询失败";
@@ -1018,6 +1035,153 @@ planner.addEventListener("submit", async (event) => {
   }
 });
 
-request("/api/graphflow/status").then(setAvailability).catch((failure) => {
-  setAvailability({ reason: failure.message });
+const workspaceMessage = byId("gf-workspaces-message");
+const approveAll = byId("gf-workspaces-approve");
+const workspacePicker = byId("gf-workspace-pick");
+const autoButton = byId("gf-workspaces-auto");
+const pendingWorkspaces = () => workspaces.filter((item) => (item.authorization ?? "pending") === "pending" && !item.approved);
+
+function applyWorkspacePayload(payload) {
+  workspaces = payload.workspaces;
+  workspacePicker.hidden = !payload.folder_picker;
+  workspacePolicyLoaded = typeof payload.auto_authorize === "boolean";
+  autoAuthorize = payload.auto_authorize === true;
+  autoButton.textContent = autoAuthorize ? "自动授权：开" : "自动授权：关";
+  autoButton.setAttribute("aria-pressed", String(autoAuthorize));
+  autoButton.disabled = !workspacePolicyLoaded;
+}
+
+function renderWorkspaces() {
+  const signature = JSON.stringify([workspaces, activeWorkspace, legacyWorkspace]);
+  if (workspaceListSignature === signature) return;
+  workspaceListSignature = signature;
+  const row = (name, path, actions) => {
+    const item = document.createElement("li");
+    const text = document.createElement("div");
+    const title = document.createElement("strong");
+    const detail = document.createElement("small");
+    title.textContent = name;
+    detail.textContent = path;
+    detail.className = "gf-muted";
+    text.append(title, detail);
+    item.append(text);
+    for (const [label, action] of actions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.addEventListener("click", action);
+      item.append(button);
+    }
+    return item;
+  };
+  const rows = workspaces.map(({ id, name, path, approved, authorization }) => row(
+    `${name} · ${approved ? activeWorkspace === id ? "正在使用" : authorization === "automatic" ? "自动授权" : "已授权" : authorization === "excluded" ? "不自动授权" : "待授权"}`, path,
+    approved ? [...(activeWorkspace === id ? [] : [["查询此项目", () => chooseWorkspace(id)]]),
+      ...(authorization === "automatic" ? [["保留为手动授权", () => changeWorkspaces([id], true)]] : []),
+      ["撤销", () => changeWorkspaces([id], false)]]
+      : [["授权只读", () => changeWorkspaces([id], true)],
+        ...(authorization === "excluded" ? [] : [["忽略", () => changeWorkspaces([id], false)]])],
+  ));
+  if (legacyWorkspace && activeWorkspace) rows.push(row(legacyWorkspace, "原有固定工作区", [["返回固定工作区", () => chooseWorkspace("")]]));
+  byId("gf-workspaces").replaceChildren(...rows);
+  approveAll.hidden = pendingWorkspaces().length < 2;
+}
+
+async function chooseWorkspace(id) {
+  activeWorkspace = id;
+  const revision = ++workspaceRevision;
+  available = false;
+  submit.disabled = true;
+  code.textContent = "";
+  code.hidden = true;
+  placeholder.hidden = false;
+  placeholder.textContent = "查询结果将显示在这里。";
+  resultStatus.textContent = "";
+  graphMap.hidden = true;
+  graphMessage.textContent = "";
+  currentGraph = null;
+  showError();
+  renderWorkspaces();
+  try {
+    const state = await request("/api/graphflow/status");
+    if (revision !== workspaceRevision) return;
+    if (!id) legacyWorkspace = state.workspace || "";
+    setAvailability(state);
+    if (state.authorization_required && workspaces.some((item) => item.approved)) {
+      reason.textContent = "请选择一个已授权工作区。";
+    }
+  } catch (failure) {
+    if (revision === workspaceRevision) setAvailability({ reason: failure.message });
+  }
+  renderWorkspaces();
+}
+
+const workspacePost = (endpoint, body) => request(`/api/graphflow/workspaces/${endpoint}`, {
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
+
+async function updateWorkspaces(action, selected = "") {
+  if (workspaceBusy) return;
+  workspaceBusy = true;
+  workspacePicker.disabled = approveAll.disabled = autoButton.disabled = true;
+  workspaceMessage.textContent = "";
+  try {
+    applyWorkspacePayload(await action());
+    autoButton.disabled = true;
+    const activeStillAllowed = workspaces.some((item) => item.id === activeWorkspace && item.approved);
+    if (selected || (activeWorkspace && !activeStillAllowed)) await chooseWorkspace(selected);
+    if (!activeWorkspace && !legacyWorkspace) {
+      const approved = workspaces.filter((item) => item.approved);
+      if (approved.length === 1) await chooseWorkspace(approved[0].id);
+    }
+    renderWorkspaces();
+  } catch (failure) {
+    workspaceMessage.textContent = failure.message;
+  } finally {
+    workspaceBusy = false;
+    workspacePicker.disabled = approveAll.disabled = false;
+    autoButton.disabled = !workspacePolicyLoaded;
+  }
+}
+
+function changeWorkspaces(ids, approve) {
+  return updateWorkspaces(() => workspacePost("decision", { ids, approve }), approve ? ids[0] : "");
+}
+
+approveAll.addEventListener("click", () => changeWorkspaces(pendingWorkspaces().map((item) => item.id), true));
+autoButton.addEventListener("click", () => {
+  const next = !autoAuthorize;
+  if (next && !window.confirm("允许已连接的 Agent 只读访问所有已发现和以后发现的合格 Git 工作区？单独撤销的项目除外。")) return;
+  updateWorkspaces(() => workspacePost("policy", { auto_authorize: next }));
+});
+workspacePicker.addEventListener("click", () => updateWorkspaces(() => workspacePost("pick", {})));
+byId("gf-workspace-add").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = byId("gf-workspace-path");
+  updateWorkspaces(async () => {
+    const reply = await workspacePost("discover", { path: input.value.trim() });
+    input.value = "";
+    return reply;
+  });
+});
+
+async function refreshWorkspaces() {
+  if (workspaceBusy || document.hidden) return;
+  workspaceBusy = true;
+  try {
+    const payload = await request("/api/graphflow/workspaces");
+    applyWorkspacePayload(payload);
+    const approved = workspaces.filter((item) => item.approved);
+    if (activeWorkspace && !approved.some((item) => item.id === activeWorkspace)) await chooseWorkspace("");
+    if (!activeWorkspace && !legacyWorkspace && approved.length === 1) await chooseWorkspace(approved[0].id);
+    renderWorkspaces();
+  } catch (failure) {
+    workspaceMessage.textContent = failure.message;
+  } finally {
+    workspaceBusy = false;
+  }
+}
+
+chooseWorkspace("").then(refreshWorkspaces);
+setInterval(refreshWorkspaces, 4000);
+document.addEventListener("visibilitychange", refreshWorkspaces);

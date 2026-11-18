@@ -13,6 +13,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
+from contextvars import ContextVar
 from itertools import chain
 from pathlib import Path, PurePosixPath
 
@@ -34,6 +35,7 @@ SOURCE_SUFFIXES = frozenset(
 EXCLUDED = {"soul", "node_modules", "graphflow-out", "secrets", "credentials", "vendor", "dist"}
 _gate = threading.BoundedSemaphore(1)
 _active_snapshot: _Snapshot | None = None
+_read_workspace: ContextVar[Path | None] = ContextVar("graphflow_read_workspace", default=None)
 _READ_DEDUP_TTL = 900
 _READ_DEDUP_LIMIT = 256
 _read_dedup: OrderedDict[bytes, tuple[float, bytes]] = OrderedDict()
@@ -46,7 +48,19 @@ class GraphFlowError(ValueError):
         self.status_code = status_code
 
 
+@contextmanager
+def use_read_workspace(workspace: Path):
+    token = _read_workspace.set(workspace)
+    try:
+        yield
+    finally:
+        _read_workspace.reset(token)
+
+
 def _workspace() -> Path:
+    selected = _read_workspace.get()
+    if selected is not None:
+        return selected
     value = os.environ.get("STARWISH_GRAPHFLOW_WORKSPACE", "")
     path = Path(value)
     if not value or not path.is_absolute():

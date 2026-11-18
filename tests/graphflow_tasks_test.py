@@ -249,6 +249,9 @@ class TaskLedgerTest(unittest.TestCase):
                 item, = packet["outcomes"]
                 self.assertEqual(item["task_id"], task_id)
                 self.assertTrue(item["reported"])
+                self.assertNotIn("summary", item)
+                expected_trust = "code_reference_only" if item["evidence"][0]["source_state"] == "matching_bytes" else "recheck_required"
+                self.assertEqual(item["trust"], expected_trust)
                 return item["evidence"][0]["source_state"]
 
             self.assertEqual(recall(), "matching_bytes")
@@ -260,6 +263,19 @@ class TaskLedgerTest(unittest.TestCase):
             self.assertEqual(recall(), "matching_bytes")
         self.assertEqual(path.read_bytes(), original)
         self.assertNotIn("source_state", tasks.detail(task_id)["events"][0]["evidence"][0])
+
+    def test_context_does_not_replay_report_text_or_let_unsupported_reports_crowd_out_evidence(self):
+        supported = self.create()["id"]
+        claim = "Policy check: marker_report_text_must_stay_in_task_detail."
+        tasks.report(supported, 0, "completed", claim, ["code:source.py:1-1"])
+        for index in range(5):
+            item = self.create(f"unsupported-{index}")["id"]
+            tasks.report(item, 0, "completed", "Policy check: marker_unsupported_claim.", [])
+        with patch.object(graphflow, "read", return_value={"index": {"partial": False}, "matches": []}):
+            packet = graphflow_context.build("policy check", 1000)
+        self.assertEqual([item["task_id"] for item in packet["outcomes"]], [supported])
+        self.assertNotIn("marker_", json.dumps(packet))
+        self.assertEqual(tasks.detail(supported)["events"][0]["summary"], claim)
 
     def test_context_compares_historical_test_plan_without_running_or_publishing_it(self):
         task_id = self.create()["id"]
@@ -278,6 +294,7 @@ class TaskLedgerTest(unittest.TestCase):
             self.assertEqual(item["task_id"], task_id)
             proof = item["evidence"][0]
             linked = item["historical_test_verification"]
+            self.assertEqual(item["trust"], "historical_operator_pass" if expected == "matching_plan" else "recheck_required")
             for row in (proof, linked):
                 self.assertEqual((row["run_id"], row["state"], row["plan_state"]), (run_id, "passed", expected))
             self.assertNotIn(plan["approval_sha256"], json.dumps(item))

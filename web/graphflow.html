@@ -4,17 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="/static/favicon.ico">
-<title>星愿记忆 · GraphFlow</title>
+<title>星愿记忆 · 源码世界</title>
 <script src="/static/theme.js"></script>
 <link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/core.css">
 <link rel="stylesheet" href="/static/appearance.css?v=3">
-<link rel="stylesheet" href="/static/graphflow.css?v=4">
+<link rel="stylesheet" href="/static/graphflow.css?v=5">
 </head>
 <body class="page graphflow-page">
 <header class="ctop">
   <a class="back" href="/">← 星图</a>
-  <div class="brand">GraphFlow <small>项目代码</small></div>
+  <div class="brand">源码世界 <small>项目代码</small></div>
 </header>
 
 <main class="gf-wrap">
@@ -31,6 +31,26 @@
       <div><dt>引擎</dt><dd id="gf-provider">—</dd></div>
     </dl>
     <p class="gf-muted" id="gf-reason" hidden></p>
+    <section class="gf-workspace-access" aria-labelledby="gf-workspaces-title">
+      <h2 id="gf-workspaces-title">工作区授权</h2>
+      <p class="gf-muted">让 Agent 查询当前项目，星愿会把它列在这里。授权后可只读查询，不允许改代码或运行测试。</p>
+      <ul id="gf-workspaces" class="gf-workspace-list"></ul>
+      <div class="gf-actions">
+        <button id="gf-workspaces-auto" type="button" aria-pressed="false" disabled>自动授权：关</button>
+        <button id="gf-workspaces-approve" type="button" hidden>授权全部已发现工作区</button>
+        <button id="gf-workspace-pick" type="button" hidden>选择 Git 文件夹</button>
+      </div>
+      <p class="gf-muted">开启后，所有发现并验证通过的本机 Git 工作区自动获得只读权限。单独撤销的项目除外。</p>
+      <details>
+        <summary>手动添加 Git 工作区</summary>
+        <form id="gf-workspace-add" class="gf-actions">
+          <label for="gf-workspace-path">Git 根目录</label>
+          <input id="gf-workspace-path" maxlength="1024" placeholder="本机 Git 根目录的绝对路径" required>
+          <button type="submit">添加到待授权列表</button>
+        </form>
+      </details>
+      <p id="gf-workspaces-message" class="gf-muted" role="status"></p>
+    </section>
     <form id="gf-form" aria-describedby="gf-hint">
       <div class="gf-fields">
         <div>
@@ -109,7 +129,7 @@
     <p id="gf-artifact-status" class="gf-muted" role="status"></p>
   </details>
 
-  <details class="gf-card gf-edit">
+  <details class="gf-card gf-edit" id="gf-edit-section">
     <summary>编辑预览 <span class="gf-muted">只读 · 不写文件</span></summary>
     <p class="gf-muted" id="gf-edit-help">先按行读取文件，再填入原文和替换文本。留空替换文本表示删除选中行。</p>
     <form id="gf-edit-form" aria-describedby="gf-edit-help">
@@ -238,7 +258,7 @@
     </form>
     <p id="gf-task-status" class="gf-muted gf-hint" role="status"></p>
     <details id="gf-legacy-tasks" hidden>
-      <summary>接手旧 GraphFlow 待办 <span class="gf-muted">只导入选中的编号</span></summary>
+      <summary>接手旧版待办 <span class="gf-muted">只导入选中的编号</span></summary>
       <p class="gf-muted">指定当前源码里的符号，预览后再确认。不会复制旧正文、修改原日志或执行工作流。</p>
       <div class="gf-actions">
         <button type="button" id="gf-legacy-load">读取旧待办</button>
@@ -259,6 +279,6 @@
     </details>
   </details>
 </main>
-<script type="module" src="/static/graphflow.js?v=16"></script>
+<script type="module" src="/static/graphflow.js?v=18"></script>
 </body>
 </html>

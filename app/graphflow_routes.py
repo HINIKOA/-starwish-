@@ -1,4 +1,5 @@
 """Local panel routes for the opt-in code workspace."""
+import os
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -9,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import config, graphflow, graphflow_context, graphflow_diagnostics, graphflow_edit_queue, graphflow_edits, graphflow_planner, graphflow_tasks, graphflow_tests, graphflow_workflows
 from . import graphflow_artifacts
 from . import graphflow_legacy_tasks
-from . import graphflow_workspace_check
+from . import graphflow_workspace_check, graphflow_workspaces
 
 router = APIRouter()
 
@@ -83,12 +84,18 @@ def graphflow_page(request: Request):
 
 
 @router.get("/api/graphflow/status")
-def graphflow_status(request: Request):
+def graphflow_status(request: Request, workspace_id: str = ""):
     require_local_project(request)
+    if workspace_id:
+        def read_status():
+            return {**graphflow.status(), "read_only_workspace": True}
+        return _readonly(request, workspace_id, read_status)
     status = {**graphflow.status(), "edit_queue": graphflow_edit_queue.enabled(),
               "test_enabled": graphflow_tests.enabled(), "tasks_enabled": graphflow_tasks.enabled(),
               "legacy_tasks_enabled": graphflow_legacy_tasks.enabled(),
               "operator_key_configured": graphflow_edit_queue.operator_ready()}
+    if not status["workspace"] and not os.environ.get("STARWISH_GRAPHFLOW_WORKSPACE"):
+        status.update(authorization_required=True, reason="连接星愿 MCP 后，让 Agent 查询当前项目，或手动添加 Git 工作区。")
     claim = request.headers.get(graphflow_workspace_check.HEADER)
     if claim is not None:
         try:
@@ -100,6 +107,78 @@ def graphflow_status(request: Request):
     return JSONResponse(status, headers={"Cache-Control": "no-store"})
 
 
+def _readonly(request: Request, workspace_id: str, operation, *args, **kwargs):
+    require_local_project(request)
+    try:
+        with graphflow_workspaces.panel_scope(workspace_id):
+            return JSONResponse(operation(*args, **kwargs), headers={"Cache-Control": "no-store"})
+    except graphflow.GraphFlowError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+def _require_workspace_confirmation(request: Request) -> None:
+    require_local_project(request)
+    if not request.headers.get("origin"):
+        raise HTTPException(403, "请在本机星愿页面确认授权。")
+
+
+class WorkspacePathRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    path: str = Field(min_length=1, max_length=1024)
+
+
+class WorkspaceDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    ids: list[str] = Field(min_length=1, max_length=graphflow_workspaces.MAX_WORKSPACES)
+    approve: bool
+
+
+class WorkspacePolicyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    auto_authorize: bool
+
+
+@router.get("/api/graphflow/workspaces")
+def graphflow_workspace_list(request: Request):
+    return _readonly(request, "", graphflow_workspaces.view)
+
+
+@router.post("/api/graphflow/workspaces/policy")
+def graphflow_workspace_policy(request: Request, body: WorkspacePolicyRequest):
+    _require_workspace_confirmation(request)
+    def apply_policy():
+        graphflow_workspaces.set_automatic(body.auto_authorize)
+        return graphflow_workspaces.view()
+    return _readonly(request, "", apply_policy)
+
+
+@router.post("/api/graphflow/workspaces/discover")
+def graphflow_workspace_discover(request: Request, body: WorkspacePathRequest):
+    _require_workspace_confirmation(request)
+    def discover():
+        graphflow_workspaces.discover(body.path)
+        return graphflow_workspaces.view()
+    return _readonly(request, "", discover)
+
+
+@router.post("/api/graphflow/workspaces/pick")
+def graphflow_workspace_pick(request: Request):
+    _require_workspace_confirmation(request)
+    def pick():
+        graphflow_workspaces.pick_folder()
+        return graphflow_workspaces.view()
+    return _readonly(request, "", pick)
+
+
+@router.post("/api/graphflow/workspaces/decision")
+def graphflow_workspace_decision(request: Request, body: WorkspaceDecisionRequest):
+    _require_workspace_confirmation(request)
+    def decide():
+        graphflow_workspaces.decide(body.ids, body.approve)
+        return graphflow_workspaces.view()
+    return _readonly(request, "", decide)
+
+
 @router.get("/api/graphflow/diagnose")
 def graphflow_diagnose(request: Request):
     require_local_project(request)
@@ -107,21 +186,13 @@ def graphflow_diagnose(request: Request):
 
 
 @router.post("/api/graphflow/read")
-def graphflow_read(request: Request, body: ReadRequest):
-    require_local_project(request)
-    try:
-        return graphflow.read(body.query, body.target, body.skeleton)
-    except graphflow.GraphFlowError as exc:
-        raise HTTPException(exc.status_code, str(exc)) from exc
+def graphflow_read(request: Request, body: ReadRequest, workspace_id: str = ""):
+    return _readonly(request, workspace_id, graphflow.read, body.query, body.target, body.skeleton)
 
 
 @router.post("/api/graphflow/impact")
-def graphflow_impact(request: Request, body: ImpactRequest):
-    require_local_project(request)
-    try:
-        return graphflow.impact(body.target)
-    except graphflow.GraphFlowError as exc:
-        raise HTTPException(exc.status_code, str(exc)) from exc
+def graphflow_impact(request: Request, body: ImpactRequest, workspace_id: str = ""):
+    return _readonly(request, workspace_id, graphflow.impact, body.target)
 
 
 @router.post("/api/graphflow/edit/preview")
@@ -322,8 +393,8 @@ class ContextRequest(BaseModel):
 
 
 @router.post("/api/graphflow/context")
-def graphflow_context_query(request: Request, body: ContextRequest):
-    return _workflow(request, graphflow_context.build, **body.model_dump())
+def graphflow_context_query(request: Request, body: ContextRequest, workspace_id: str = ""):
+    return _readonly(request, workspace_id, graphflow_context.build, **body.model_dump())
 
 
 class ReindexRequest(BaseModel):
@@ -344,8 +415,8 @@ def graphflow_artifact(request: Request, body: ArtifactRequest):
 
 
 @router.post("/api/graphflow/graph")
-def graphflow_graph(request: Request, body: GraphRequest):
-    return _workflow(request, graphflow.dependency_graph, **body.model_dump())
+def graphflow_graph(request: Request, body: GraphRequest, workspace_id: str = ""):
+    return _readonly(request, workspace_id, graphflow.dependency_graph, **body.model_dump())
 
 
 @router.post("/api/graphflow/index")

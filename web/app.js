@@ -1,7 +1,7 @@
 // 星愿 StarWish —— 记忆星图面板（无需构建，原生 ES Module + three.js）
 // 设计灵感来自 dsh-xingxi（作者 Yuuyuko-uu）：越新的星越亮，老星只是变暗、不会消失。
 
-import { initSettings, toggleSettings } from "./settings.js?v=mcp-project-1";
+import { initSettings, toggleSettings } from "./settings.js?v=source-world-1";
 import { initDrawers } from "./drawers.js?v=chat-fit-1";
 
 const $ = (s) => document.querySelector(s);
@@ -39,6 +39,7 @@ async function safe(fn) { try { return await fn(); } catch (e) { toast(e.message
 function initMcpStatus() {
   const button = $("#mcpStatusButton"), drawer = $("#mcpStatusDrawer");
   const summary = $("#mcpStatusSummary"), sessions = $("#mcpSessions");
+  let lastMarkup = "";
   const setOpen = (open, restoreFocus = false) => {
     button.setAttribute("aria-expanded", open);
     drawer.classList.toggle("hidden", !open);
@@ -49,16 +50,34 @@ function initMcpStatus() {
     button.dataset.state = state;
     button.querySelector("span").textContent = `MCP · ${label}`;
     if (summary.textContent !== detail) summary.textContent = detail;
-    sessions.innerHTML = clients.map((client) => `<li><i class="mcp-dot" data-state="${client.state === "connected" ? "connected" : "partial"}" aria-hidden="true"></i><div><b>${esc(client.name)}</b>${client.version ? `<small>${esc(client.version)}</small>` : ""}</div><span>${client.state === "connected" ? "已接通" : "握手中"}</span></li>`).join("");
+    const markup = clients.map(({ name, connected }) => `<li><i class="mcp-dot" data-state="${connected ? "connected" : "partial"}" aria-hidden="true"></i><div><b>${esc(name)}</b></div><span>${connected ? "已接通" : "握手中"}</span></li>`).join("");
+    if (markup !== lastMarkup) {
+      sessions.innerHTML = markup;
+      lastMarkup = markup;
+    }
   }
   let polling = false;
   async function poll() {
     if (polling) return;
     polling = true;
     try {
-      const { state, connected, pending, sessions: clients } = await api("/api/mcp/status", { signal: AbortSignal.timeout(4000) });
-      const label = state === "connected" ? `已接通 ${connected}` : pending ? (connected ? "部分接通" : "握手中") : "未接通";
-      render(state, label, clients.length ? `${connected} 个已接通 · ${pending} 个握手中` : "目前没有客户端连接。", clients);
+      const { connected, pending, sessions: connections } = await api("/api/mcp/status", { signal: AbortSignal.timeout(4000) });
+      const byName = new Map();
+      for (const connection of connections) {
+        const name = connection.name.trim();
+        const key = name.toLowerCase();
+        const ready = connection.state === "connected";
+        // An unnamed handshake could be another connection from an online client.
+        if (connected && !ready && key === "mcp client") continue;
+        const client = byName.get(key);
+        if (client) client.connected ||= ready;
+        else byName.set(key, { name, connected: ready });
+      }
+      const clients = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+      const state = connected ? "connected" : pending ? "partial" : "disconnected";
+      const label = connected ? "已接通" : pending ? "握手中" : "未接通";
+      const detail = connected ? "客户端可以调用星愿的 MCP 工具。" : pending ? "正在等待客户端完成握手。" : "目前没有客户端连接。";
+      render(state, label, detail, clients);
     } catch {
       render("unknown", "状态未知", "无法读取连接状态，请在运行星愿的电脑上打开面板。");
     } finally { polling = false; }

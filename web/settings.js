@@ -632,30 +632,89 @@ function pageEmbed(m) {
 function pageMcp(m) {
   const origin = location.origin, o = E(origin);
   const setupPath = "/api/mcp/setup";
-  const makePrompt = (withProject = false) => `请把星愿记忆接入你当前的 MCP 客户端，作为本地记忆工具${withProject ? "，并接入我在星愿里授权的 GraphFlow 项目" : ""}。
+  const powerShell = String.raw`& {
+  $ErrorActionPreference = 'Stop'
+  if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
+    throw '找不到 codex 命令，请先安装 Codex CLI。'
+  }
+  $s = Invoke-RestMethod '${origin}${setupPath}' -TimeoutSec 10
+  if ($s.type -ne 'stdio' -or -not $s.command -or -not $s.env.STARWISH_SOUL_DIR) {
+    throw '未取得有效的星愿 STDIO 配置。'
+  }
+  $listed = codex mcp list --json
+  if ($LASTEXITCODE -ne 0 -or -not $listed) { throw '无法读取 Codex MCP 配置，未进行修改。' }
+  try {
+    $servers = ($listed -join [Environment]::NewLine) | ConvertFrom-Json -ErrorAction Stop
+    $existing = $servers | Where-Object {
+      $_.name -eq $s.name -or $_.transport.env.STARWISH_SOUL_DIR -eq $s.env.STARWISH_SOUL_DIR
+    } | ForEach-Object { $_.name }
+  } catch {
+    $plain = @(codex mcp list)
+    if ($LASTEXITCODE -ne 0 -or -not ($plain -match '^Name\s+(Command|Url)\s+')) {
+      throw '无法核对已有 MCP 接入，未修改配置。请先运行 codex mcp list 检查。'
+    }
+    $existing = foreach ($line in $plain) {
+      if ($line -notmatch '^(\S+)\s{2,}\S') { continue }
+      $name = $Matches[1]
+      if ($name -eq $s.name -or $line -match '\bSTARWISH_SOUL_DIR\s*=') { $name }
+    }
+    if ($existing) {
+      Write-Host ('检测到已有或可能重复的星愿接入：' + ($existing -join '、') + '。未修改配置。')
+      return
+    }
+  }
+  if ($existing) {
+    Write-Host ('已有接入：' + ($existing -join '、') + '。未修改现有配置。')
+    return
+  }
+  $serverArgs = @($s.args)
+  codex mcp add $s.name --env "STARWISH_SOUL_DIR=$($s.env.STARWISH_SOUL_DIR)" -- $s.command @serverArgs
+  if ($LASTEXITCODE -ne 0) { throw '注册失败，请查看上方提示。' }
+  Write-Host '已注册。请在 Codex 加载配置后，到星愿顶栏确认是否已接通。'
+}`;
+  const makePrompt = (withProject = false) => `请把星愿记忆接入你当前的 MCP 客户端，作为本地记忆工具${withProject ? "，并接入我在星愿「源码世界」中授权的项目" : ""}。
 
 1. 确认你和星愿运行在同一台电脑，读取 ${origin}${setupPath}${withProject ? "?include_project=true" : ""}，获取这台电脑的实际接入配置。
 2. 新建名为 starwish 的 MCP 服务器，类型选 STDIO。按返回值填写 command（启动命令）、args（参数，按顺序逐项填）、env（环境变量）和 cwd（工作目录）。保留 STARWISH_SOUL_DIR，确保连到我现有的记忆库。不要把 /v1 当作 MCP 地址。
 3. 保存并重新连接。如果你不能修改 MCP 配置，或当前会话需要重启才能加载，请直接说明，并列出我需要手动填写的字段。如果读不到配置，请让我从星愿「设置 → MCP 与代理」提供，不要猜测路径。
-4. 连接后先列出 MCP 工具，再调用一次只读的 recall_index。${withProject ? "再用 graphflow_read 搜索一个项目符号，分别报告记忆和项目的连接结果。不要改代码或启用审批设置。" : "成功后告诉我结果；失败就说明卡在哪一步，不要把「已配置」当作「已接通」。"}
+4. 连接后先列出 MCP 工具，再调用一次只读的 recall_index。处理代码任务时，用当前 Git 根目录作为 rootDir 调用 graphflow_context；若返回待授权，请用户在星愿「源码世界」点「授权只读」，然后带同一 rootDir 重试。不要改代码或启用审批设置。
 
 这次只验证连接，不调用 remember，不写入测试记忆，也不修改核心记忆。`;
-  m.innerHTML = card("连接本机 MCP", `<div class="sv-mcp-intro"><p>在客户端选择「添加自定义 MCP」，按下方字段填写。客户端需和星愿运行在同一台电脑。</p><p>保存后，在客户端启用或重连星愿。回到星图顶栏展开「MCP」确认是否接通。</p></div>
+  m.innerHTML = card("用 PowerShell 接入 Codex", `<div class="sv-mcp-intro"><p>保持星愿运行，在同一台电脑打开 PowerShell，粘贴并执行命令。记忆和源码世界共用一条 MCP 接入。</p><p>让 Codex 加载配置后，到星愿顶栏确认连接。首次查询项目时，在 <a href="/graphflow">源码世界</a> 中授权工作区，无需重新添加 MCP。</p></div>
+    <div class="sv-mcp-prompt">
+      <button type="button" class="sv-btn" id="mcpPowerShellCopy" disabled>复制 PowerShell 命令</button>
+      <details><summary>查看命令</summary><textarea class="sv-in" id="mcpPowerShellText" aria-label="PowerShell 接入命令" readonly rows="8">${E(powerShell)}</textarea></details>
+      <div class="sv-help" id="mcpPowerShellFeedback" role="status"></div>
+    </div>`) +
+    card("手动接入本机 MCP", `<div class="sv-mcp-intro"><p>在客户端选择本机 STDIO 类型，按下方字段填写。客户端需和星愿运行在同一台电脑。</p><p>保存后，在客户端启用或重连星愿。回到星图顶栏展开「MCP」确认是否接通。</p></div>
     <section class="sv-mcp-prompt" aria-labelledby="mcpPromptTitle">
       <div class="sv-mcp-prompt-head"><div><strong id="mcpPromptTitle">给其他 Agent 的接入提示词</strong><div class="sv-help">复制后发给同一台电脑上的 Agent，让它配置并验证连接。</div></div><button type="button" class="sv-btn" id="mcpPromptCopy">复制提示词</button></div>
       <details><summary>查看完整提示词</summary><textarea class="sv-in" id="mcpPromptText" aria-label="Agent 接入提示词" readonly rows="8">${E(makePrompt())}</textarea></details>
       <div class="sv-help" id="mcpPromptFeedback" role="status"></div>
     </section>
     <div class="sv-mcp-intro">
-      <label><input type="checkbox" id="mcpIncludeProject" disabled> 在接入配置和提示词中包含已授权的 GraphFlow 项目</label>
-      <p>默认只提供记忆配置。只把包含项目的配置发给你信任的本机 Agent；不会复制编辑或测试的审批设置。若客户端之前已经配置了项目，需在客户端移除对应的环境变量。</p>
+      <label><input type="checkbox" id="mcpIncludeProject" disabled> 兼容旧设置：附带源码世界的固定工作区</label>
+      <p>普通接入不用勾选。Agent 可在首次查询时上报当前工作区，由你在星愿授权；不会自动授予编辑或测试权限。</p>
       <div class="sv-help" id="mcpProjectFeedback" role="status"></div>
     </div><div id="mcpSetupFields" role="status">正在读取本机配置…</div>`) +
     card("对话代理", row("自动注入核心记忆 + 相关星星", tog("proxy.inject")) + row("把对话写入归档，供日后整理", tog("proxy.log_to_archive")) +
       row("每轮召回预算（tokens）", inp("proxy.budget_tokens", "number", "", "w-s")) + row("强制模型（可空）", inp("proxy.model_override", "text", "", "w-m")) +
       row("代理密钥", inp("proxy.proxy_key", "secret", "", "w-m"), "可空；填了则客户端需用它作为 API Key。")) +
-    card("其他接入方式", row("OpenAI 兼容代理", `<code>${o}/v1</code>`, "这是聊天客户端的 API 地址，不是 MCP 地址。") + row("REST API", `<code>${o}/api</code>`));
+    `<details class="sv-card"><summary>高级：代理与 REST API</summary>${row("OpenAI 兼容代理", `<code>${o}/v1</code>`, "这是聊天客户端的 API 地址，不是 MCP 地址。")}${row("REST API", `<code>${o}/api</code>`, "供脚本或第三方程序调用，不是 MCP 地址。")}</details>`;
   bindAuto(m);
+  const copyPowerShell = m.querySelector("#mcpPowerShellCopy"), powerShellText = m.querySelector("#mcpPowerShellText");
+  const powerShellFeedback = m.querySelector("#mcpPowerShellFeedback");
+  copyPowerShell.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(powerShellText.value);
+      powerShellFeedback.textContent = "已复制。打开 PowerShell，粘贴并回车。";
+    } catch {
+      powerShellText.closest("details").open = true;
+      powerShellText.focus();
+      powerShellText.select();
+      powerShellFeedback.textContent = "命令已选中，请手动复制。";
+    }
+  };
   const promptText = m.querySelector("#mcpPromptText"), feedback = m.querySelector("#mcpPromptFeedback");
   const copyPrompt = m.querySelector("#mcpPromptCopy");
   copyPrompt.onclick = async () => {
@@ -692,6 +751,7 @@ function pageMcp(m) {
   };
   C.api(setupPath).then((memorySetup) => {
     renderSetup(memorySetup);
+    copyPowerShell.disabled = false;
     toggle.disabled = false;
     toggle.onchange = async () => {
       feedback.textContent = "";
@@ -709,12 +769,15 @@ function pageMcp(m) {
         projectFeedback.textContent = "配置和提示词现已包含项目。";
       } catch (err) {
         toggle.checked = false;
-        projectFeedback.textContent = `${err.message} 已保留仅记忆配置。`;
+        projectFeedback.textContent = `${err.message} 已保留普通接入配置，仍可在「源码世界」授权项目。`;
       } finally {
         toggle.disabled = copyPrompt.disabled = false;
       }
     };
-  }).catch(() => { if (fields.isConnected) fields.textContent = "无法读取本机配置，请在运行星愿的电脑上打开面板。"; });
+  }).catch(() => {
+    if (!fields.isConnected) return;
+    fields.textContent = powerShellFeedback.textContent = "无法读取本机配置，请在运行星愿的电脑上打开面板。";
+  });
 }
 
 // ———————————————— 技能 ————————————————

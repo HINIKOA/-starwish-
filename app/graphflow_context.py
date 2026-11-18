@@ -33,14 +33,14 @@ def build(query: str, budget_tokens: int = 750, rootDir: str = "") -> dict:
         code_status = f"unavailable_{exc.status_code}"
     history_unavailable = False
     try:
-        outcomes = graphflow_tasks.find_completed(query, check_evidence=True)
+        outcomes = graphflow_tasks.find_completed(query, evidence_only=True)
     except GraphFlowError as exc:
         if exc.status_code != 503:
             raise
         outcomes = []
         history_unavailable = True
     packet = {
-        "summary": "代码定位来自当前索引；任务结论为历史回填，不等于当前验证。按 read_target 读取所需代码。",
+        "summary": "按 read_target 读源码。历史仅返回证据，不含回填原文，也不代表当前验证。",
         "anchors": [],
         "outcomes": [],
         "code_status": code_status,

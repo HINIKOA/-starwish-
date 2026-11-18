@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 
-async def exercise(client, setup, fallback):
+async def exercise(client, setup, fallback, modern_version=None):
     def status():
         return client.get("/api/mcp/status").json()
 
@@ -36,7 +36,7 @@ async def exercise(client, setup, fallback):
                                                "STARWISH_MCP_FALLBACK": str(int(fallback)), "UV_OFFLINE": "1"},
         )
 
-    async def send(proc, method, params=None, request_id=None):
+    async def send(proc, method, params=None, request_id=None, *, expect_error=False):
         msg = {"jsonrpc": "2.0", "method": method}
         if params is not None:
             msg["params"] = params
@@ -46,7 +46,9 @@ async def exercise(client, setup, fallback):
         await proc.stdin.drain()
         if request_id is not None:
             reply = json.loads(await asyncio.wait_for(proc.stdout.readline(), 10))
-            assert reply.get("id") == request_id and "error" not in reply, reply
+            assert reply.get("id") == request_id and ("error" in reply) == expect_error, reply
+            if expect_error:
+                return reply["error"]
             return reply["result"]
 
     async def close(proc):
@@ -63,14 +65,25 @@ async def exercise(client, setup, fallback):
     try:
         await wait(lambda s: s["state"] == "partial" and s["pending"] == 1)
         name = "StarWish fallback test" if fallback else "StarWish SDK test"
-        response = await send(proc, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
-                                                   "clientInfo": {"name": name, "version": "1.0"}}, 1)
-        assert response["serverInfo"]["name"] == "starwish"
-        await wait(lambda s: s["state"] == "partial" and s["sessions"][0]["name"] == name)
-        await send(proc, "notifications/initialized")
+        client_info = {"name": name, "version": "1.0"}
+        meta = {}
+        if modern_version:
+            envelope = {"io.modelcontextprotocol/protocolVersion": modern_version,
+                        "io.modelcontextprotocol/clientInfo": client_info}
+            await send(proc, "tools/list", {"_meta": envelope}, 1, expect_error=True)
+            assert status()["pending"] == 1 and status()["connected"] == 0
+            meta = {"_meta": {**envelope, "io.modelcontextprotocol/clientCapabilities": {}}}
+            listing = await send(proc, "tools/list", meta, 2)
+        else:
+            response = await send(proc, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
+                                                       "clientInfo": client_info}, 1)
+            assert response["serverInfo"]["name"] == "starwish"
+            await wait(lambda s: s["state"] == "partial" and s["sessions"][0]["name"] == name)
+            await send(proc, "notifications/initialized")
         live = await wait(lambda s: s["state"] == "connected" and s["connected"] == 1)
-        assert live["sessions"][0]["version"] == "1.0", live
-        listing = await send(proc, "tools/list", request_id=2)
+        assert (live["sessions"][0]["name"], live["sessions"][0]["version"]) == (name, "1.0"), live
+        if not modern_version:
+            listing = await send(proc, "tools/list", request_id=2)
         tools = {tool["name"]: tool for tool in listing["tools"]}
         assert "recall_index" in tools
         contracts = {
@@ -85,7 +98,7 @@ async def exercise(client, setup, fallback):
             for field, (choices, default) in fields.items():
                 assert properties[field]["enum"] == choices, (name, field, properties[field])
                 assert properties[field]["default"] == default, (name, field, properties[field])
-        result = await send(proc, "tools/call", {"name": "recall_index", "arguments": {}}, 3)
+        result = await send(proc, "tools/call", {**meta, "name": "recall_index", "arguments": {}}, 3)
         assert not result.get("isError"), result
         if "STARWISH_GRAPHFLOW_WORKSPACE" in setup["env"]:
             result = await send(proc, "tools/call", {"name": "graphflow_read",
@@ -120,6 +133,12 @@ def main():
         assert setup["type"] == "stdio" and setup["env"] == {"STARWISH_SOUL_DIR": str(soul)}
         for fallback in (False, True):
             asyncio.run(exercise(client, setup, fallback))
+        try:
+            from mcp_types.version import LATEST_MODERN_VERSION
+        except ImportError:
+            pass  # The legacy SDK has no per-request envelope.
+        else:
+            asyncio.run(exercise(client, setup, False, modern_version=LATEST_MODERN_VERSION))
         project_path = "/api/mcp/setup?include_project=true"
         assert remote.get(project_path).status_code == 403
         assert client.get(project_path, headers={"Origin": "https://other.invalid"}).status_code == 403

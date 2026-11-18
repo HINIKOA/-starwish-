@@ -79,6 +79,15 @@ def run(file_count: int, repeats: int) -> dict:
             estimate = estimate_tokens(json.dumps(context, ensure_ascii=False))
             require(estimate == context["tokenBudget"]["estimated"] and estimate <= 256,
                     "Context exceeded its declared token budget.")
+            baseline = estimate_tokens(source.read_text(encoding="utf-8"))
+            sliced = estimate_tokens(before["text"])
+            token_comparison = {
+                "scope": "synthetic single-symbol retrieval; estimated output only, not model billing",
+                "whole_target_file": baseline,
+                "symbol_slice": sliced,
+                "context_plus_symbol_slice": estimate + sliced,
+                "context_plus_slice_savings_pct": round(100 * (baseline - estimate - sliced) / baseline, 2),
+            }
             source.write_text("export function starwishBenchmarkProbe() { return 202; }\n", encoding="utf-8")
             changed, changed_ms = measure(graphflow.reindex)
             require(changed["index"]["updated"] == 1 and changed["parsed_or_reused"] == 1,
@@ -101,6 +110,7 @@ def run(file_count: int, repeats: int) -> dict:
             require(not (root / "soul").exists(), "The code benchmark created memory state.")
             return {"provider": cold["provider"], "platform": platform.system(), "source_files": file_count,
                     "indexed": expected, "partial": partial, "context_estimated_tokens": estimate,
+                    "token_comparison": token_comparison,
                     "reparsed": changed["parsed_or_reused"], "milliseconds": {
                         "cold_index": cold_ms, "warm_index": warm_ms, "symbol_read": read_ms,
                         "context": context_ms, "explicit_tail_read": tail_ms, "tail_test_routing": routing_ms,
