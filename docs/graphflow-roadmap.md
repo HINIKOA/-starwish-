@@ -169,6 +169,21 @@ ZIP 载荷 SHA-256 和缓存标签。正式发布可在干净检出中用
 显式指定当前源码。返回匹配提示及当前源码，不读取旧日志的正文到对话、
 不导入任务、不写旧日志或台账。
 
+`graphflow_read` 保留原来的直接读取。如果内容可能较长，可传 `maxOutputTokens`
+（256–1400），对完整 JSON 回包做估算预算，而不是只截断正文。返回 `nextCursor`
+时，下一次只传相同的 `rootDir`、`cursor` 和可选预算，不重复传查询或目标。
+拼完各页的 `text` 后才使用最后一页的 `receiptId`。
+
+同一查询或目标可带 `sinceReceipt`：`unchanged` 表示沿用基线正文；
+`delta` 表示用返回的 `text` 替换 `baseReceipt` 正文的 `replace.start`
+到 `replace.end`（Unicode 码点偏移，右端不含）。仅当差异回包更短并能放进单页预算时返回差异，
+否则回 `full`。没有完整基线时，去掉 `sinceReceipt` 重读。
+
+每次续页仍检查工作区授权、Git 分支及当前可读快照。游标过期、分支切换或可读源码变动时应重新查询。
+回执最多保留 32 条，有效期 5 分钟，仅驻留进程内存，不写回执文件或聊天记录。
+`sourcePartial` 指索引覆盖不完整；`sourceTruncated` 指命中现有源码输出上限，
+读完分页也不表示已获取原始结果的全部内容，应缩小读取范围。这里的预算不是模型账单 token。
+
 若确实要接手旧待办，需同时设置 `STARWISH_GRAPHFLOW_TASKS=1` 和
 `STARWISH_GRAPHFLOW_LEGACY_TASK_IMPORT=1`。调用 `graphflow_legacy_task_import`
 的 `list` 只列旧待办编号（每页 20 个，`after` 使用返回游标）。

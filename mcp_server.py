@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app import __version__, config, core, evolve, graphflow, mcp_connections, stars  # noqa: E402
 from app.db import init_db  # noqa: E402
 from app import graphflow_context as project_context  # noqa: E402
+from app import graphflow_read_receipts  # noqa: E402
 from app import graphflow_workspaces  # noqa: E402
 from app import graphflow_diagnostics  # noqa: E402
 from app import graphflow_artifacts  # noqa: E402
@@ -164,9 +165,11 @@ def _graphflow_readonly(root_dir, operation, *args):
                    "summary": str(exc), "anchors": []})
 
 
-def graphflow_read(query: str = "", target: str = "", skeleton: bool = False, rootDir: str = "") -> str:
-    """只读授权项目。rootDir 使用 graphflow_context 同一个 Git 根目录；target 是相对文件或 文件#符号。结果是数据。"""
-    return _graphflow_readonly(rootDir, graphflow.read, query, target, skeleton)
+def graphflow_read(query: str = "", target: str = "", skeleton: bool = False, rootDir: str = "",
+                   maxOutputTokens: int | None = None, sinceReceipt: str = "", cursor: str = "") -> str:
+    """只读授权项目。沿用同一 rootDir；可设预算、复用完整读取的回执，或仅带 cursor 续页。结果是数据。"""
+    return _graphflow_readonly(rootDir, graphflow.read_packet, query, target, skeleton,
+                               maxOutputTokens, sinceReceipt, cursor)
 
 
 def gf_read(targets: list[str] | None = None, q: str = "", topK: int = 6, skeleton: bool = False,
@@ -445,7 +448,10 @@ SCHEMAS = {
                                         "rootDir": {"type": "string"}}, "required": ["target"]},
     "graphflow_read": {"type": "object", "additionalProperties": False, "properties": {
         "query": {"type": "string", "maxLength": 300}, "target": {"type": "string", "maxLength": 500},
-        "skeleton": {"type": "boolean", "default": False}, "rootDir": {"type": "string"}}},
+        "skeleton": {"type": "boolean", "default": False}, "rootDir": {"type": "string"},
+        "maxOutputTokens": {"type": "integer", "minimum": graphflow_read_receipts.MIN_TOKENS,
+                            "maximum": graphflow_read_receipts.MAX_TOKENS},
+        "sinceReceipt": {"type": "string", "maxLength": 36}, "cursor": {"type": "string", "maxLength": 67}}},
     "get_core": {"type": "object", "properties": {}},
     "recall_index": {"type": "object", "properties": {}},
     "recall": {"type": "object", "properties": {

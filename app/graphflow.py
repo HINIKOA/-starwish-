@@ -16,8 +16,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from itertools import chain
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from . import config
+
+if TYPE_CHECKING:
+    from .graphflow_read_receipts import ReadRequest
 
 VERSION = "3.9.2"
 PROVIDER = f"GraphFlow {VERSION}"
@@ -550,6 +554,23 @@ def read(query: str = "", target: str = "", skeleton: bool = False, impact_only:
                  impact={"file": file, "symbol": symbol} if impact_only else None, anchors_only=anchors_only)
 
 
+def read_packet(query: str = "", target: str = "", skeleton: bool = False,
+                max_output_tokens: int | None = None, since_receipt: str = "", cursor: str = "") -> dict:
+    if max_output_tokens is None and since_receipt == "" and cursor == "":
+        return read(query, target, skeleton)
+    from .graphflow_read_receipts import prepare
+
+    workspace = _workspace()
+    if cursor == "":
+        query, target, file, _ = validate_read(query, target, skeleton)
+    request = prepare(workspace, (query, target, skeleton), max_output_tokens, since_receipt, cursor)
+    if cursor:
+        query, target, skeleton = request.selection
+        query, target, file, _ = validate_read(query, target, skeleton)
+    return _read(workspace, query, [target] if target else [], [file] if file else [], skeleton, 6,
+                 receipt=request)
+
+
 def read_batch(targets: list[str] | None = None, q: str = "", topK: int = 6, skeleton: bool = False,
                dedup: bool = False, topicId: str = "", rootDir: str = "", sessionId: str = "",
                resumeFromTurnId: str = "") -> dict:
@@ -639,14 +660,38 @@ def _duplicate_read(identity: list, body: str, snapshot_digest: bytes) -> bool:
         return previous is not None and previous[1] == fingerprint
 
 
+def _snapshot_digest(snapshot: _Snapshot) -> bytes:
+    digest = hashlib.sha256()
+    for path, file_digest in sorted(snapshot.files.items()):
+        digest.update(path.encode("utf-8") + b"\0" + file_digest)
+    return digest.digest()
+
+
+def _read_version(workspace: Path, git: str, snapshot: _Snapshot, partial: bool) -> tuple[bytes, bytes]:
+    branch = subprocess.run([git, "symbolic-ref", "--quiet", "HEAD"], cwd=workspace,
+                            capture_output=True, timeout=5, check=False)
+    if branch.returncode == 1:  # Detached HEAD.
+        branch = subprocess.run([git, "rev-parse", "--verify", "HEAD"], cwd=workspace,
+                                capture_output=True, timeout=5, check=False)
+    scope = branch.stdout.strip()
+    if branch.returncode or not scope:
+        raise GraphFlowError("无法验证当前 Git 分支，请重试源码读取。", 503)
+    return scope, _snapshot_digest(snapshot) + bytes([partial])
+
+
 def _read(workspace: Path, query: str, targets: list[str], files: list[str], skeleton: bool, top_k: int,
           *, impact: dict | None = None, anchors_only: bool = False, include_snapshot_digest: bool = False,
-          capture_targets: bool = False) -> dict:
+          capture_targets: bool = False, receipt: ReadRequest | None = None) -> dict:
     node, entry, git = _engine()
     if not _gate.acquire(blocking=False):
         raise GraphFlowError("已有代码查询运行中，请稍后再试。", 429)
     try:
         snapshot, partial, index_stats = _sync_snapshot(workspace, git, tuple(files))
+        if receipt is not None:
+            version = _read_version(workspace, git, snapshot, partial)
+            cached = receipt.reuse(version)
+            if cached is not None:
+                return cached
         if any(file not in snapshot.files for file in files):
             reason = "目标不在当前可查询的受版本控制文件范围内。"
             if partial:
@@ -679,6 +724,8 @@ def _read(workspace: Path, query: str, targets: list[str], files: list[str], ske
             from . import graphflow_brief
 
             result = graphflow_brief.render(workspace) + "\n\n" + result
+        if receipt is not None:
+            return receipt.publish(version, result[:24000], partial=partial, source_truncated=len(result) > 24000)
         if len(result) > 24000:
             result = result[:24000] + "\n…（输出已截断，请缩小范围）"
         if partial:
@@ -687,10 +734,7 @@ def _read(workspace: Path, query: str, targets: list[str], files: list[str], ske
         if capture_targets:
             response["_capture_keys"] = keys
         if include_snapshot_digest:
-            digest = hashlib.sha256()
-            for path, file_digest in sorted(snapshot.files.items()):
-                digest.update(path.encode("utf-8") + b"\0" + file_digest)
-            response["_snapshot_digest"] = digest.digest()
+            response["_snapshot_digest"] = _snapshot_digest(snapshot)
         return response
     except subprocess.TimeoutExpired as exc:
         raise GraphFlowError("代码查询超时，请缩小范围后再试。", 504) from exc
