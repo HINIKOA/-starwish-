@@ -555,7 +555,7 @@ def main():
 
     # 目录 / 日志 / 缓存 / 本地备份 / 重置
     info = c.get("/api/data/info").json()
-    check("数据目录信息", info["soul_dir"] == str(TMP / "soul") and info["log_days"] == 30)
+    check("数据目录信息", Path(info["soul_dir"]).resolve() == (TMP / "soul").resolve() and info["log_days"] == 30)
     logs = TMP / "soul" / "logs"
     logs.mkdir(exist_ok=True)
     (logs / "old.log").write_text("x")
