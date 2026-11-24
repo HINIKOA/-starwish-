@@ -18,6 +18,9 @@ class Turn:
     start: int = 0               # 在源里的位置（JSONL 为字节偏移；OpenCode 为毫秒时间戳）
     end: int = 0
     tools: list = field(default_factory=list)
+    delegated: bool = False
+    native_turn_id: str = ""     # Only a verified Codex task-completion event sets this.
+    native_phase: str = ""       # Started/completed/aborted, not inferred from idle time.
 
     def add_assistant(self, text: str) -> None:
         text = (text or "").strip()

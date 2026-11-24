@@ -16,7 +16,7 @@ from typing import Literal
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app import __version__, config, core, evolve, graphflow, mcp_connections, stars  # noqa: E402
-from app.db import init_db  # noqa: E402
+from app.db import estimate_tokens, init_db  # noqa: E402
 from app import graphflow_context as project_context  # noqa: E402
 from app import graphflow_read_receipts  # noqa: E402
 from app import graphflow_workspaces  # noqa: E402
@@ -55,9 +55,10 @@ def recall_index() -> str:
 
 
 def recall(query: str, budget_tokens: int = 600) -> str:
-    """按关键词/问题召回相关记忆摘要，结果严格控制在 budget_tokens 以内（默认 600）。返回 #编号 日期 摘要。"""
-    r = stars.recall(query, int(budget_tokens or 600))
-    return r["text"] or "（没有找到相关记忆）"
+    """按关键词/问题召回摘要，按本地估算控制在 budget_tokens 以内（默认 600）。返回 #编号 日期 摘要。"""
+    r = stars.recall(query, budget_tokens)
+    empty = "（没有找到相关记忆）"
+    return r["text"] or (empty if estimate_tokens(empty) <= r["budget_tokens"] else "")
 
 
 def recall_detail(star_id: int) -> str:

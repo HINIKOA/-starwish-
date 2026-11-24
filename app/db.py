@@ -80,22 +80,22 @@ CREATE TABLE IF NOT EXISTS star_archive_refs (
 """
 
 
-def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(config.DB_PATH), timeout=30, check_same_thread=False)
+def _connect(timeout: float = 30) -> sqlite3.Connection:
+    conn = sqlite3.connect(str(config.DB_PATH), timeout=timeout, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
-def init_db(*, force: bool = False) -> None:
+def init_db(*, force: bool = False, timeout: float = 30) -> None:
     global _initialized_for, FTS_OK
     with _init_lock:
         key = str(config.DB_PATH)
         if not force and _initialized_for == key and config.DB_PATH.exists():
             return
         config.ensure_dirs()
-        conn = _connect()
+        conn = _connect(timeout)
         try:
             conn.executescript(SCHEMA)
             cols = {r[1] for r in conn.execute("PRAGMA table_info(stars)").fetchall()}
@@ -130,9 +130,9 @@ def init_db(*, force: bool = False) -> None:
 
 
 @contextmanager
-def get_conn():
-    init_db()
-    conn = _connect()
+def get_conn(*, timeout: float = 30):
+    init_db(timeout=timeout)
+    conn = _connect(timeout)
     try:
         yield conn
         conn.commit()

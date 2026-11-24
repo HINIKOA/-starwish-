@@ -13,6 +13,8 @@ import time
 
 import httpx
 
+from . import upstream
+
 # 预设服务商（地址取各家官方文档的 OpenAI 兼容地址）
 PRESETS = [
     {"preset": "deepseek", "name": "深度求索 DeepSeek", "protocol": "openai", "base_url": "https://api.deepseek.com/v1",
@@ -37,6 +39,10 @@ PRESETS = [
      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "key_url": "https://aistudio.google.com/apikey"},
     {"preset": "openrouter", "name": "OpenRouter", "protocol": "openai", "base_url": "https://openrouter.ai/api/v1",
      "key_url": "https://openrouter.ai/keys"},
+    {"preset": "opencode", "name": "OpenCode Console", "protocol": "openai",
+     "base_url": "https://opencode.ai/inference/openai/v1", "key_url": "https://opencode.ai/console"},
+    {"preset": "opencode_go", "name": "OpenCode Go（订阅）", "protocol": "openai",
+     "base_url": upstream.OPENCODE_GO_BASE, "key_url": "https://opencode.ai/console"},
     {"preset": "ollama", "name": "Ollama（本机）", "protocol": "openai", "base_url": "http://127.0.0.1:11434/v1", "key_url": ""},
     {"preset": "custom", "name": "自定义（OpenAI 兼容）", "protocol": "responses", "base_url": "", "key_url": ""},
 ]
@@ -108,7 +114,9 @@ def list_models(base_url: str, api_key: str, protocol: str = "openai", timeout: 
     for b in cands:
         tried.append(b)
         try:
-            r = httpx.get(b + "/models", headers=_headers(protocol, api_key), timeout=timeout, follow_redirects=True)
+            url = upstream.OPENCODE_GO_MODELS if b == upstream.OPENCODE_GO_BASE else b + "/models"
+            headers = {**_headers(protocol, api_key), **upstream.opencode_go_headers(b)}
+            r = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
             r.raise_for_status()
             data = r.json()
             items = data.get("data", data.get("models", [])) if isinstance(data, dict) else data

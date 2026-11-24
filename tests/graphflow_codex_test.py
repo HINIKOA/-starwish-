@@ -4,13 +4,14 @@ import json
 import os
 import queue
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -18,9 +19,15 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import config, graphflow, graphflow_workspace_check
+from app import config, graphflow, graphflow_workspace_check, graphflow_workspaces
 from app.graphflow_routes import router
 from tools import graphflow_codex, graphflow_codex_probe
+
+_COMPACT_SUMMARY = "The Juniper Atlas verifies translations by blind peer review."
+_REVIEW_SKILL = "check-source-numbering"
+_REJECT_SKILL = "check-page-headers"
+_SKILL_USAGE = "SKILL_APPLICATION_FIXTURE: Check citations 1 and 3 against sources 1 and 2."
+_AUTO_TRIGGER_SAMPLE = "AUTO_COMPACT_FIXTURE: compare peer review against the citation log."
 
 
 @contextmanager
@@ -30,7 +37,8 @@ def local_model():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             body = self.rfile.read(int(self.headers["Content-Length"]))
-            requests.put((self.path, json.loads(body)))
+            request = json.loads(body)
+            requests.put((self.path, request))
             response = {
                 "id": "resp_fixture", "object": "response", "created_at": 1, "status": "completed",
                 "model": "starwish-fixture", "output": [],
@@ -38,8 +46,60 @@ def local_model():
                           "input_tokens_details": {"cached_tokens": 0},
                           "output_tokens_details": {"reasoning_tokens": 0}},
             }
+            if self.path.endswith("/chat/completions"):
+                if any(m.get("content", "").startswith("Review this Codex conversation") for m in request["messages"]):
+                    content = json.dumps({"skills": [{"action": "create", "name": _REVIEW_SKILL,
+                        "content": f"---\nname: {_REVIEW_SKILL}\ndescription: Validate numbered citations\n---\n"
+                                   "# Procedure\nAudit source numbering before finalizing a manuscript."},
+                        {"action": "create", "name": _REJECT_SKILL,
+                         "content": f"---\nname: {_REJECT_SKILL}\ndescription: Validate manuscript page headings\n---\n"
+                                    "# Procedure\nCheck each page heading against the final manuscript source."}]})
+                else:
+                    content = json.dumps({"items": [{"kind": "fact", "text": _COMPACT_SUMMARY}]})
+                wire = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(wire)))
+                self.end_headers()
+                self.wfile.write(wire)
+                return
+            if self.path.endswith("/responses/compact"):
+                response.update(object="response.compaction", output=[
+                    {"id": "cmp_fixture", "type": "compaction", "encrypted_content": "fixture"}])
+                wire = json.dumps(response).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(wire)))
+                self.end_headers()
+                self.wfile.write(wire)
+                return
+            user_inputs = [item["content"] for item in request.get("input", [])
+                           if isinstance(item, dict) and item.get("role") == "user" and "content" in item]
+            if user_inputs and _AUTO_TRIGGER_SAMPLE in json.dumps(user_inputs[-1]):
+                response["usage"].update(input_tokens=9000, output_tokens=2, total_tokens=9002)
+            answer, fixture_call = "Fixture response.", None
+            outputs = [item for item in request.get("input", []) if isinstance(item, dict)
+                       and item.get("type") == "function_call_output" and item.get("call_id") == "fixture_skill_read"]
+            if outputs:
+                if "Audit source numbering before finalizing" in json.dumps(outputs):
+                    answer = "Citation 3 has no source entry."
+            elif user_inputs and _SKILL_USAGE in json.dumps(user_inputs[-1]):
+                for tool in request.get("tools", []):
+                    name = tool.get("name", "")
+                    if name == "mcp__starwish__skill_view":
+                        fixture_call = {"name": name}
+                    elif tool.get("type") == "namespace" and "starwish" in name and any(
+                        definition.get("name") == "skill_view" for definition in tool.get("tools", [])
+                    ):
+                        fixture_call = {"name": "skill_view", "namespace": name}
+                    if fixture_call:
+                        break
             message = {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed",
-                       "content": [{"type": "output_text", "text": "Fixture response.", "annotations": []}]}
+                       "content": [{"type": "output_text", "text": answer, "annotations": []}]}
+            if fixture_call:
+                message = {"id": "fc_fixture", "type": "function_call", "status": "completed",
+                           "call_id": "fixture_skill_read", "arguments": json.dumps({"name": _REVIEW_SKILL}),
+                           **fixture_call}
             response["output"].append(message)
             events = [
                 {"type": "response.output_item.done", "output_index": 0, "item": message},
@@ -525,6 +585,7 @@ class CodexProfileTest(unittest.TestCase):
             drain.start()
             request_id = 0
             notifications = []
+            server_requests = []
 
             def send(payload):
                 process.stdin.write(json.dumps(payload) + "\n")
@@ -540,6 +601,8 @@ class CodexProfileTest(unittest.TestCase):
                 message = json.loads(line)
                 if "method" in message and "id" not in message:
                     notifications.append(message)
+                elif "method" in message:
+                    server_requests.append(message["method"])
                 return message
 
             def rpc(method, params):
@@ -557,14 +620,34 @@ class CodexProfileTest(unittest.TestCase):
                 stderr.seek(0)
                 self.fail(f"Missing response for {method}: {stderr.read()[-3000:].decode('utf-8', 'replace')}")
 
-            def hook_info():
+            def hook_info(event="sessionStart"):
                 listed = rpc("hooks/list", {"cwds": [str(repo)]})["data"]
-                return next(hook for entry in listed for hook in entry["hooks"] if hook["eventName"] == "sessionStart")
+                return next(hook for entry in listed for hook in entry["hooks"] if hook["eventName"] == event)
 
-            def probe_turn(thread):
+            def compact_thread(thread):
+                start = len(notifications)
+                rpc("thread/compact/start", {"threadId": thread})
+                until = time.monotonic() + 25
+                while True:
+                    notes = [n for n in notifications[start:] if n["params"].get("threadId") == thread]
+                    ended = next((n for n in notes if n["method"] == "turn/completed"), None)
+                    if ended is not None:
+                        self.assertEqual(ended["params"]["turn"]["status"], "completed", ended["params"]["turn"])
+                        break
+                    if time.monotonic() >= until or receive(until) is None:
+                        self.fail("Timed out waiting for isolated Codex compaction.")
+                self.assertTrue(any(n["method"] == "thread/compacted" or (
+                    n["method"] == "item/completed" and n["params"]["item"]["type"] == "contextCompaction"
+                ) for n in notes), "The native compaction did not complete.")
+                while not model_requests.empty():
+                    model_requests.get_nowait()
+                return [n["params"]["run"] for n in notes if n["method"] == "hook/completed"
+                        and n["params"]["run"]["eventName"] == "preCompact"]
+
+            def probe_turn(thread, text="Local fixture only.", *, expect_compaction=False):
                 first = len(notifications)
                 rpc("turn/start", {"threadId": thread, "input": [
-                    {"type": "text", "text": "Local fixture only.", "text_elements": []}]})
+                    {"type": "text", "text": text, "text_elements": []}]})
                 until = time.monotonic() + 25
                 while True:
                     completed = next((note["params"]["turn"] for note in notifications[first:]
@@ -573,8 +656,17 @@ class CodexProfileTest(unittest.TestCase):
                         self.assertEqual(completed["status"], "completed", completed.get("error"))
                         break
                     if time.monotonic() >= until or receive(until) is None:
-                        self.fail("Timed out waiting for the isolated turn.")
+                        self.fail(f"Timed out waiting for the isolated turn. Server requests: {server_requests[-8:]}; "
+                                  f"events: {[note['method'] for note in notifications[first:][-12:]]}; "
+                                  f"pending model requests: {model_requests.qsize()}")
                 path, body = model_requests.get(timeout=5)
+                if expect_compaction:
+                    notes = [note for note in notifications[first:] if note["params"].get("threadId") == thread]
+                    self.assertTrue(any(n["method"] == "thread/compacted" or (
+                        n["method"] == "item/completed" and n["params"]["item"]["type"] == "contextCompaction"
+                    ) for n in notes), [(n["method"], n["params"].get("tokenUsage")) for n in notes])
+                    while not model_requests.empty():
+                        path, body = model_requests.get_nowait()
                 self.assertTrue(path.endswith("/responses"), path)
                 hooks = [note["params"]["run"] for note in notifications[first:]
                          if note["method"] == "hook/completed" and note["params"]["threadId"] == thread]
@@ -886,6 +978,20 @@ class CodexProfileTest(unittest.TestCase):
                 self.assertIn(hint, trusted_prompt)
                 self.assertTrue(any(run["eventName"] == "sessionStart" and run["status"] == "completed"
                                     for run in hooks), hooks)
+                self.assertNotIn(marker, trusted_prompt, "The current SessionStart does not push core memory.")
+
+                def isolated_memory():
+                    db = root / "soul" / "soul.db"
+                    if not db.exists():
+                        return None
+                    with sqlite3.connect(db.as_uri() + "?mode=ro", uri=True) as conn:
+                        return conn.execute("SELECT id, hash FROM stars ORDER BY id").fetchall()
+
+                memory_before = isolated_memory()
+                core_before = (root / "soul" / "core.json").read_bytes()
+                self.assertFalse(compact_thread(trusted))
+                self.assertEqual(isolated_memory(), memory_before)
+                self.assertEqual((root / "soul" / "core.json").read_bytes(), core_before)
                 rpc("config/batchWrite", {"edits": [{"keyPath": "hooks.SessionStart", "value": [
                     {"matcher": "startup|resume", "hooks": [{"type": "command", "timeout": 7,
                       "command": graphflow_codex._hook_command(repo, root)}]}], "mergeStrategy": "replace"}],
@@ -896,13 +1002,52 @@ class CodexProfileTest(unittest.TestCase):
                 modified = rpc("thread/start", {"cwd": str(root), "ephemeral": True})["thread"]["id"]
                 modified_prompt, _ = probe_turn(modified)
                 self.assertNotIn(hint, modified_prompt)
+
+                soul = root / "soul"
+                core_path = soul / "core.json"
+                core_data = json.loads(core_path.read_bytes())
+                core_data["sections"]["preferences"] = {"content": "STARWISH-UNSELECTED-FIXTURE"}
+                core_path.write_text(json.dumps(core_data), encoding="utf-8")
+                with patch.object(config, "SOUL_DIR", soul):
+                    graphflow_workspaces.discover(str(repo))
+                    grant, = graphflow_workspaces.view()["workspaces"]
+                    graphflow_workspaces.decide([grant["id"]], True)
+                enabled_command = graphflow_codex._hook_command(repo, root, soul=soul, core_sections=("identity",))
+                rpc("config/batchWrite", {"edits": [{"keyPath": "hooks.SessionStart", "value": [
+                    {"matcher": "startup|resume", "hooks": [{"type": "command", "timeout": 7,
+                      "command": enabled_command}]}], "mergeStrategy": "replace"}], "reloadUserConfig": True})
+                enabled_hook = hook_info()
+                self.assertEqual(enabled_hook["trustStatus"], "modified")
+                new = rpc("thread/start", {"cwd": str(repo), "ephemeral": True})["thread"]["id"]
+                untrusted_core_prompt, _ = probe_turn(new)
+                self.assertNotIn(marker, untrusted_core_prompt)
+                key = "hooks.state." + json.dumps(enabled_hook["key"]) + ".trusted_hash"
+                rpc("config/batchWrite", {"edits": [{"keyPath": key, "value": enabled_hook["currentHash"],
+                                                     "mergeStrategy": "upsert"}], "reloadUserConfig": True})
+                before_core = core_path.read_bytes()
+                new = rpc("thread/start", {"cwd": str(repo), "ephemeral": True})["thread"]["id"]
+                injected, _ = probe_turn(new)
+                self.assertIn(marker, injected)
+                self.assertNotIn("STARWISH-UNSELECTED-FIXTURE", injected)
+                self.assertEqual(core_path.read_bytes(), before_core)
+                outside = rpc("thread/start", {"cwd": str(root), "ephemeral": True})["thread"]["id"]
+                outside_prompt, _ = probe_turn(outside)
+                self.assertIn(hint, outside_prompt)
+                self.assertNotIn(marker, outside_prompt)
+                with patch.object(config, "SOUL_DIR", soul):
+                    graphflow_workspaces.decide([grant["id"]], False)
+                new = rpc("thread/start", {"cwd": str(repo), "ephemeral": True})["thread"]["id"]
+                revoked, _ = probe_turn(new)
+                self.assertIn(hint, revoked)
+                self.assertNotIn(marker, revoked)
+
                 rpc("config/batchWrite", {"edits": [{"keyPath": "hooks.SessionStart", "value": [],
                     "mergeStrategy": "replace"}], "reloadUserConfig": True})
                 layer_path = repo / ".codex" / "config.toml"
                 layer_path.parent.mkdir(exist_ok=True)
                 project_hook = graphflow_codex.preview(repo, root / "soul", include_hook=True)
-                layer_path.write_text("[[hooks.SessionStart]]" + project_hook.split("[[hooks.SessionStart]]", 1)[1],
-                                      encoding="utf-8")
+                project_hook = "[[hooks.SessionStart]]" + project_hook.split("[[hooks.SessionStart]]", 1)[1]
+                layer_path.write_text(project_hook, encoding="utf-8")
                 hook = hook_info()
                 self.assertEqual(Path(hook["sourcePath"]).resolve(), layer_path)
                 key = "hooks.state." + json.dumps(hook["key"]) + ".trusted_hash"
@@ -918,6 +1063,199 @@ class CodexProfileTest(unittest.TestCase):
                 self.assertIn("matching", {layer["stored_definition_hash"]
                                            for layer in saved["hook_trust_storage"]["user_layers"]})
                 self.assertFalse(saved["model_turn_started"])
+                from app.watch.compact import QUEUE
+                compact_profile = graphflow_codex.preview(repo, soul, include_precompact=True)
+                layer_path.write_text(project_hook + "\n[[hooks.PreCompact]]"
+                                      + compact_profile.split("[[hooks.PreCompact]]", 1)[1], encoding="utf-8")
+                with patch.object(config, "SOUL_DIR", soul):
+                    graphflow_workspaces.discover(str(repo))
+                    graphflow_workspaces.decide([grant["id"]], True)
+                compact_hook = hook_info("preCompact")
+                self.assertEqual(Path(compact_hook["sourcePath"]).resolve(), layer_path)
+                compact_key = "hooks.state." + json.dumps(compact_hook["key"]) + ".trusted_hash"
+                rpc("config/batchWrite", {"edits": [
+                    {"keyPath": compact_key, "value": compact_hook["currentHash"], "mergeStrategy": "upsert"}
+                ], "reloadUserConfig": True})
+                persisted = rpc("thread/start", {"cwd": str(repo), "ephemeral": False})["thread"]["id"]
+                sample = "We check every Juniper Atlas translation with anonymous peer review."
+                probe_turn(persisted, sample)
+                rollout, = (home / "sessions").rglob(f"*{persisted}.jsonl")
+                completed, = [row["payload"]["turn_id"] for row in map(json.loads, rollout.read_bytes().splitlines())
+                              if row.get("type") == "event_msg" and row["payload"].get("type") == "task_complete"]
+                for _ in range(2):
+                    runs = compact_thread(persisted)
+                    self.assertTrue(any(run["status"] == "completed" for run in runs), runs)
+                self.assertTrue((soul / QUEUE).is_file(), "PreCompact did not stage an eligible completed turn.")
+                with closing(sqlite3.connect(soul / QUEUE)) as db:
+                    self.assertEqual(db.execute("SELECT session_id, turn_id FROM intents").fetchall(),
+                                     [(persisted, completed)])
+                self.assertNotIn(sample.encode(), (soul / QUEUE).read_bytes())
+                probe_turn(persisted)
+                with closing(sqlite3.connect(soul / QUEUE)) as db:
+                    db.execute("BEGIN EXCLUSIVE")
+                    self.assertTrue(compact_thread(persisted))
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM intents").fetchone(), (1,))
+                with patch.object(config, "SOUL_DIR", soul):
+                    graphflow_workspaces.decide([grant["id"]], False)
+                self.assertTrue(compact_thread(persisted))
+                with closing(sqlite3.connect(soul / QUEUE)) as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM intents").fetchone(), (1,))
+                self.assertEqual(isolated_memory(), memory_before)
+                with patch.object(config, "SOUL_DIR", soul):
+                    graphflow_workspaces.decide([grant["id"]], True)
+                (soul / "config.json").write_text(json.dumps({
+                    "llm": {"base_url": model_url, "api_key": "local-fixture", "model": "starwish-fixture"},
+                    "watch": {"clients": {"codex": {"enabled": True, "path": str(home / "sessions")}}},
+                }), encoding="utf-8")
+                writeback_env = {**env, "STARWISH_SOUL_DIR": str(soul), "STARWISH_CODEX_COMPACT_WRITEBACK": "1",
+                                 "STARWISH_WATCH_CODEX_ONLY_SESSION": persisted}
+
+                def fresh_python(code, scope=persisted, *, writeback=True):
+                    child_env = {**writeback_env}
+                    if scope is None:
+                        child_env.pop("STARWISH_WATCH_CODEX_ONLY_SESSION", None)
+                    else:
+                        child_env["STARWISH_WATCH_CODEX_ONLY_SESSION"] = scope
+                    if not writeback:
+                        child_env.pop("STARWISH_CODEX_COMPACT_WRITEBACK", None)
+                    return subprocess.run([sys.executable, "-B", "-X", "utf8", "-c", code],
+                                          cwd=graphflow_codex.ROOT, env=child_env,
+                                          capture_output=True,
+                                          check=True, timeout=30, encoding="utf-8").stdout
+
+                worker_code = ("from app.watch.watcher import Watcher; w = Watcher(); "
+                               "w.poll_once(); print(w.drain())")
+                self.assertEqual(fresh_python(worker_code).splitlines()[-1], "1")
+                path, request = model_requests.get(timeout=5)
+                self.assertTrue(path.endswith("/chat/completions"))
+                self.assertIn(sample, json.dumps(request))
+                self.assertEqual(fresh_python(worker_code).splitlines()[-1], "0")
+                recall_code = ("import json; from app.stars import recall; "
+                               "print(json.dumps(recall('Juniper Atlas translations', bump=False)))")
+                found, = json.loads(fresh_python(recall_code))["items"]
+                self.assertIn(_COMPACT_SUMMARY.rstrip("."), found["summary"])
+                self.assertFalse(json.loads(fresh_python(recall_code, scope=trusted))["items"])
+                with closing(sqlite3.connect(soul / "soul.db")) as db:
+                    self.assertEqual(db.execute("SELECT source, session, content FROM stars").fetchall(),
+                                     [("watch:codex:precompact", persisted, _COMPACT_SUMMARY)])
+                layer_path.write_text(project_hook, encoding="utf-8")
+
+                # Use the normal file watcher, not a proxy or manual review call.
+                fixture_cfg = json.loads((soul / "config.json").read_bytes())
+                fixture_cfg["watch"].update(poll_sec=1, organize_after=False)
+                for client_name in ("claude", "qoder", "workbuddy", "codebuddy", "opencode", "dsh"):
+                    fixture_cfg["watch"]["clients"][client_name] = {"enabled": False}
+                fixture_cfg["evolve"] = {"enabled": True, "nudge_interval": 3, "approval": "auto"}
+                fixture_cfg["core"] = {"owner_token": "isolated-review-owner"}
+                (soul / "config.json").write_text(json.dumps(fixture_cfg), encoding="utf-8")
+                fresh_python(worker_code, scope=None, writeback=False)
+                review_b = rpc("thread/start", {"cwd": str(repo), "ephemeral": False})["thread"]["id"]
+                probe_turn(review_b, "SCOPED_SIBLING_FIXTURE prefers a different citation style.")
+                review_a = rpc("thread/start", {"cwd": str(repo), "ephemeral": False})["thread"]["id"]
+                probe_turn(review_a, "SCOPED_TARGET_FIRST: a manuscript lost a citation after renumbering.")
+                probe_turn(review_a, "SCOPED_TARGET_SECOND: we audited the citation numbers before finalizing it.")
+                review_waiter = """import sqlite3, time
+from app import db
+from app.evolve import skills
+from app.watch.watcher import Watcher
+w = Watcher()
+w.start()
+try:
+    until = time.monotonic() + 18
+    while time.monotonic() < until:
+        p = [item for item in skills.list_pending() if item.get("source") == "review:codex"]
+        try:
+            with db.get_conn() as c:
+                n = c.execute("SELECT COUNT(*) FROM codex_review_turns").fetchone()[0]
+                processed = c.execute("SELECT SUM(reviewed) FROM codex_review_turns").fetchone()[0]
+        except sqlite3.OperationalError:
+            time.sleep(0.1)
+            continue
+        if (n, processed, len(p)) == EXPECTED:
+            print(len(p), skills.find("check-source-numbering") is None)
+            break
+        time.sleep(0.1)
+    else:
+        print("review not ready", w.status)
+finally:
+    w.stop()
+"""
+                self.assertIn("0 True", fresh_python(review_waiter.replace("EXPECTED", "(3, 0, 0)"),
+                                                     scope=None, writeback=False))
+                while not model_requests.empty():
+                    _, data = model_requests.get_nowait()
+                    self.assertFalse(data.get("messages", [{}])[0].get("content", "").startswith("Review this Codex"))
+                probe_turn(review_a, "SCOPED_TARGET_THIRD: the repeatable check is to verify each cited source number.")
+                observed = fresh_python(review_waiter.replace("EXPECTED", "(4, 3, 2)"), scope=None, writeback=False)
+                self.assertIn("2 True", observed, observed)
+                requests = []
+                while not model_requests.empty():
+                    _, data = model_requests.get_nowait()
+                    if data.get("messages") and data["messages"][0].get("content", "").startswith("Review this Codex"):
+                        requests.append(data)
+                scoped, = requests
+                prompt = json.dumps(scoped)
+                self.assertIn("SCOPED_TARGET_FIRST", prompt)
+                self.assertIn("SCOPED_TARGET_SECOND", prompt)
+                self.assertIn("SCOPED_TARGET_THIRD", prompt)
+                self.assertNotIn("SCOPED_SIBLING_FIXTURE", prompt)
+                with closing(sqlite3.connect(soul / "soul.db")) as db:
+                    self.assertEqual(dict(db.execute("SELECT session_id,SUM(reviewed) FROM codex_review_turns "
+                                                    "GROUP BY session_id")), {review_a: 3, review_b: 0})
+
+                decisions = """from fastapi.testclient import TestClient
+from app.server import app
+c = TestClient(app)
+h = {"X-StarWish-Owner": "isolated-review-owner"}
+items = {x["op"]["name"]: x["id"] for x in c.get("/api/skills/pending", headers=h).json()}
+print(c.post("/api/skills/pending/" + items["check-source-numbering"] + "/approve", headers=h).status_code)
+print(c.post("/api/skills/pending/" + items["check-page-headers"] + "/reject", headers=h).status_code)
+"""
+                self.assertEqual(fresh_python(decisions, scope=None, writeback=False).splitlines()[-2:], ["200", "200"])
+                # Allow only this read tool in the disposable Codex profile; the fixture has no interactive client.
+                rpc("config/batchWrite", {"edits": [
+                    {"keyPath": "mcp_servers.starwish.tools.skill_view.approval_mode", "value": "approve",
+                     "mergeStrategy": "upsert"},
+                ], "reloadUserConfig": True})
+                independent = rpc("thread/start", {"cwd": str(repo), "ephemeral": True})["thread"]["id"]
+                listing = rpc("mcpServer/tool/call", {"threadId": independent, "server": "starwish",
+                                                     "tool": "skills_list", "arguments": {}})
+                skill_list = json.dumps(listing)
+                self.assertIn(_REVIEW_SKILL, skill_list)
+                self.assertNotIn(_REJECT_SKILL, skill_list)
+                first = len(notifications)
+                applied_prompt, _ = probe_turn(independent, _SKILL_USAGE)
+                applied_responses = notifications[first:]
+                self.assertTrue(any(n["method"] == "item/completed" and
+                                    "Citation 3 has no source entry." in json.dumps(n["params"]["item"])
+                                    for n in applied_responses), applied_prompt[:1500])
+                _, followup = model_requests.get(timeout=5)
+                self.assertIn("Audit source numbering before finalizing", json.dumps(followup))
+                self.assertTrue(model_requests.empty())
+
+                auto_hooks = compact_profile.split("[[hooks.PreCompact]]", 1)[1].replace("manual|auto", "auto")
+                layer_path.write_text(project_hook + "\n[[hooks.PreCompact]]" + auto_hooks, encoding="utf-8")
+                auto_hook = hook_info("preCompact")
+                self.assertEqual(auto_hook["trustStatus"], "modified")
+                auto_key = "hooks.state." + json.dumps(auto_hook["key"]) + ".trusted_hash"
+                rpc("config/batchWrite", {"edits": [
+                    {"keyPath": auto_key, "value": auto_hook["currentHash"], "mergeStrategy": "upsert"},
+                    {"keyPath": "model_auto_compact_token_limit", "value": 5000, "mergeStrategy": "upsert"},
+                    {"keyPath": "model_context_window", "value": 30000, "mergeStrategy": "upsert"},
+                ], "reloadUserConfig": True})
+                auto_thread = rpc("thread/start", {"cwd": str(repo), "ephemeral": False})["thread"]["id"]
+                _, first_runs = probe_turn(auto_thread, _AUTO_TRIGGER_SAMPLE)
+                self.assertFalse(any(run["eventName"] == "preCompact" for run in first_runs))
+                auto_rollout, = (home / "sessions").rglob(f"*{auto_thread}.jsonl")
+                previous_turn, = [row["payload"]["turn_id"] for row in map(json.loads, auto_rollout.read_bytes().splitlines())
+                                  if row.get("type") == "event_msg" and row["payload"].get("type") == "task_complete"]
+                _, auto_runs = probe_turn(auto_thread, "Now compare the citation summary.", expect_compaction=True)
+                self.assertTrue(any(run["eventName"] == "preCompact" and run["status"] == "completed"
+                                    for run in auto_runs), auto_runs)
+                with closing(sqlite3.connect(soul / QUEUE)) as db:
+                    self.assertEqual(db.execute("SELECT turn_id FROM intents WHERE session_id=?", (auto_thread,)).fetchall(),
+                                     [(previous_turn,)])
+                layer_path.write_text(project_hook, encoding="utf-8")
                 rpc("config/batchWrite", {"edits": [{"keyPath": "hooks.SessionStart",
                     "value": [{"matcher": "startup", "hooks": [{"type": "command", "command": "echo unrelated"}]}],
                     "mergeStrategy": "replace"}], "reloadUserConfig": True})

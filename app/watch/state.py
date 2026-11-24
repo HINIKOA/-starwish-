@@ -27,7 +27,9 @@ def inbox_path() -> Path:
 
 class State:
     """{"files": {路径: {c: 客户端, o: 偏移, s: 大小, m: mtime, meta: {...}, p: 有未完成的一轮, f: 失败次数}},
-        "clients": {客户端: {"init": 初始化时间}}, "dbs": {数据库路径: {...}}}"""
+        "clients": {客户端: {"init": 初始化时间}}, "dbs": {数据库路径: {...}}}
+    Codex 文件的 review 字段单独保存复盘偏移、文件签名和重试时间，不保存对话正文。
+    """
 
     def __init__(self):
         self.data = {"files": {}, "clients": {}, "dbs": {}}

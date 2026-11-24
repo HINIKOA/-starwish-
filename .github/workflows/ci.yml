@@ -1,0 +1,56 @@
+name: CI
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install and check locked dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --dry-run --no-index -r requirements.txt
+          python -m pip check
+      - name: Check first-party browser scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files -z -- 'web/*.js' ':!web/vendor/**' | while IFS= read -r -d '' file; do
+            node --check "$file"
+          done
+      - name: Run isolated Python regressions
+        shell: bash
+        env:
+          STARWISH_SOUL_DIR: ${{ runner.temp }}/starwish-ci
+          STARWISH_NO_WATCH: "1"
+          STARWISH_NO_EMBED_BOOT: "1"
+          STARWISH_NO_DAILY: "1"
+          STARWISH_GRAPHFLOW_CODEX_TEST: "0"
+        run: |
+          set -euo pipefail
+          python -B -X utf8 -m unittest tests.test_skill_approval tests.test_codex_skill_review tests.test_codex_precompact tests.test_codex_session_memory tests.test_scoped_memory tests.test_recall_quality tests.graphflow_codex_test
+          python -B -X utf8 tests/watch_test.py
+          python -B -X utf8 tests/fusion_test.py
+          python -B -X utf8 tests/smoke_test.py

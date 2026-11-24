@@ -1,4 +1,6 @@
 // 星愿 StarWish —— 技能进化模块页面
+import { saveProtectedSettings } from "./owner-settings.js";
+
 // 事件时间：优先用 Unix 时间戳按本机时区显示，避免显示成 UTC
 const evTime = (x) => (x && x.t ? new Date(x.t * 1000).toLocaleString("zh-CN", { hour12: false }) : String((x && x.ts) || "").replace("T", " ").slice(0, 19));
 const $ = (s) => document.querySelector(s);
@@ -10,25 +12,37 @@ async function api(path, opts = {}) {
   if (o.body && typeof o.body !== "string") { o.body = JSON.stringify(o.body); o.headers["Content-Type"] = "application/json"; }
   const r = await fetch(path, o);
   let d = null; try { d = await r.json(); } catch { d = null; }
-  if (!r.ok) throw new Error((d && (d.detail || d.message)) || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const error = new Error((d && (d.detail || d.message)) || `HTTP ${r.status}`);
+    error.status = r.status;
+    throw error;
+  }
   return d;
 }
 let tt;
 function toast(m, err = false) { const t = $("#toast"); t.textContent = m; t.className = err ? "err" : ""; clearTimeout(tt); tt = setTimeout(() => t.classList.add("hidden"), 3800); }
 async function safe(fn) { try { return await fn(); } catch (e) { toast(e.message, true); } }
-const SRC = { owner: "主人", panel: "面板", mcp: "MCP·AI", review: "后台巡检", api: "API", "api-agent": "API·AI", rollback: "回滚", approve: "批准待审", command: "对话指令" };
+const SRC = { owner: "主人", panel: "面板", mcp: "MCP·AI", review: "后台巡检", "review:codex": "Codex 会话巡检",
+  api: "API", "api-agent": "API·AI", rollback: "回滚", approve: "批准待审", command: "对话指令" };
 const diffHtml = (e) => Object.entries(e.diff || {}).map(([f, d]) => `<div class="diff"><div class="dt">${esc(f)}</div>${d.map(([op, l]) =>
   `<div class="l ${op === "+" ? "add" : op === "-" ? "del" : "eq"}">${op === "=" ? "  " : op + " "}${esc(l) || "&nbsp;"}</div>`).join("")}</div>`).join("");
 
 let ST = null;
 async function loadStatus() {
   ST = await api("/api/evolve/status");
+  const cr = ST.codex_review || {};
   $("#emeta").innerHTML = `<span class="chip">技能 <b>${ST.total}</b></span><span class="chip">AI 自建 <b>${ST.agent_created}</b></span>
-    <span class="chip">巡检计数 <b>${ST.iters_since_skill}/${ST.nudge_interval}</b></span>${ST.running ? '<span class="chip"><b>巡检中…</b></span>' : ""}`;
-  const b = $("#pBadge"); b.textContent = ST.pending; b.classList.toggle("hidden", !ST.pending);
+    <span class="chip">通用巡检 <b>${ST.iters_since_skill}/${ST.nudge_interval}</b></span>
+    <span class="chip">Codex 待巡检 <b>${Number(cr.pending_turns || 0)} 轮</b></span>
+    ${cr.retry ? `<span class="chip">Codex 待重试 <b>${Number(cr.retry)}</b></span>` : ""}
+    ${cr.uncertain ? `<span class="chip">Codex 结果待核对 <b>${Number(cr.uncertain)}</b></span>` : ""}
+    ${ST.running || cr.running ? '<span class="chip"><b>巡检中…</b></span>' : ""}`;
+  const b = $("#pBadge");
+  const pending = Number(ST.pending || 0) + Number(cr.uncertain || 0);
+  b.textContent = pending; b.classList.toggle("hidden", !pending);
   $("#intro").innerHTML = `技能是 AI 的<b>操作手册</b>（怎么做某件事），和星星（发生过什么）、核心记忆（我是谁）并列。参考 Hermes Agent：
     <b>前台自觉</b>——会用工具的 AI 做完复杂任务、修好难题后自己调用 <code>skill_manage</code> 存成技能，发现过时立即 patch；
-    <b>后台巡检</b>——每累计 ${ST.nudge_interval} 轮对话（对话监控读到的各客户端对话、代理转发的都算）没有新技能时，维护模型在后台回看对话，从试错、绕路、主人纠正里提炼或修补技能。
+    <b>后台巡检</b>——通用巡检累计 ${ST.nudge_interval} 轮；普通 Codex 则在手动授权的工作区内按会话各自计数，达到同一阈值才回看本会话。Codex 候选技能一律待审。
     AI 自建的技能都过安全扫描，危险的交给你批准；每次修改都可追溯、可回滚；不用的技能只会变暗或归档，<b>永不硬删除</b>。`;
 }
 
@@ -104,19 +118,112 @@ async function renderSkill(name) {
 }
 
 // ---------------- 待批准 ----------------
+let pendingOwnerToken = "", pendingRender = 0;
+function pendingApi(path, options = {}) {
+  return api(path, { ...options, headers: pendingOwnerToken ? { "X-StarWish-Owner": pendingOwnerToken } : {} });
+}
+
+function renderPendingLogin(container, rejected) {
+  container.innerHTML = `<form class="hcard editor" id="pendingOwnerForm">
+    <h3>验证主人身份</h3>
+    <p class="note">${rejected ? "令牌不正确或已失效，请重新输入。" : "查看或处理待审技能需要主人权限。"}</p>
+    <label for="pendingOwnerInput">主人令牌</label>
+    <input id="pendingOwnerInput" type="password" autocomplete="off" required>
+    <div class="row"><button class="primary">验证并查看</button></div>
+  </form>`;
+  const input = container.querySelector("input");
+  container.querySelector("form").onsubmit = (event) => {
+    event.preventDefault();
+    pendingOwnerToken = input.value;
+    input.value = "";
+    renderPending();
+  };
+  input.focus();
+}
+
+async function decidePending(button, approve) {
+  const card = button.closest(".hcard");
+  const id = approve ? button.dataset.ok : button.dataset.no;
+  if (!approve && card.dataset.pendingStatus === "applying" &&
+      !confirm("这只会移出待审；不会撤销可能已写入的技能。确认移出？")) return;
+  const buttons = [...card.querySelectorAll("button:not(:disabled)")];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    const action = approve ? "approve" : "reject";
+    const result = await pendingApi(`/api/skills/pending/${encodeURIComponent(id)}/${action}`, { method: "POST" });
+    if (!result?.success) throw new Error(result?.message || "未能处理待审项");
+    toast(approve ? result.message || "已批准" : "已拒绝");
+    await safe(loadStatus);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    await renderPending();
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+}
+
 async function renderPending() {
-  const list = await safe(() => api("/api/skills/pending"));
-  if (!list) return;
-  $("#tab-pending").innerHTML = `<div class="intro" style="margin-top:12px">AI 自建技能被安全扫描判为危险、AI 想归档你创建的技能、或设置为「全部需批准」时，会停在这里等你决定。</div>
+  const version = ++pendingRender;
+  const container = $("#tab-pending");
+  let list, recoveries = [];
+  try {
+    list = await pendingApi("/api/skills/pending");
+  } catch (error) {
+    if (version !== pendingRender) return;
+    if (error.status === 403) {
+      const rejected = !!pendingOwnerToken;
+      pendingOwnerToken = "";
+      renderPendingLogin(container, rejected);
+    } else {
+      container.textContent = "无法加载待审列表，请重新打开此页重试。";
+      toast(error.message, true);
+    }
+    return;
+  }
+  let recoveryError = false;
+  try {
+    recoveries = await pendingApi("/api/evolve/codex-review/recovery");
+  } catch {
+    recoveryError = true;
+  }
+  if (version !== pendingRender) return;
+  container.innerHTML = `<div class="intro" style="margin-top:12px">AI 自建技能被安全扫描判为危险、AI 想归档你创建的技能、或设置为「全部需批准」时，会停在这里等你决定。</div>
+    ${recoveryError ? '<div class="note warn">暂时无法读取待核对的巡检批次。</div>' : ""}
+    ${recoveries.map((r, i) => `<div class="hcard">
+      <div class="hhead"><span class="rev">巡检结果待核对</span><span class="src">${esc(r.workspace)}</span></div>
+      <div class="note">会话 ${esc(r.session_id)} · 仍有 ${Number(r.pending)} 项同批待审。结案不会批准、拒绝或重发建议。</div>
+      ${r.legacy ? '<div class="note warn">该旧批次没有轮次边界。结案将跳过此会话当前积压的复盘，之后仅处理新轮次。</div>' : ""}
+      <button data-recovery="${i}">已核对，结案并继续巡检</button></div>`).join("")}
     ${list.length ? "" : '<div class="empty">没有待批准的技能修改。</div>'}
-    ${list.map((p) => `<div class="hcard"><div class="hhead"><span class="rev">${esc(p.op.action)}</span><span class="src">${esc(p.op.name)}</span>
+    ${list.map((p) => `<div class="hcard" data-pending-status="${esc(p.status || "pending")}"><div class="hhead"><span class="rev">${esc(p.op.action)}</span><span class="src">${esc(p.op.name)}</span>
       <span class="t">${fmtDate(p.created_at)} · ${esc(SRC[p.source] || p.source)}</span>
-      <div class="acts"><button class="primary" data-ok="${p.id}">批准</button><button class="danger" data-no="${p.id}">拒绝</button></div></div>
+      <div class="acts"><button class="primary" data-ok="${esc(p.id)}" ${p.status === "applying" ? "disabled" : ""}>${p.status === "failed" ? "重试批准" : "批准"}</button><button class="danger" data-no="${esc(p.id)}">${p.status === "applying" ? "移出待审" : "拒绝"}</button></div></div>
       <div class="note">原因：${esc(p.reason)}</div>
+      ${p.status === "failed" ? `<div class="note warn">上次批准未生效：${esc(p.last_error)}</div>` : ""}
+      ${p.status === "applying" ? '<div class="note warn">批准结果未确认。请先检查技能及历史，不要重复应用。</div>' : ""}
       ${p.scan && p.scan.findings.length ? `<div class="scan">${p.scan.findings.map((f) => `<div class="f">[${esc(f.severity)}] ${esc(f.category)}：${esc(f.desc)}（${esc(f.file)}:${f.line}）</div>`).join("")}</div>` : ""}
       <pre>${esc(p.op.content || (p.op.old_string ? `- ${p.op.old_string}\n+ ${p.op.new_string}` : p.op.file_content || ""))}</pre></div>`).join("")}`;
-  $$("[data-ok]").forEach((b) => (b.onclick = () => safe(async () => { const r = await api(`/api/skills/pending/${b.dataset.ok}/approve`, { method: "POST" }); toast(r.message || "已批准"); await loadStatus(); renderPending(); })));
-  $$("[data-no]").forEach((b) => (b.onclick = () => safe(async () => { await api(`/api/skills/pending/${b.dataset.no}/reject`, { method: "POST" }); toast("已拒绝"); await loadStatus(); renderPending(); })));
+  container.querySelectorAll("[data-ok]").forEach((b) => { b.onclick = () => decidePending(b, true); });
+  container.querySelectorAll("[data-no]").forEach((b) => { b.onclick = () => decidePending(b, false); });
+  container.querySelectorAll("[data-recovery]").forEach((b) => {
+    b.onclick = async () => {
+      const r = recoveries[Number(b.dataset.recovery)];
+      const msg = r.legacy ? "结案将跳过此会话当前积压的复盘，且不会删除已有待审建议。继续？"
+        : "请先检查待审和技能变更记录。结案不会重放本批次，后续轮次会继续复盘。继续？";
+      if (!confirm(msg)) return;
+      b.disabled = true;
+      try {
+        await pendingApi(`/api/evolve/codex-review/recovery/${encodeURIComponent(r.batch)}/acknowledge`,
+          { method: "POST", body: { through: r.through } });
+        toast("巡检批次已结案");
+        await safe(loadStatus);
+      } catch (error) {
+        toast(error.message, true);
+      } finally {
+        await renderPending();
+      }
+    };
+  });
 }
 
 // ---------------- 进化日志 ----------------
@@ -147,8 +254,8 @@ async function renderSettings() {
     <span>注入预算</span><input id="e_b" type="number" min="50" value="${e.inject_budget_tokens ?? 400}">
   </div><div class="row"><button class="primary" id="e_save">保存</button></div></div>`;
   $("#e_save").onclick = () => safe(async () => {
-    await api("/api/settings", { method: "PUT", body: { evolve: { enabled: $("#e_en").checked, nudge_interval: +$("#e_n").value, approval: $("#e_ap").value,
-      max_ops: +$("#e_ops").value, review_memory: $("#e_mem").checked, inject: $("#e_inj").checked, inject_budget_tokens: +$("#e_b").value } } });
+    await saveProtectedSettings(api, { evolve: { enabled: $("#e_en").checked, nudge_interval: +$("#e_n").value, approval: $("#e_ap").value,
+      max_ops: +$("#e_ops").value, review_memory: $("#e_mem").checked, inject: $("#e_inj").checked, inject_budget_tokens: +$("#e_b").value } });
     toast("已保存"); loadStatus();
   });
 }

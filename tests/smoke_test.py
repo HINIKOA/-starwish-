@@ -449,7 +449,8 @@ def main():
         c.post("/api/core/undo", headers={"Authorization": "Bearer owner-secret-token-1"})
         r = c.post("/api/core/undo")
         check("无令牌不能撤销 (403)", r.status_code == 403)
-        c.put("/api/settings", json={"core": {"owner_token": ""}})
+        check("主人可使用现有令牌清除令牌", c.put("/api/settings", json={"core": {"owner_token": ""}},
+                                             headers={"Authorization": "Bearer owner-secret-token-1"}).status_code == 200)
         # 代理里的主人指令
         n_up = mock_app.state.last
         r = c.post("/v1/chat/completions", json={"model": "x", "messages": [{"role": "user", "content": "/核心"}]})
@@ -613,14 +614,19 @@ def main():
         check("整理：重复运行不会重复处理", r2.get("added", 0) == 0 and r2.get("chunks", 0) == 0, json.dumps(r2, ensure_ascii=False))
 
         print("== MCP")
+        memory_tools = {"get_core", "recall_index", "recall", "recall_detail", "remember", "propose_core_change",
+                        "update_core", "core_history", "undo_core", "skills_list", "skill_view", "skill_manage",
+                        "skill_feedback"}
+        sdk_tools = None
         for fb in (False, True):
             label = "极简 JSON-RPC 后备" if fb else "官方 mcp SDK"
             init, tl, call, prop, upd, upd2, und, sks = mcp_session(env, fb)
             names = sorted(t["name"] for t in (tl or {}).get("result", {}).get("tools", []))
             check(f"MCP[{label}] 初始化", init and "result" in init, str(init)[:200])
-            check(f"MCP[{label}] 列出 13 个工具", names == sorted(["get_core", "recall_index", "recall", "recall_detail", "remember",
-                                                               "propose_core_change", "update_core", "core_history", "undo_core",
-                                                               "skills_list", "skill_view", "skill_manage", "skill_feedback"]), str(names))
+            check(f"MCP[{label}] 核心记忆工具齐全、无重复且两种传输一致",
+                  memory_tools <= set(names) and len(names) == len(set(names)) and (not fb or names == sdk_tools), str(names))
+            if not fb:
+                sdk_tools = names
             txt = ((call or {}).get("result", {}).get("content") or [{}])[0].get("text", "")
             check(f"MCP[{label}] recall 调用", "咖啡" in txt, str(call)[:300])
             ptxt = ((prop or {}).get("result", {}).get("content") or [{}])[0].get("text", "")

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -19,6 +20,7 @@ from . import db as _db
 from .db import fts_query, get_conn, log_event, tok_string
 
 _lock = threading.Lock()
+_SYNTHETIC_OWNER = re.compile(r"主人(?!公)|真实用户")
 STOP = set("""主人 我们 你们 他们 她们 自己 喜欢 觉得 一个 一些 这个 那个 这样 那样 因为 所以 但是 而且 还是 就是 不是 没有 可以 已经
 一只 一个 一杯 一次 每次 什么 怎么 时候 今天 昨天 现在 之前 以后 非常 特别 比较 一下 一起 知道 记得 告诉 说过 提到 表示 需要 希望 应该 可能 AI 用户 助手""".split())
 
@@ -141,12 +143,29 @@ FUSE_PROMPT = """下面是几颗相似的记忆。请把它们归纳成一颗：
 
 def _naive(rows) -> tuple[str, str]:
     from datetime import datetime
+    from .stars import _REVISION_CUE, auto_summary
+
     newest = max(rows, key=lambda r: r["created_at"])
+    # A revision replaces an earlier default; a shorter mention does not.
+    chosen = newest if _REVISION_CUE.search(newest["content"]) else max(
+        rows, key=lambda r: (len(words(r["summary"])), len(r["summary"]), r["created_at"]))
     lines = [f"· {datetime.fromtimestamp(r['created_at']).strftime('%Y-%m-%d')} {r['content'].strip()[:160]}" for r in rows]
-    return newest["summary"][:40], f"（由 {len(rows)} 颗相似的记忆融合）\n" + "\n".join(lines)
+    return (chosen["summary"] or auto_summary(chosen["content"]))[:60], f"（由 {len(rows)} 颗相似的记忆融合）\n" + "\n".join(lines)
 
 
-def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=None) -> dict:
+def inherited_category(rows) -> tuple[str, str]:
+    """Use the most common existing category; an exact tie keeps the oldest assignment."""
+    ordered = sorted(rows, key=lambda r: (r["created_at"], r["id"]))
+    majors = Counter(r["cat_major"] for r in ordered if r["cat_major"])
+    if not majors:
+        return "", ""
+    major = majors.most_common(1)[0][0]
+    minors = Counter(r["cat_minor"] for r in ordered if r["cat_major"] == major and r["cat_minor"])
+    return major, minors.most_common(1)[0][0] if minors else ""
+
+
+def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=None,
+         *, keep_categories: bool = False) -> dict:
     """把几颗星融合成一颗新星。返回新星。"""
     from . import maintenance, organize, stars as st
     cfg = cfg or config.load_config()
@@ -158,6 +177,13 @@ def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=Non
             rows = c.execute(f"SELECT * FROM stars WHERE id IN ({','.join('?' * len(ids))})", ids).fetchall()
             if len(rows) != len(ids) or any(r["deleted_at"] or r["fused_into"] for r in rows):
                 raise ValueError("有的星已经被隐藏或融合过了")
+            scope = os.environ.get("STARWISH_WATCH_CODEX_ONLY_SESSION")
+            if scope is not None:
+                origins: dict[int, str | None] = {}
+                if any(st.watch_origin(c, r, origins) != scope for r in rows):
+                    raise ValueError("验收融合只允许同一目标会话的记忆")
+                if any(_SYNTHETIC_OWNER.search(r["content"]) or _SYNTHETIC_OWNER.search(r["summary"]) for r in rows):
+                    raise ValueError("含未核正的真人归因，保留原星不再自动融合")
         summary, content, by_llm = "", "", False
         major, minor, auto_tags = "", "", []
         if use_llm and (chat or maintenance.llm_ready(cfg)):
@@ -166,12 +192,17 @@ def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=Non
                               for i, r in enumerate(sorted(rows, key=lambda r: r["created_at"])))
             try:
                 prompt = FUSE_PROMPT.format(items=items, categories=organize.category_text())
+                if scope is not None:
+                    prompt = "这些是合成验收资料。保持原有归属，只归到虚构项目、人物或知识主题，不归给真人。\n" + prompt
                 txt = (chat or (lambda m: maintenance.chat(m, cfg)))([{"role": "user", "content": prompt}])
                 d = maintenance.parse_json(txt)
                 summary, content = str(d.get("summary", "")).strip(), str(d.get("content", "")).strip()
+                if scope is not None and (_SYNTHETIC_OWNER.search(content) or _SYNTHETIC_OWNER.search(summary)):
+                    log_event("star_fuse_attribution_rejected", ids=ids)
+                    summary, content = "", ""
                 by_llm = bool(content)
                 if by_llm:
-                    major, minor, auto_tags = organize.metadata(d)
+                    major, minor, auto_tags = organize.automatic_metadata(d)
             except Exception as ex:  # noqa: BLE001
                 log_event("star_fuse_llm_failed", error=str(ex)[:160])
         if not content:
@@ -183,13 +214,12 @@ def fuse(ids: list[int], use_llm: bool = True, cfg: dict | None = None, chat=Non
                     tags.append(t)
         if "融合" not in tags:
             tags.append("融合")
-        if not major:
-            inherited = Counter((r["cat_major"], r["cat_minor"]) for r in rows if r["cat_major"])
-            if inherited:
-                major, minor = inherited.most_common(1)[0][0]
-            elif use_llm and by_llm and maintenance.llm_ready(cfg):
-                major, minor, extra = organize.classify_new(content, summary, tags, cfg)
-                auto_tags += extra
+        inherited_major, inherited_minor = inherited_category(rows)
+        if inherited_major and (keep_categories or not major):
+            major, minor, _ = organize.automatic_metadata({"major": inherited_major, "minor": inherited_minor})
+        if not major and use_llm and by_llm and maintenance.llm_ready(cfg):
+            major, minor, extra = organize.classify_new(content, summary, tags, cfg)
+            auto_tags += extra
         tags = st._norm_tags(tags + auto_tags)
         now = time.time()
         gen = max(int(r["generation"] or 0) for r in rows) + 1
@@ -254,7 +284,8 @@ def auto_fuse(cfg: dict | None = None, chat=None, force: bool = False) -> list[d
     done = []
     for g in find_groups(cfg)[: int(m.get("fuse_max_per_run", 5))]:
         try:
-            done.append({"members": g["ids"], "star": fuse(g["ids"], use_llm=m.get("fuse_use_llm", True), cfg=cfg, chat=chat)})
+            done.append({"members": g["ids"], "star": fuse(g["ids"], use_llm=m.get("fuse_use_llm", True),
+                                                         cfg=cfg, chat=chat, keep_categories=True)})
         except ValueError:
             continue
     if done:

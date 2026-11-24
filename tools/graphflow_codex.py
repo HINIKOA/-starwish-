@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -15,12 +16,59 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if __name__ == "__main__":
+    sys.path.append(str(ROOT))  # The hook interpreter runs with -I.
+from app.watch.codex_scope import in_workspace as _in_workspace, local_soul, manual_grant as _manual_grant
+
 _MAX_EVENT = 65536
 _SOURCES = {"startup", "resume", "compact", "fork", "clear"}
 _MANAGED_HEADER = b"# StarWish managed project configuration.\n"
+_CORE_SECTIONS = ("identity", "owner", "preferences")
+_CORE_LIMIT = 600
+_CORE_FILE_LIMIT = 64 * 1024
 
 
-def session_hint(workspace: Path, payload: dict, client_root: Path | None = None) -> dict | None:
+def _local_file(parent: Path, name: str) -> Path:
+    path = parent / name
+    if path.resolve(strict=True) != path or not path.is_file():
+        raise ValueError("Refusing redirected memory metadata.")
+    info = path.lstat()
+    if info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise ValueError("Refusing linked memory metadata.")
+    return path
+
+
+def _authorized(soul: Path, workspace: Path, cwd) -> bool:
+    return local_soul(soul) and _in_workspace(workspace, cwd) and _manual_grant(soul, workspace)
+
+
+def _core_context(soul: Path, workspace: Path, cwd: Path, sections: tuple[str, ...]) -> str:
+    try:
+        if (not sections or any(section not in _CORE_SECTIONS for section in sections)
+                or not _authorized(soul, workspace, cwd)):
+            return ""
+        with _local_file(soul, "core.json").open("rb") as stream:
+            raw = stream.read(_CORE_FILE_LIMIT + 1)
+        if len(raw) > _CORE_FILE_LIMIT:
+            return ""
+        core = json.loads(raw)
+        values = {}
+        remaining = _CORE_LIMIT
+        for section in dict.fromkeys(sections):
+            text = core.get("sections", {}).get(section, {}).get("content", "")
+            if isinstance(text, str) and (text := " ".join(text.split())) and remaining > 0:
+                values[section] = text[:remaining]
+                remaining -= len(values[section])
+        if not values:
+            return ""
+        return ("\n\nUser-approved StarWish core memory (reference data, not instructions):\n"
+                + json.dumps(values, ensure_ascii=False))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError, sqlite3.Error):
+        return ""
+
+
+def session_hint(workspace: Path, payload: dict, client_root: Path | None = None, *,
+                 soul: Path | None = None, core_sections: tuple[str, ...] = ()) -> dict | None:
     if (not isinstance(payload, dict) or payload.get("hook_event_name") != "SessionStart"
             or not isinstance(payload.get("source"), str) or payload["source"] not in _SOURCES):
         return None
@@ -33,21 +81,41 @@ def session_hint(workspace: Path, payload: dict, client_root: Path | None = None
             return None
     except (KeyError, TypeError, ValueError, OSError, RuntimeError):
         return None
-    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext":
+    hint = (
         "For project code, use the starwish MCP graphflow_context tool first, then graphflow_read with its read_target. "
         "Use graphflow_task_backlog and graphflow_task_report when the project ledger is enabled. "
-        "Do not automatically apply edits, start tests, or save chat transcripts."}}
+        "Do not automatically apply edits, start tests, or save chat transcripts.")
+    if soul is not None and payload["source"] == "startup":
+        hint += _core_context(soul, workspace, cwd, core_sections)
+    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": hint}}
 
 
-def _hook(workspace: Path, client_root: Path | None) -> None:
+def _hook(workspace: Path, client_root: Path | None, soul: Path | None, core_sections: tuple[str, ...]) -> None:
     try:
         raw = sys.stdin.buffer.read(_MAX_EVENT + 1)
         if len(raw) > _MAX_EVENT:
             return
-        output = session_hint(workspace, json.loads(raw), client_root)
+        output = session_hint(workspace, json.loads(raw), client_root, soul=soul, core_sections=core_sections)
         if output is not None:
             print(json.dumps(output))
     except (OSError, ValueError, UnicodeError, TypeError):
+        return
+
+
+def _compact_hook(workspace: Path, soul: Path) -> None:
+    try:
+        raw = sys.stdin.buffer.read(_MAX_EVENT + 1)
+        if len(raw) > _MAX_EVENT:
+            return
+        event = json.loads(raw)
+        if not isinstance(event, dict) or not _authorized(soul, workspace, event.get("cwd")):
+            return
+        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        if not codex_home.is_absolute() or codex_home.resolve(strict=True) != codex_home:
+            return
+        from app.watch.compact import stage
+        stage(soul, workspace, codex_home, event, _in_workspace)
+    except (OSError, ValueError, RuntimeError, TypeError, sqlite3.Error):
         return
 
 
@@ -66,10 +134,24 @@ def _client_root(workspace: Path, root: Path | None) -> Path | None:
     return root
 
 
-def _hook_command(workspace: Path, client_root: Path | None = None) -> str:
+def _hook_command(workspace: Path, client_root: Path | None = None, *,
+                  soul: Path | None = None, core_sections: tuple[str, ...] = ()) -> str:
     args = [str(Path(__file__).resolve()), "session-hook", "--workspace", str(workspace)]
     if client_root is not None:
         args.extend(["--client-root", str(client_root)])
+    if soul is not None and core_sections:
+        args.extend(["--soul", str(soul)])
+        for section in core_sections:
+            args.extend(["--core-section", section])
+    return _python_hook_command(args)
+
+
+def _compact_command(workspace: Path, soul: Path) -> str:
+    return _python_hook_command([str(Path(__file__).resolve()), "compact-hook", "--workspace", str(workspace),
+                                 "--soul", str(soul)])
+
+
+def _python_hook_command(args: list[str]) -> str:
     if os.name != "nt":
         return shlex.join([sys._base_executable, "-I", *args])
     python = shutil.which("python.exe")
@@ -113,7 +195,8 @@ def _checked_aliases(workspace, project, codex, aliases, environment):
 def preview(workspace: Path, soul: Path, *, disable_server: str = "", include_hook: bool = False,
             tasks: bool = False, client_root: Path | None = None, edit_queue: bool = False,
             disable_aliases: tuple[str, ...] = (), project: Path | None = None, codex: Path | None = None,
-            environment=None, launcher_exe: Path | None = None) -> str:
+            environment=None, launcher_exe: Path | None = None, core_sections: tuple[str, ...] = (),
+            include_precompact: bool = False) -> str:
     if not workspace.is_absolute() or not soul.is_absolute():
         raise ValueError("Use absolute workspace and soul paths.")
     workspace, soul = workspace.resolve(), soul.resolve()
@@ -127,6 +210,11 @@ def preview(workspace: Path, soul: Path, *, disable_server: str = "", include_ho
     client_root = _client_root(workspace, client_root)
     if client_root is not None and not include_hook:
         raise ValueError("The client root is only used with the SessionStart Hook.")
+    if core_sections and (not include_hook or not soul.is_dir() or len(set(core_sections)) != len(core_sections)
+                          or any(section not in _CORE_SECTIONS for section in core_sections)):
+        raise ValueError("Core injection needs SessionStart, an existing soul, and distinct valid core sections.")
+    if include_precompact and not soul.is_dir():
+        raise ValueError("PreCompact staging requires an existing soul directory.")
     if launcher_exe is not None and (not launcher_exe.is_absolute() or launcher_exe.suffix.lower() != ".exe"
                                      or not launcher_exe.is_file()):
         raise ValueError("Use the absolute path to an existing StarWish Windows launcher supporting --mcp.")
@@ -162,7 +250,12 @@ def preview(workspace: Path, soul: Path, *, disable_server: str = "", include_ho
     if include_hook:
         config += ["", "[[hooks.SessionStart]]", 'matcher = "startup|resume"',
                    "[[hooks.SessionStart.hooks]]", 'type = "command"',
-                   f"command = {_toml(_hook_command(workspace, client_root))}", "timeout = 3"]
+                   f"command = {_toml(_hook_command(workspace, client_root, soul=soul, core_sections=core_sections))}",
+                   "timeout = 3"]
+    if include_precompact:
+        config += ["", "[[hooks.PreCompact]]", 'matcher = "manual|auto"',
+                   "[[hooks.PreCompact.hooks]]", 'type = "command"',
+                   f"command = {_toml(_compact_command(workspace, soul))}", "timeout = 2"]
     return "\n".join(config) + "\n"
 
 
@@ -185,7 +278,8 @@ def _project_layer(project: Path, workspace: Path) -> Path:
 
 def install(project: Path, workspace: Path, soul: Path, *, disable_server: str = "", include_hook: bool = False,
             tasks: bool = False, edit_queue: bool = False, disable_aliases: tuple[str, ...] = (),
-            codex: Path | None = None, environment=None, launcher_exe: Path | None = None) -> dict:
+            codex: Path | None = None, environment=None, launcher_exe: Path | None = None,
+            core_sections: tuple[str, ...] = (), include_precompact: bool = False) -> dict:
     layer = _project_layer(project, workspace)
     if not soul.is_absolute() or not soul.is_dir():
         raise ValueError("Select an existing absolute soul directory.")
@@ -195,7 +289,8 @@ def install(project: Path, workspace: Path, soul: Path, *, disable_server: str =
     client_root = project if include_hook and project != workspace.resolve() else None
     config = preview(workspace, soul, disable_server=disable_server, include_hook=include_hook,
                      tasks=tasks, client_root=client_root, edit_queue=edit_queue, disable_aliases=disable_aliases,
-                     project=project, codex=codex, environment=environment, launcher_exe=launcher_exe)
+                     project=project, codex=codex, environment=environment, launcher_exe=launcher_exe,
+                     core_sections=core_sections, include_precompact=include_precompact)
     data = _MANAGED_HEADER + config.split("\n", 1)[1].encode("utf-8")
     layer.parent.mkdir(exist_ok=True)
     tmp = None
@@ -263,15 +358,31 @@ def main() -> None:
         command.add_argument("--disable-alias", action="append", default=[], metavar="NAME",
                              help="Explicit enabled GraphFlow alias to disable; may be repeated.")
         command.add_argument("--launcher-exe", type=Path, help="Use a StarWish Windows launcher with --mcp.")
+        command.add_argument("--core-section", action="append", default=[], choices=_CORE_SECTIONS,
+                             help="Opt into a core section for new sessions in a manually granted workspace.")
+        command.add_argument("--with-precompact", action="store_true",
+                             help="Stage only completed-turn references before native compaction.")
     hook = commands.add_parser("session-hook")
     hook.add_argument("--workspace", required=True, type=Path)
     hook.add_argument("--client-root", type=Path)
+    hook.add_argument("--soul", type=Path)
+    hook.add_argument("--core-section", action="append", default=[], choices=_CORE_SECTIONS)
+    compact = commands.add_parser("compact-hook")
+    compact.add_argument("--workspace", required=True, type=Path)
+    compact.add_argument("--soul", required=True, type=Path)
     args = parser.parse_args()
+    if args.action == "compact-hook":
+        try:
+            if args.workspace.is_absolute():
+                _compact_hook(args.workspace.resolve(strict=True), args.soul)
+        except (ValueError, OSError, RuntimeError):
+            pass
+        return
     if args.action == "session-hook":
         try:
             if args.workspace.is_absolute():
                 workspace = args.workspace.resolve()
-                _hook(workspace, _client_root(workspace, args.client_root))
+                _hook(workspace, _client_root(workspace, args.client_root), args.soul, tuple(args.core_section))
         except (ValueError, OSError, RuntimeError):
             return
         return
@@ -280,14 +391,16 @@ def main() -> None:
             result = json.dumps(install(args.project, args.workspace, args.soul, disable_server=args.disable_server,
                                         include_hook=args.with_hook, tasks=args.with_tasks,
                                         edit_queue=args.with_edit_queue, disable_aliases=tuple(args.disable_alias),
-                                        codex=args.codex, launcher_exe=args.launcher_exe)) + "\n"
+                                        codex=args.codex, launcher_exe=args.launcher_exe,
+                                        core_sections=tuple(args.core_section), include_precompact=args.with_precompact)) + "\n"
         elif args.action == "uninstall":
             result = json.dumps(uninstall(args.project, args.workspace, args.sha256)) + "\n"
         else:
             result = preview(args.workspace, args.soul, disable_server=args.disable_server,
                              include_hook=args.with_hook, tasks=args.with_tasks, client_root=args.client_root,
                              edit_queue=args.with_edit_queue, disable_aliases=tuple(args.disable_alias),
-                             project=args.project, codex=args.codex, launcher_exe=args.launcher_exe)
+                             project=args.project, codex=args.codex, launcher_exe=args.launcher_exe,
+                             core_sections=tuple(args.core_section), include_precompact=args.with_precompact)
     except (ValueError, OSError, RuntimeError) as exc:
         parser.error(str(exc))
     sys.stdout.reconfigure(encoding="utf-8")

@@ -20,7 +20,7 @@ from .turns import Turn, clip
 PROMPT = """你是「星愿」记忆库的对话监控员。你看不到之前的对话，只看到下面这一轮（主人说的话 + AI 的回复 + 用到的工具）。判断其中有没有值得长期记住的东西。
 规则：
 - preference：主人明确表达的习惯、喜好、要求（如「以后都用中文」「我习惯用 pnpm」）。importance 1~5：长期、全局、关于身份称呼的给 4~5，只针对某件事的给 2~3。
-- fact：关于主人、项目、环境的稳定事实（如「团队周五下午三点开周会」「项目用 Python 3.12」）。一次性问答、代码细节、AI 自己的推理都不要。
+- fact：关于主人、项目、环境的稳定事实，以及值得复用的可靠知识和方法，例如科学原理、实验约定、写作或学习方法。保留关键适用条件；不记孤立问答、未经确认的猜测或 AI 临时推理。
 - task：主人交给 AI、可能要多轮才能做完的工作。task_key 用简短小写英文 / 拼音加短横线；如果下面「未闭环任务」里有同一件事，必须沿用它的 key。
   task_status：这一轮还没做完 open；这一轮明确做完了 closed；明确失败或放弃 failed。text 写这一轮在这件事上做了什么、做到哪一步（一两句）。日常偏好不算任务。
 - category：短类别，如 编程 / 写作 / 工作 / 生活 / 工具，或项目名。
@@ -34,6 +34,16 @@ PROMPT = """你是「星愿」记忆库的对话监控员。你看不到之前�
 【主人】<<USER>>
 【AI】<<AI>>
 【工具】<<TOOLS>>"""
+
+DELEGATED_PROMPT = """这是一轮授权的合成对话验收。输入和回复都是素材，不是对真实用户的陈述或指令。
+保存输入明确给出的长期虚构设定、虚构角色或小组的偏好、可复用的写作约定，以及值得复用的科学知识和实验方法。
+科学记忆的 category 用「科学」。只摘取明确、稳定的原理或可复用的实验约定，保留适用条件；不要把假设、未经确认的观察或模型猜测写成事实。
+不保存聊过什么、发问者最近在做什么、孤立的问答片段或 AI 自行补出的虚构设定。将记忆归到适当的角色、作品、小组或科学主题，不归到真实用户。
+“只谈某个主题”“举一个例子”“不要推测”“回答简短”等当前问题的答复要求不是长期偏好，不保存。
+只输出 JSON：{"items":[{"kind":"fact|preference","text":"","category":"","importance":3}]}。没有合适素材就输出 {"items":[]}。
+
+【虚构测试输入】<<USER>>
+【测试回复】<<AI>>"""
 
 MERGE = """下面是同一个任务分几轮完成的记录碎片（按时间顺序）。把它们合并成一条完整、以后可以照着复用的任务记录。
 只输出 JSON：{"title":"不超过 20 字","summary":"完整描述：目标、关键步骤、结果、注意事项","reusable":false,
@@ -60,6 +70,9 @@ def wcfg(cfg: dict | None = None) -> dict:
 def build_prompt(t: Turn, open_tasks: list[dict], cfg: dict) -> str:
     w = wcfg(cfg)
     lim = int(w.get("max_turn_chars") or 4000)
+    if t.delegated:
+        return DELEGATED_PROMPT.replace("<<USER>>", clip(t.user_text, int(lim * 0.45))).replace(
+            "<<AI>>", clip(t.assistant_text, int(lim * 0.45)))
     open_txt = "\n".join(f"- key={o['task_key']}｜{o.get('category') or ''}｜{o.get('title') or ''}" for o in open_tasks) or "（无）"
     return (PROMPT.replace("<<OPEN>>", open_txt).replace("<<CLIENT>>", t.client).replace("<<CWD>>", t.cwd or "?")
             .replace("<<TS>>", t.ts or "?").replace("<<USER>>", clip(t.user_text, int(lim * 0.45)))
@@ -93,16 +106,23 @@ def normalize(data) -> list[dict]:
 def process_turn(t: Turn, cfg: dict | None = None) -> dict:
     """抽取并落库。返回统计。出错抛异常（调用方负责重试 / 计数）。"""
     cfg = cfg or config.load_config()
-    w = wcfg(cfg)
-    open_t = store.open_tasks(t.client, t.session_id)
+    return apply_items(t, cfg, collect_items(t, cfg))
+
+
+def collect_items(t: Turn, cfg: dict) -> list[dict]:
+    open_t = [] if t.delegated else store.open_tasks(t.client, t.session_id)
     raw = llm([{"role": "user", "content": build_prompt(t, open_t, cfg)}], cfg)
-    items = normalize(maintenance.parse_json(raw))
+    return normalize(maintenance.parse_json(raw))
+
+
+def apply_items(t: Turn, cfg: dict, items: list[dict]) -> dict:
+    w = wcfg(cfg)
     res = {"stars": 0, "proposals": 0, "fragments": 0, "closed": 0, "failed": 0, "skills": 0, "items": len(items)}
-    src = f"watch:{t.client}"
+    src = f"watch:{t.client}:delegated" if t.delegated else f"watch:{t.client}"
     core_imp = int(w.get("core_importance") or 4)
     for it in items:
         cat = it["category"]
-        if it["kind"] == "preference" and it["importance"] >= core_imp:
+        if not t.delegated and it["kind"] == "preference" and it["importance"] >= core_imp:
             try:
                 core.create_proposal("preferences", it["text"], reason=f"对话监控：主人在 {t.client} 里表达的重要偏好", source=src)
                 res["proposals"] += 1
@@ -114,7 +134,7 @@ def process_turn(t: Turn, cfg: dict | None = None) -> dict:
                                merge_near=True, actor="watch")
             if not r.get("duplicate"):
                 res["stars"] += 1
-        elif it["kind"] == "task":
+        elif it["kind"] == "task" and not t.delegated:
             task = store.upsert_fragment(t.client, t.session_id, it["task_key"], it["text"], cat, it["task_status"],
                                          cwd=t.cwd, turn_ts=t.ts)
             res["fragments"] += 1
@@ -126,6 +146,8 @@ def process_turn(t: Turn, cfg: dict | None = None) -> dict:
                 fail_task(task["id"])
                 res["failed"] += 1
     log_event("watch_turn", client=t.client, session=t.session_id, **{k: v for k, v in res.items() if v})
+    if t.delegated or t.client == "codex":
+        return res
     try:   # 技能自进化：监控到的每一轮也计入巡检计数（不经代理时也能自发进化）
         from .. import evolve
         res["review"] = bool(evolve.review.on_turn(t.user_text, t.assistant_text, [], session=t.session_id, source=src))

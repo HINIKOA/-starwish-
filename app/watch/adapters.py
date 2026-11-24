@@ -329,11 +329,73 @@ def parse_workbuddy(client: str, data: bytes, base: int, meta: dict, path: Path)
 _ROLL_ID = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-z-]{20,})\.jsonl$", re.I)
 
 
+_CODEX_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+_CODEX_ROLLOUT = re.compile(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl")
+_CODEX_DELEGATION = re.compile(
+    rf"<codex_delegation>\r?\n  <source_thread_id>({_CODEX_ID})</source_thread_id>\r?\n"
+    r"  <input>(.*?)</input>\r?\n</codex_delegation>", re.DOTALL
+)
+
+
+def codex_rollout_session(path: Path) -> str | None:
+    m = _CODEX_ROLLOUT.fullmatch(path.name)
+    return m[1] if m and re.fullmatch(_CODEX_ID, m[1]) else None
+
+
+def _codex_delegated_input(item: dict, source: str) -> str:
+    # Only this host-generated typed event is eligible, never generic tool output.
+    if (item.get("type"), item.get("namespace"), item.get("name")) != (
+        "FunctionCallOutput", "codex_app", "send_message_to_thread"
+    ):
+        return ""
+    output = item.get("output")
+    match = _CODEX_DELEGATION.fullmatch(output) if isinstance(output, str) else None
+    return match[2] if match and match[1] == source else ""
+
+
 def parse_codex(client: str, data: bytes, base: int, meta: dict, path: Path) -> tuple[list[Turn], int]:
     if "session_id" not in meta:
-        m = re.match(r"rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)\.jsonl$", path.name)
+        m = _CODEX_ROLLOUT.fullmatch(path.name)
         meta["session_id"] = m.group(1) if m else path.stem
     b = Builder(client, meta)
+    relay_source = os.environ.get("STARWISH_CODEX_DELEGATION_SOURCE", "")
+    relay_target = os.environ.get("STARWISH_CODEX_DELEGATION_TARGET", "")
+    relay_enabled = bool(re.fullmatch(_CODEX_ID, relay_source) and re.fullmatch(_CODEX_ID, relay_target)
+                         and relay_source != relay_target)
+    task_id, task_start = "", None
+    task_cwd = ""
+    user_id = ""
+    inputs: set[str] = set()
+    replies: set[str] = set()
+
+    def add_user(text, ts, start, end, turn_id="", delegated=False):
+        text = text.strip() if isinstance(text, str) else ""
+        if not text:
+            return
+        nonlocal user_id
+        if b.cur and turn_id and turn_id == user_id:
+            if text not in inputs and not delegated:
+                b.cur.user_text += "\n" + text
+                inputs.add(text)
+            b.touch(end)
+            return
+        b.user(text, ts, task_start if task_start is not None and task_id == turn_id else start, end)
+        user_id = turn_id
+        inputs.clear()
+        inputs.add(text)
+        replies.clear()
+        b.cur.delegated = delegated
+        if isinstance(task_id, str) and task_id == turn_id and re.fullmatch(_CODEX_ID, task_id):
+            b.cur.native_phase = "started"
+
+    def add_reply(text, end):
+        text = text.strip() if isinstance(text, str) else ""
+        if text and text not in replies and b.cur:
+            b.assistant(text, end)
+            replies.add(text)
+        else:
+            b.touch(end)
+
     for s, e, o in iter_lines(data, base):
         if not isinstance(o, dict):
             b.touch(e)
@@ -347,21 +409,62 @@ def parse_codex(client: str, data: bytes, base: int, meta: dict, path: Path) -> 
         elif t == "turn_context":
             if p.get("cwd"):
                 meta["cwd"] = p["cwd"]
+                if p.get("turn_id") == task_id and task_id:
+                    task_cwd = p["cwd"]
+                    if b.cur and user_id == task_id:
+                        b.cur.cwd = task_cwd
             b.touch(e)
         elif t == "event_msg":
             pt = p.get("type")
-            if pt == "user_message":
-                b.user(p.get("message", ""), o.get("timestamp"), s, e)
-                if b.cur:
-                    b.cur.cwd = meta.get("cwd", "")
+            turn_id = p.get("turn_id") or task_id
+            if pt == "task_started":
+                if b.cur and task_id and turn_id != task_id:
+                    if b.cur.delegated:
+                        b.cur = None
+                    else:
+                        b.finish_turn(s)
+                task_id, task_start = p.get("turn_id") or "", s
+                task_cwd = ""
+            elif task_id and turn_id != task_id:
+                continue
+            elif pt == "user_message":
+                add_user(p.get("message"), o.get("timestamp"), s, e, turn_id)
             elif pt == "agent_message":
-                b.assistant(p.get("message", ""), e)
+                add_reply(p.get("message"), e)
+            elif pt == "item_completed" and isinstance(p.get("item"), dict):
+                item = p["item"]
+                sid = meta["session_id"]
+                if p.get("thread_id") not in (None, sid):
+                    continue
+                if item.get("type") == "UserMessage":
+                    add_user(text_of(item.get("content")), o.get("timestamp"), s, e, turn_id)
+                elif item.get("type") == "AgentMessage" and item.get("phase") == "final_answer":
+                    add_reply(text_of(item.get("content")), e)
+                elif (relay_enabled and not b.cur and task_id and p.get("turn_id") == task_id
+                      and p.get("thread_id") == sid == relay_target and task_start is not None):
+                    text = _codex_delegated_input(item, relay_source)
+                    add_user(text, o.get("timestamp"), task_start, e, task_id, delegated=True)
+                else:
+                    b.touch(e)
             elif pt in ("task_complete", "turn_complete"):
                 if b.cur and not b.cur.assistant_text and p.get("last_agent_message"):
                     b.assistant(p["last_agent_message"], e)
+                if (b.cur and user_id == task_id and p.get("turn_id") == task_id
+                        and isinstance(task_id, str) and re.fullmatch(_CODEX_ID, task_id)):
+                    b.cur.native_phase = "completed"
+                    if task_cwd and codex_rollout_session(path) == b.cur.session_id:
+                        b.cur.native_turn_id = task_id
+                        b.cur.cwd = task_cwd
                 b.finish_turn(e)
+                task_id, task_start = "", None
             elif pt == "turn_aborted":
-                b.finish_turn(e)
+                if b.cur and b.cur.delegated:
+                    b.cur = None
+                else:
+                    if b.cur and b.cur.native_phase == "started":
+                        b.cur.native_phase = "aborted"
+                    b.finish_turn(e)
+                task_id, task_start = "", None
             else:
                 b.touch(e)
         elif t == "response_item":
@@ -372,7 +475,11 @@ def parse_codex(client: str, data: bytes, base: int, meta: dict, path: Path) -> 
                 b.touch(e)
         else:
             b.touch(e)
-    return b.result(complete_end(data, base))
+    turns, safe = b.result(complete_end(data, base))
+    # Polls may split the task start from the delegation frame; replay the unclosed task.
+    if relay_enabled and meta["session_id"] == relay_target and task_id and task_start is not None:
+        safe = min(safe, task_start)
+    return turns, safe
 
 
 # ---------------- DeepSeek Harness（实验性） ----------------

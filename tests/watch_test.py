@@ -605,9 +605,9 @@ def main():
     config.update_state(evolve_iters=0)
     extract.llm = fake_llm
     for i in range(2):
-        extract.process_turn(Turn(client="codex", session_id="ev", user_text=f"聊点别的 {i}", assistant_text="好", turn_complete=True))
+        extract.process_turn(Turn(client="qoder", session_id="ev", user_text=f"聊点别的 {i}", assistant_text="好", turn_complete=True))
     buf = evolve.review._load_buf()
-    check("监控到的轮次进入巡检缓冲（来源 watch:客户端）", any(b.get("source") == "watch:codex" for b in buf))
+    check("旧客户端轮次进入通用巡检缓冲（来源 watch:客户端）", any(b.get("source") == "watch:qoder" for b in buf))
     check("累计到阈值自动发起技能巡检（不经代理也自发进化）", len(spawned) == 1 and "2 轮" in spawned[0])
     evolve.review.spawn_review = orig_spawn
 

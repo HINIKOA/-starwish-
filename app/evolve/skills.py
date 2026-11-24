@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from .. import config
@@ -296,30 +297,104 @@ def list_pending() -> list[dict]:
     return _read_json(_pending_path(), [])
 
 
+@contextmanager
+def _pending_lock():
+    # HTTP and MCP can stage changes from separate processes in the same soul.
+    with LOCK, _pending_path().with_suffix(".lock").open("a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield
+    # Closing the handle releases the lock on both platforms.
+
+
+def _write_pending(items: list[dict]) -> None:
+    atomic_write(_pending_path(), json.dumps(items, ensure_ascii=False, indent=1))
+
+
 def _stage(op: dict, reason: str, scan: dict | None, source: str) -> dict:
-    with LOCK:
+    with _pending_lock():
         items = list_pending()
         rec = {"id": uuid.uuid4().hex[:8], "op": op, "reason": reason, "scan": scan, "source": source, "created_at": time.time()}
         items.append(rec)
-        atomic_write(_pending_path(), json.dumps(items, ensure_ascii=False, indent=1))
+        _write_pending(items)
     log_event("skill_staged", id=rec["id"], action=op.get("action"), name=op.get("name"), reason=reason, source=source)
     return rec
 
 
+def stage_codex_review(operations: list[dict], *, workspace: str, session_id: str, batch: str, authorize) -> int:
+    """Publish the scoped batch atomically, regardless of the generic auto-approval setting."""
+    if not operations:
+        return 0
+    with _pending_lock():
+        if not authorize():
+            return 0
+        items = list_pending()
+        if any(rec.get("review_batch") == batch for rec in items):
+            return 0
+        operations = [op for op in operations if not any(
+            rec.get("source") == "review:codex" and rec.get("workspace") == workspace and rec.get("op") == op
+            for rec in items)]
+        now = time.time()
+        new = [{"id": uuid.uuid4().hex[:8], "op": op, "reason": "Codex 工作区巡检，需主人批准",
+                "scan": None, "source": "review:codex", "created_at": now, "review_batch": batch,
+                "workspace": workspace, "session_id": session_id} for op in operations]
+        if new:
+            _write_pending(items + new)
+    for rec in new:
+        log_event("skill_staged", id=rec["id"], action=rec["op"]["action"], name=rec["op"]["name"],
+                  source="review:codex", review_batch=batch)
+    return len(new)
+
+
 def decide_pending(pid: str, approve: bool) -> dict:
-    with LOCK:
+    with _pending_lock():
         items = list_pending()
         rec = next((x for x in items if x["id"] == pid), None)
-        if not rec:
+        if rec is None:
             raise KeyError("待审项不存在")
-        items = [x for x in items if x["id"] != pid]
-        atomic_write(_pending_path(), json.dumps(items, ensure_ascii=False, indent=1))
-    log_event("skill_pending_" + ("approve" if approve else "reject"), id=pid, name=rec["op"].get("name"))
-    if not approve:
-        return {"success": True, "rejected": True}
-    op = dict(rec["op"])
-    return manage(**op, source="approve", trust="owner", note=f"批准待审 {pid}（来自 {rec['source']}）",
-                  _bypass_gate=True)
+        rest = [x for x in items if x is not rec]
+        name = rec["op"].get("name")
+        if not approve:
+            _write_pending(rest)
+            log_event("skill_pending_reject", id=pid, name=name)
+            return {"success": True, "rejected": True}
+        if rec.get("status") == "applying":
+            return {"success": False, "message": "上次批准结果未确认，请先检查技能历史，避免重复应用"}
+
+        # A crash after the skill write must not replay the same operation.
+        rec["status"] = "applying"
+        rec.pop("last_error", None)
+        _write_pending(items)
+        try:
+            can_apply = True
+            if rec.get("source") == "review:codex":
+                from .codex_review import approval_allowed
+
+                can_apply = approval_allowed(rec)
+            if can_apply:
+                result = manage(**rec["op"], source="approve", trust="owner",
+                                note=f"批准待审 {pid}（来自 {rec['source']}）", _bypass_gate=True)
+            else:
+                result = {"success": False, "message": "该巡检的工作区授权或技能归属已变更"}
+        except Exception as ex:
+            log_event("skill_pending_uncertain", id=pid, name=name, error_type=type(ex).__name__)
+            return {"success": False, "message": "批准过程被中断，请检查技能历史。待审项已保留，不能直接重试"}
+        if not result.get("success"):
+            rec["status"] = "failed"
+            rec["last_error"] = result.get("message") or "技能未能应用"
+            _write_pending(items)
+            log_event("skill_pending_failed", id=pid, name=name)
+            return {"success": False, "message": rec["last_error"]}
+        _write_pending(rest)
+        log_event("skill_pending_approve", id=pid, name=name)
+        return result
 
 
 # ---------------- 写 ----------------

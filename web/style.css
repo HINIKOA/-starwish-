@@ -18,6 +18,11 @@ input,textarea,select{background:rgba(0,0,0,.35);color:var(--text);border:1px so
 textarea{resize:vertical;min-height:80px;line-height:1.55}
 input[type=checkbox],input[type=range]{width:auto}
 label{display:block;color:var(--muted);font-size:12px;margin:10px 0 4px}
+.owner-settings-dialog{width:min(420px,calc(100% - 32px));border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);padding:22px}
+.owner-settings-dialog::backdrop{background:rgba(0,0,0,.55)}
+.owner-settings-dialog h2{font-size:16px;margin:0}
+.owner-settings-dialog p{color:var(--muted);line-height:1.55}
+.owner-settings-dialog .row{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
 .hidden{display:none!important}
 
 #mapChrome{position:fixed;inset:8px 10px auto;z-index:14;border:1px solid rgba(var(--brand-rgb),.26);

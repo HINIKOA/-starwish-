@@ -10,7 +10,8 @@ mcp>=1.2
 pyyaml>=6
 # 语义检索（向量模型常驻默认：bge-small-zh int8 ONNX；Windows 上三者合计约 31MB）
 numpy>=1.24
-onnxruntime>=1.17
+onnxruntime>=1.17,<1.24; python_version < "3.11"
+onnxruntime>=1.17; python_version >= "3.11"
 tokenizers>=0.15
 # 可选：宇宙之声（面板里一键安装，也可手动装）
 # sherpa-onnx>=1.12

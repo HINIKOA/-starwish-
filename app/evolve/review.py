@@ -3,7 +3,7 @@
 引擎一 · 前台自觉：会用工具的客户端（Claude / Cursor / Hermes 等 MCP 客户端）从 MCP 指令里拿到 SKILLS_GUIDANCE，
         复杂任务做完、踩坑修好、发现非显而易见的流程时自己调用 skill_manage 保存；发现技能过时立即 patch。
         调用 skill_manage 会把计数器归零。
-引擎二 · 后台巡检：代理每转发一轮对话计数器 +1（跨会话、跨任务累积，不重置）；达到阈值（默认 10）且没有前台保存时，
+引擎二 · 后台巡检：代理每转发一轮对话计数器 +1（跨会话、跨任务累积，不重置）；普通 Codex 的工作区和会话巡检由 codex_review 独立处理。达到阈值（默认 10）且没有前台保存时，
         在后台线程里让维护模型回看最近的对话，按「试错、绕路、主人纠正」三条线索决定新建 / 修补技能；
         同时（联合巡检）顺手提取值得记住的星星、提出核心记忆提案（只提案，永远不直接改核心）。
 自修复：本轮注入过的技能、被差评的技能会连同全文一起交给巡检，优先 patch 修好。
@@ -65,6 +65,7 @@ MEMORY_FIELDS = ('"stars":[{"content":"","summary":"","tags":[""],"importance":3
 
 _lock = threading.Lock()
 _buf_lock = threading.Lock()
+_spawn_lock = threading.Lock()
 _running = threading.Event()
 
 
@@ -87,17 +88,21 @@ def _save_buf(b: list[dict]) -> None:
 # ---------------- 计数器 ----------------
 
 def status() -> dict:
+    from . import codex_review
+
     st = config.load_state()
     c = _cfg()
     return {"enabled": bool(c.get("enabled", True)), "iters_since_skill": int(st.get("evolve_iters", 0)),
             "nudge_interval": int(c.get("nudge_interval", 10)), "running": _running.is_set(),
             "buffer_turns": len(_load_buf()), "needs_fix": st.get("evolve_needs_fix", {}),
-            "last_review": st.get("evolve_last_review"), "approval": c.get("approval", "auto"), **skills.stats()}
+            "last_review": st.get("evolve_last_review"), "approval": c.get("approval", "auto"),
+            "codex_review": codex_review.status(), **skills.stats()}
 
 
 def note_skill_manage() -> None:
     """前台调用了 skill_manage（AI 自觉保存/修补）→ 计数器归零（对应 Hermes 的 _iters_since_skill = 0）。"""
-    config.update_state(evolve_iters=0)
+    with _buf_lock:
+        config.update_state(evolve_iters=0)
 
 
 def mark_needs_fix(name: str, comment: str = "") -> None:
@@ -118,23 +123,23 @@ def on_turn(user: str, reply: str, used_skills: list[str] | None = None, session
                   "skills": used_skills or [], "source": source})
         b = b[-int(c.get("buffer_turns", 40)):]
         _save_buf(b)
-    n = int(config.load_state().get("evolve_iters", 0)) + 1
-    interval = int(c.get("nudge_interval", 10))
-    if interval > 0 and n >= interval:
-        from ..maintenance import llm_ready
-        if llm_ready() and not _running.is_set():
-            config.update_state(evolve_iters=0)
-            spawn_review(reason=f"后台巡检：距上次保存技能已 {n} 轮")
-            return True
-    config.update_state(evolve_iters=n)
-    return False
+        n = int(config.load_state().get("evolve_iters", 0)) + 1
+        interval = int(c.get("nudge_interval", 10))
+        if interval > 0 and n >= interval:
+            from ..maintenance import llm_ready
+            if llm_ready() and spawn_review(reason=f"后台巡检：距上次保存技能已 {n} 轮"):
+                config.update_state(evolve_iters=0)
+                return True
+        config.update_state(evolve_iters=n)
+        return False
 
 
 def spawn_review(reason: str = "", focus: str = "") -> bool:
     """在守护线程里跑一次巡检（对应 Hermes 的 _spawn_background_review）。"""
-    if _running.is_set():
-        return False
-    _running.set()
+    with _spawn_lock:
+        if _running.is_set():
+            return False
+        _running.set()
 
     def run():
         try:
@@ -144,7 +149,11 @@ def spawn_review(reason: str = "", focus: str = "") -> bool:
         finally:
             _running.clear()
 
-    threading.Thread(target=run, daemon=True, name="starwish-review").start()
+    try:
+        threading.Thread(target=run, daemon=True, name="starwish-review").start()
+    except RuntimeError:
+        _running.clear()
+        raise
     return True
 
 
@@ -177,7 +186,7 @@ def review(reason: str = "", focus: str = "", buffer: list[dict] | None = None, 
         return {"ok": False, "skipped": True, "reason": "已有巡检在运行"}
     try:
         with _buf_lock:
-            b = list(buffer if buffer is not None else _load_buf())
+            b = list(buffer) if buffer is not None else [x for x in _load_buf() if x.get("source") != "watch:codex"]
         st = config.load_state()
         needs_fix = dict(st.get("evolve_needs_fix") or {})
         if not b and not needs_fix:

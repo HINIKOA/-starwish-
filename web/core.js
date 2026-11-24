@@ -1,4 +1,6 @@
 // 星愿 StarWish —— 核心记忆模块页面（查看 / 编辑三段 / 锁定 / 提案 / 版本历史与回滚 / 主人指令）
+import { saveProtectedSettings } from "./owner-settings.js";
+
 // 事件时间：优先用 Unix 时间戳按本机时区显示，避免显示成 UTC
 const evTime = (x) => (x && x.t ? new Date(x.t * 1000).toLocaleString("zh-CN", { hour12: false }) : String((x && x.ts) || "").replace("T", " ").slice(0, 19));
 const $ = (s) => document.querySelector(s);
@@ -12,7 +14,11 @@ async function api(path, opts = {}) {
   const r = await fetch(path, o);
   let data = null;
   try { data = await r.json(); } catch { data = null; }
-  if (!r.ok) throw new Error((data && data.detail) || `HTTP ${r.status}`);
+  if (!r.ok) {
+    const error = new Error((data && data.detail) || `HTTP ${r.status}`);
+    error.status = r.status;
+    throw error;
+  }
   return data;
 }
 let tt;
@@ -166,7 +172,7 @@ function renderCommand() {
       <div></div>
     </div>
     <label>主人令牌（远程 API 用 <code>Authorization: Bearer 令牌</code> 调 /api/core/update；留空 = 只信任本机）</label>
-    <div class="cmdbox"><input id="o_tok" placeholder="${s.owner_token_set ? "已设置（" + esc(s.owner_token) + "），留空保持不变" : "未设置"}"><button id="o_save">保存设置</button></div>`;
+    <div class="cmdbox"><input id="o_tok" type="password" autocomplete="new-password" placeholder="${s.owner_token_set ? "已设置（" + esc(s.owner_token) + "），留空保持不变" : "未设置"}"><button id="o_save">保存设置</button></div>`;
   $("#cmdGo").onclick = () => safe(async () => {
     const r = await api("/api/core/command", { method: "POST", body: { text: $("#cmdIn").value } });
     const o = $("#cmdOut"); o.textContent = r.reply; o.classList.remove("hidden"); await load();
@@ -175,7 +181,9 @@ function renderCommand() {
   $("#o_save").onclick = () => safe(async () => {
     const core = { chat_commands: $("#o_chat").checked, natural_commands: $("#o_nat").checked, mcp_owner_edit: $("#o_mcp").checked };
     if ($("#o_tok").value.trim()) core.owner_token = $("#o_tok").value.trim();
-    await api("/api/settings", { method: "PUT", body: { core } }); toast("已保存"); await load(); renderCommand();
+    if (core.owner_token) await saveProtectedSettings(api, { core });
+    else await api("/api/settings", { method: "PUT", body: { core } });
+    toast("已保存"); await load(); renderCommand();
   });
 }
 

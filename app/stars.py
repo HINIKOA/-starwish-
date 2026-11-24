@@ -4,12 +4,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import time
 from contextlib import nullcontext
 from datetime import datetime
 
-from . import archive, config, semantic
+from . import archive, config, semantic, stars_retrieval
 from .db import (estimate_tokens, fts_query, get_conn, jaccard, log_event,
                  query_terms, tok_string)
 from . import db as _db
@@ -24,7 +25,8 @@ def _hash(content: str) -> str:
 
 
 def auto_summary(content: str, limit: int = 60) -> str:
-    t = re.sub(r"[#>*`\-]+\s*", "", content or "")
+    # Strip line prefixes, not punctuation inside identifiers or values.
+    t = re.sub(r"(?m)^[ \t]*(?:#{1,6}[ \t]+|>[ \t]*|[-*+][ \t]+)", "", content or "")
     t = re.sub(r"\s+", " ", t).strip()
     m = re.search(r"^(.{8,}?[。！？!?；;])", t)
     s = m.group(1) if m and len(m.group(1)) <= limit else t[:limit]
@@ -291,8 +293,10 @@ def star_map() -> dict:
 
 # ---------------- 检索与召回 ----------------
 
-def _candidates(conn, query: str, cfg: dict, limit: int = 200) -> dict[int, float]:
+def _candidates(conn, query: str, cfg: dict, limit: int = 200, *, for_recall: bool = False) -> dict[int, float]:
     """返回 {id: 相关度(0~1]}。FTS5(bm25) 为主；可选语义检索并入；都没有则 LIKE 兜底。"""
+    if for_recall:
+        return stars_retrieval.candidates(conn, query, cfg, limit)
     rel: dict[int, float] = {}
     q = fts_query(query)
     if q and _db.FTS_OK:
@@ -367,19 +371,282 @@ def recall_index() -> dict:
             "text": text, "tokens": estimate_tokens(text)}
 
 
+def watch_origin(c, row, memo: dict[int, str | None]) -> str | None:
+    """A fused star belongs to the watch session only if every ancestor agrees."""
+    sid = row["id"]
+    if sid in memo:
+        return memo[sid]
+    memo[sid] = None
+    try:
+        parents = json.loads(row["fused_from"] or "[]")
+        if not isinstance(parents, list) or any(type(i) is not int for i in parents):
+            return None
+        if parents:
+            origins = set()
+            for pid in parents:
+                if pid not in memo:
+                    parent = c.execute("SELECT id, source, session, fused_from FROM stars WHERE id=?", (pid,)).fetchone()
+                    if parent is None:
+                        return None
+                    watch_origin(c, parent, memo)
+                origins.add(memo[pid])
+            if len(origins) == 1:
+                memo[sid] = origins.pop()
+        elif row["source"] in ("watch:codex", "watch:codex:delegated", "watch:codex:precompact"):
+            memo[sid] = row["session"] or None
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return memo[sid]
+
+
+_CURRENT_VERSION = re.compile(r"现在|现行|当前|最新|新版|改(?:版|规则)后|更新后|调整后")
+_PAST_VERSION = re.compile(r"旧版|原先|原来|之前|以前|改(?:版|规则)前|最初|最早|过去|作废")
+_REVISION_CUE = re.compile(r"改为|改成|更改|调整为|更新为|从.{1,16}起|新规|不再|不必等|不用等|仍.{0,64}(?:但|而)")
+_RETIRED_CLAUSE = re.compile(r"^\s*(?:原先|原来|旧版|过去|最初|最早|以前)[^。！？；;\n]{2,100}(?:作废|已取消|已废止)[^。！？；;\n]*")
+_REAL_PROFILE_QUERY = re.compile(r"(?:真实|实际)用户|真人本人|用户本人|主人本人|我本人")
+_WORK_COMPARISON = re.compile(r"比较|对比|分别|异同|各自|各有|这两|这几|两部|两本|不同作品")
+
+
+def _work_titles(text: str) -> set[str]:
+    return stars_retrieval.work_titles(text)
+
+
+def _matches_work_titles(asked: set[str], row) -> bool:
+    if not asked:
+        return True
+    seen = _work_titles(row["summary"]) | _work_titles(row["content"])
+    return not seen or bool(asked & seen)
+
+
+def _competing_work_titles(query: str, scored: list) -> list[str]:
+    if not query or len(scored) < 2 or _work_titles(query) or _WORK_COMPARISON.search(query):
+        return []
+    top_score, _, first = scored[0]
+    lead_titles = _work_titles(first["summary"] + " " + first["content"])
+    if top_score <= 0 or len(lead_titles) != 1:
+        return []
+    lead = next(iter(lead_titles))
+    terms = query_terms(query)
+    lowered = query.casefold()
+    if not terms or lead in lowered:
+        return []
+    if not any(t in (first["summary"] + " " + first["content"]).casefold() for t in terms):
+        return []
+    for score, _, row in scored[1:]:
+        if score < top_score * 0.96:
+            break
+        content = (row["summary"] + " " + row["content"]).casefold()
+        names = _work_titles(content)
+        if len(names) == 1 and names != lead_titles and any(t in content for t in terms):
+            other = next(iter(names))
+            return [] if other in lowered else sorted((lead, other))
+    return []
+
+
+def _clarification_for_works(titles: list[str], budget: int) -> str:
+    options = "或".join(f"《{name}》" for name in titles)
+    for prompt in (f"可能指{options}。请先确认作品，不要合并设定。", "请先确认是哪部作品。"):
+        if estimate_tokens(prompt) <= budget:
+            return prompt
+    return ""
+
+
+def _shared_topic_anchors(query: str, reference: str) -> set[str]:
+    reference = reference.casefold()
+    anchors = set()
+    for word in re.findall(r"[a-z0-9]{5,}|[\u3400-\u9fff]{4,}", query[:240].casefold()):
+        if word.isascii():
+            anchors.add(word)
+        else:
+            anchors.update(word[i:i + 4] for i in range(len(word) - 3))
+    return {a for a in anchors if a in reference and not (_CURRENT_VERSION.search(a) or _PAST_VERSION.search(a))}
+
+
+def _prefer_current_revision(query: str, scored: list) -> None:
+    """Break a close tie only for an explicit current-version query on the same subject."""
+    if len(scored) < 2 or not _CURRENT_VERSION.search(query) or _PAST_VERSION.search(query):
+        return
+    lead_score, _, lead = scored[0]
+    anchors = _shared_topic_anchors(query, lead["summary"] + " " + lead["content"])
+    if not anchors or lead_score <= 0:
+        return
+    match = None
+    for i, (score, _, row) in enumerate(scored[1:], 1):
+        if score < lead_score * 0.92:
+            break
+        if row["created_at"] <= lead["created_at"] or row["cat_major"] != lead["cat_major"]:
+            continue
+        candidate = row["summary"] + " " + row["content"]
+        if (any(a in candidate.casefold() for a in anchors) and _REVISION_CUE.search(candidate)
+                and (match is None or row["created_at"] > scored[match][2]["created_at"])):
+            match = i
+    if match is not None:
+        _, brightness_value, row = scored.pop(match)
+        scored.insert(0, (lead_score + 0.0001, brightness_value, row))
+
+
+def _historical_parent(c, query: str, row):
+    """A past-version query can cite the prior member of a revision fusion."""
+    if not _PAST_VERSION.search(query) or _CURRENT_VERSION.search(query):
+        return None
+    try:
+        ids = json.loads(row["fused_from"] or "[]")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(ids, list) or len(ids) < 2 or any(type(i) is not int for i in ids):
+        return None
+    parents = c.execute(
+        f"SELECT id, summary, content FROM stars WHERE deleted_at IS NULL AND id IN ({','.join('?' * len(ids))}) "
+        "ORDER BY created_at, id", ids
+    ).fetchall()
+    if len(parents) != len(ids):
+        return None
+    # A later parent can add an exception without repeating the retired rule.
+    terms = query_terms(query)
+    best = None
+    best_score = -1
+    for parent in parents:
+        content = parent["content"]
+        if not _shared_topic_anchors(query, content):
+            continue
+        for clause in re.split(r"[。！？；;\n]", content):
+            match = _RETIRED_CLAUSE.match(clause)
+            if match:
+                summary = match.group().strip()
+                relevance = sum(len(t) for t in terms if t in summary.casefold())
+                if relevance > best_score:
+                    best = {"id": parent["id"], "summary": summary}
+                    best_score = relevance
+    if best is not None:
+        return best
+    if not _REVISION_CUE.search(parents[-1]["content"]):
+        return None
+    older = parents[0 if ("最初" in query or "最早" in query) else -2]
+    anchors = _shared_topic_anchors(query, parents[-1]["content"])
+    return older if any(a in older["content"].casefold() for a in anchors) else None
+
+
+_FALLBACK_FUSION = re.compile(r"^（由 \d+ 颗相似的记忆融合）")
+
+
+def _excerpt_for_recall(query: str, summary: str, content: str, terms: list[str] | None = None) -> str:
+    if not summary.endswith("…") or not query or _PAST_VERSION.search(query):
+        return summary
+    terms = query_terms(query) if terms is None else terms
+
+    def score(text: str) -> int:
+        lowered = text.casefold()
+        return sum(len(t) for t in terms if t in lowered)
+
+    chunks = re.findall(r"[^。；！？;]+[。；！？;]*", re.sub(r"\s+", " ", content).strip()[:600])[:12]
+    best, amount = summary, score(summary)
+    for i in range(len(chunks)):
+        for end in range(i + 1, min(len(chunks), i + 3) + 1):
+            if _CURRENT_VERSION.search(query) and any(_RETIRED_CLAUSE.match(chunk) for chunk in chunks[i:end]):
+                break
+            snippet = ("…" if i else "") + "".join(chunks[i:end]).strip() + ("…" if end < len(chunks) else "")
+            if len(snippet) > 96:
+                break
+            priority = score(snippet)
+            if priority > amount:
+                best, amount = snippet, priority
+    return best
+
+
+def _fallback_fusion_evidence(c, query: str, row) -> tuple[str, int | None]:
+    summary = row["summary"]
+    if not query or _PAST_VERSION.search(query):
+        return summary, None
+    if not _FALLBACK_FUSION.match(row["content"]):
+        return summary, None
+    terms = query_terms(query)
+
+    def relevance(text: str) -> int:
+        lowered = text.casefold()
+        return sum(len(t) for t in terms if t in lowered)
+
+    best = relevance(summary)
+    evidence_id = None
+    if _CURRENT_VERSION.search(query):
+        try:
+            ids = json.loads(row["fused_from"] or "[]")
+        except (TypeError, ValueError):
+            return summary, None
+        if not isinstance(ids, list) or not 2 <= len(ids) <= 32 or any(type(i) is not int for i in ids):
+            return summary, None
+        newest = c.execute(
+            f"SELECT id, summary, content FROM stars WHERE deleted_at IS NULL AND id IN ({','.join('?' * len(ids))}) "
+            "ORDER BY created_at DESC, id DESC LIMIT 1", ids
+        ).fetchone()
+        if newest is not None and _shared_topic_anchors(query, newest["content"]):
+            option = _excerpt_for_recall(query, newest["summary"] or auto_summary(newest["content"]), newest["content"], terms)
+            if relevance(option) > best and not any(_RETIRED_CLAUSE.match(s) for s in re.split(r"[。！？；;\n]", option)):
+                return option, newest["id"]
+        return summary, None
+    pending = [row]
+    visited = {row["id"]}
+    while pending and len(visited) < 32:
+        parent = pending.pop()
+        try:
+            ids = json.loads(parent["fused_from"] or "[]")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(ids, list):
+            continue
+        for sid in ids[:32]:
+            if type(sid) is not int or sid in visited or len(visited) >= 32:
+                continue
+            visited.add(sid)
+            leaf = c.execute("SELECT id, summary, content, fused_from FROM stars WHERE id=? AND deleted_at IS NULL",
+                             (sid,)).fetchone()
+            if leaf is None:
+                continue
+            if _FALLBACK_FUSION.match(leaf["content"]):
+                pending.append(leaf)
+            option = _excerpt_for_recall(query, leaf["summary"] or auto_summary(leaf["content"]), leaf["content"], terms)
+            improved = relevance(option)
+            if improved > best:
+                summary, best, evidence_id = option, improved, sid
+    return summary, evidence_id
+
+
+def _clip_recall_summary(prefix: str, summary: str, remaining: int, query: str) -> str:
+    terms = query_terms(query)
+    clauses = ["…" + part + "…" for part in re.split(r"[，。；！？;]", summary)
+               if len(part) >= 8 and estimate_tokens(prefix + "…" + part + "…") + 1 <= remaining]
+    if clauses and terms:
+        best = max(clauses, key=lambda line: sum(len(t) for t in terms if t in line.casefold()))
+        if any(t in best.casefold() for t in terms):
+            return best
+    lo, hi = 0, len(summary)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if estimate_tokens(prefix + summary[:mid] + "…") + 1 <= remaining:
+            lo = mid
+        else:
+            hi = mid - 1
+    return summary[:lo].rstrip() + "…" if lo >= 8 else ""
+
+
 def recall(query: str, budget_tokens: int | None = None, bump: bool = True, limit_candidates: int = 200) -> dict:
     """第二层：在 token 预算内返回排好序的星星摘要。排序 = 相关度 × (1 + w × 亮度归一)。"""
     cfg = config.load_config()
-    budget = int(budget_tokens or cfg["memory"].get("recall_budget_default", 600))
+    budget = max(0, int(cfg["memory"].get("recall_budget_default", 600) if budget_tokens is None else budget_tokens))
     w = float(cfg["memory"].get("brightness_weight", 0.5))
     now = time.time()
     query = (query or "").strip()
     header = "【星愿·相关记忆】(#编号 日期 摘要；需要全文可调用 recall_detail)"
-    used = estimate_tokens(header)
     items = []
+    if not budget:
+        return {"query": query, "budget_tokens": budget, "used_tokens": 0, "items": [], "text": ""}
+    scope = os.environ.get("STARWISH_WATCH_CODEX_ONLY_SESSION")
+    if scope is not None and _REAL_PROFILE_QUERY.search(query):
+        return {"query": query, "budget_tokens": budget, "used_tokens": 0, "items": [], "text": "",
+                "reason": "synthetic_session_scope"}
+    requested_works = _work_titles(query)
     with get_conn() as c:
         if query:
-            rel = _candidates(c, query, cfg, limit_candidates)
+            rel = _candidates(c, query, cfg, limit_candidates, for_recall=True)
         else:
             rel = {}
         if rel:
@@ -389,29 +656,53 @@ def recall(query: str, budget_tokens: int | None = None, bump: bool = True, limi
         else:
             rows = []
         scored = []
+        origins: dict[int, str | None] = {}
         for r in rows:
+            if scope is not None and watch_origin(c, r, origins) != scope:
+                continue
+            if not _matches_work_titles(requested_works, r):
+                continue
             b = brightness(r, now, cfg)
             relv = rel.get(r["id"], 1.0)
             scored.append((relv * (1 + w * min(1.0, b / 1.5)), b, r))
         scored.sort(key=lambda x: -x[0])
-        lines = []
+        _prefer_current_revision(query, scored)
+        ambiguity = _competing_work_titles(query, scored)
+        if ambiguity:
+            clarification = _clarification_for_works(ambiguity, budget)
+            return {"query": query, "budget_tokens": budget, "used_tokens": estimate_tokens(clarification),
+                    "items": [], "text": clarification, "reason": "competing_work_titles", "works": ambiguity}
+        text = header
         for score, b, r in scored:
             day = datetime.fromtimestamp(r["created_at"]).strftime("%Y-%m-%d")
-            line = f"#{r['id']} {day} {r['summary']}"
-            t = estimate_tokens(line) + 1
-            if used + t > budget:
-                continue
-            used += t
-            lines.append(line)
-            items.append({"id": r["id"], "date": day, "summary": r["summary"], "score": round(score, 4),
+            older = _historical_parent(c, query, r)
+            if older:
+                summary, evidence_id = f"历史版本（父星 #{older['id']}）：{older['summary']}", older["id"]
+            else:
+                summary, evidence_id = _fallback_fusion_evidence(c, query, r) if r["fused_from"] else (r["summary"], None)
+                if evidence_id is None and not _FALLBACK_FUSION.match(r["content"]):
+                    summary = _excerpt_for_recall(query, summary, r["content"])
+            prefix = f"#{r['id']} {day} "
+            candidate = text + "\n" + prefix + summary
+            if estimate_tokens(candidate) > budget:
+                summary = _clip_recall_summary(prefix, summary, budget - estimate_tokens(text), query) if not items else ""
+                if not summary:
+                    continue
+                candidate = text + "\n" + prefix + summary
+                if estimate_tokens(candidate) > budget:
+                    continue
+            text = candidate
+            items.append({"id": r["id"], "date": day, "summary": summary, "score": round(score, 4),
                           "brightness": b, "tags": json.loads(r["tags"] or "[]")})
-            if used >= budget - 4:
+            if evidence_id is not None:
+                items[-1]["evidence_id"] = evidence_id
+            if estimate_tokens(text) >= budget:
                 break
         if bump and items:
             ids = [i["id"] for i in items]
             c.execute(f"UPDATE stars SET recall_count=recall_count+1, last_recalled_at=? WHERE id IN ({','.join('?' * len(ids))})",
                       (now, *ids))
-    text = (header + "\n" + "\n".join(lines)) if items else ""
+    text = text if items else ""
     tokens = estimate_tokens(text)
     if bump and items:
         log_event("recall", query=query[:200], ids=[i["id"] for i in items], tokens=tokens)

@@ -555,7 +555,7 @@ python tools/build_windows.py            # 输出 dist/星愿记忆/
 ## 十一、测试
 
 ```bash
-pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 pip install wsgidav cheroot      # 可选：用于测试 WebDAV
 python tests/smoke_test.py
 python tests/eye_test.py         # 宇宙之眼
@@ -567,6 +567,10 @@ python tests/watch_test.py       # 对话监控 / 钩子 / 抽屉 / 星系整理
 python tests/effort_test.py      # 星愿助手思考等级（三种协议怎么传、不支持时自动退回）
 python tests/voice_test.py       # 宇宙之声（需要 numpy；装了 sherpa-onnx 和真实模型时会多跑一项真实录音分人）
 ```
+
+依赖约束写在 `requirements.txt`，源码开发与 CI 使用带哈希的 `requirements.lock`。修改依赖约束后，用
+`uv pip compile requirements.txt --universal --python-version 3.10 --generate-hashes --output-file requirements.lock`
+更新锁文件并一起提交。在 Windows、Linux 的 Python 3.10 和 3.12 上，GitHub Actions 校验锁定依赖、浏览器脚本语法和隔离回归；不要求真实模型密钥，也不运行真实 Codex 或发布打包。
 
 冒烟测试会在临时目录建立独立灵魂包，启动真实服务器和模拟上游，验证：新增/去重、预算内召回、亮度与软删除、核心记忆锁、提案审批、核心记忆模块（主人指令 / 令牌 / 代理 /核心 / 版本历史 / 回滚撤销 / 上锁转提案）、技能自进化（模糊补丁 / 安全扫描 / 待批准 / 后台巡检阈值 / 自修复 / 注入 / MCP skill_manage）、
 星汐/zip/markdown/ChatGPT 导入、代理注入（非流式 + 流式）、LLM 整理、MCP（官方 SDK 与内置实现）、快照恢复、WebDAV 加密备份与版本保留、机密加密、1 万颗星性能。

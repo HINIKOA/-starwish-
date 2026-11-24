@@ -18,7 +18,8 @@ from pathlib import Path
 
 from .. import config, jobs, maintenance
 from ..db import log_event
-from . import adapters, extract, opencode
+from ..evolve import codex_review
+from . import adapters, codex_capture, extract, opencode
 from .adapters import CLIENTS
 from .state import State, inbox_path
 from .turns import Turn, is_trivial
@@ -30,6 +31,7 @@ MAX_FAILS = 3
 class Watcher:
     def __init__(self):
         self.state = State()
+        self.codex_only_session = os.environ.get("STARWISH_WATCH_CODEX_ONLY_SESSION")
         self.q: queue.Queue = queue.Queue()
         self.queued: set = set()
         self.delayed: dict = {}          # key -> (到期时间, force, hint)
@@ -37,6 +39,8 @@ class Watcher:
         self.lock = threading.RLock()    # 同一时刻只处理一个文件
         self.threads: list[threading.Thread] = []
         self.last_rescan: dict = {}
+        self.next_compact_check = 0.0
+        self.next_review_check = 0.0
         self.status = {"running": False, "last_run": None, "last_error": "", "turns": 0, "skipped": 0,
                        "waiting": "", "clients": {}, "started_at": None}
 
@@ -50,7 +54,18 @@ class Watcher:
         if not w.get("enabled", True):
             return []
         cl = w.get("clients") or {}
-        return [c for c in CLIENTS if (cl.get(c) or {}).get("enabled", False)]
+        return [c for c in CLIENTS if (cl.get(c) or {}).get("enabled", False)
+                and (self.codex_only_session is None or c == "codex")]
+
+    def _within_file_scope(self, client: str, path: str | Path) -> bool:
+        if self.codex_only_session is None:
+            return True
+        if client != "codex":
+            return False
+        try:
+            return adapters.codex_rollout_session(Path(path).resolve()) == self.codex_only_session
+        except (OSError, RuntimeError):
+            return False
 
     def _cst(self, c: str) -> dict:
         return self.status["clients"].setdefault(c, {"files": 0, "turns": 0, "last_turn": None, "last_error": ""})
@@ -127,10 +142,19 @@ class Watcher:
             self.queued.discard((kind, key))
         if kind == "file":
             return self.process_file(key, force, hint)
+        if kind == "codex_review":
+            self._process_codex_review(key)
+            return 0
         if kind == "db":
             return self.process_db(key, force)
+        if kind == "compact":
+            cfg = config.load_config()
+            if codex_capture.enabled() and self.wcfg(cfg).get("enabled", True) and self._llm_ok(cfg):
+                with self.lock:
+                    return codex_capture.drain(cfg, only_session=self.codex_only_session)
+            return 0
         if kind == "turn":
-            return self._process_turns([key], None)
+            return self._process_turns([key], None) if self.codex_only_session is None else 0
         return 0
 
     def _release_delayed(self, force_all: bool = False):
@@ -149,7 +173,8 @@ class Watcher:
         hot = float(w.get("hot_days") or 3) * 86400
         idle = float(w.get("idle_sec") or 45)
         rescan = float(w.get("rescan_sec") or 60)
-        for c in self.enabled_clients(cfg):
+        enabled_clients = self.enabled_clients(cfg)
+        for c in enabled_clients:
             ccfg = (w.get("clients") or {}).get(c) or {}
             if CLIENTS[c]["kind"] == "opencode":
                 self._poll_db(c, ccfg, w, now)
@@ -157,8 +182,14 @@ class Watcher:
             if c not in self.state.clients or now - self.last_rescan.get(c, 0) >= rescan:
                 self.rescan(c, ccfg, w, now)
             for key, fs in list(self.state.files.items()):
-                if fs.get("c") != c:
+                if fs.get("c") != c or not self._within_file_scope(c, key):
                     continue
+                review_state = fs.get("review")
+                if c == "codex" and review_state and now >= review_state.get("retry", 0):
+                    behind = review_state["o"] < int(fs.get("o") or 0)
+                    changed = (review_state.get("s"), review_state.get("m")) != (fs.get("s"), fs.get("m"))
+                    if review_state.get("retry") or (behind and changed):
+                        self.enqueue("codex_review", key)
                 if now - float(fs.get("m") or 0) > hot and not fs.get("p") and fs.get("s", -1) >= 0:
                     continue          # 冷文件：只在重新扫描目录时看一眼
                 try:
@@ -166,6 +197,12 @@ class Watcher:
                 except OSError:
                     continue
                 self._check(key, fs, st.st_size, st.st_mtime, now, idle)
+        if codex_capture.enabled() and w.get("enabled", True) and now >= self.next_compact_check:
+            self.next_compact_check = now + 60
+            self.enqueue("compact", "codex")
+        if "codex" in enabled_clients and now >= self.next_review_check:
+            self.next_review_check = now + 30
+            codex_review.spawn(only_session=self.codex_only_session)
 
     def rescan(self, c: str, ccfg: dict, w: dict, now: float) -> int:
         self.last_rescan[c] = now
@@ -176,6 +213,8 @@ class Watcher:
         new = 0
         idle = float(w.get("idle_sec") or 45)
         for p, mt, sz in found:
+            if not self._within_file_scope(c, p):
+                continue
             key = str(p)
             fs = self.state.files.get(key)
             if fs is not None:
@@ -189,7 +228,8 @@ class Watcher:
             new += 1
         if not init:
             self.state.clients[c] = {"init": now}
-        self._cst(c)["files"] = sum(1 for v in self.state.files.values() if v.get("c") == c)
+        self._cst(c)["files"] = sum(1 for key, v in self.state.files.items()
+                                  if v.get("c") == c and self._within_file_scope(c, key))
         if new or not init:
             self.state.save()
         return new
@@ -199,6 +239,9 @@ class Watcher:
             self.enqueue("file", key)
         elif fs.get("p") and now - mtime >= idle and now >= float(fs.get("retry") or 0):
             self.enqueue("file", key, force=True)
+        r = fs.get("review")
+        if r and (size, mtime) != (r.get("s"), r.get("m")) and now >= r.get("retry", 0):
+            self.enqueue("codex_review", key)
 
     def _poll_db(self, c: str, ccfg: dict, w: dict, now: float) -> None:
         for db in adapters.roots(c, ccfg):
@@ -237,7 +280,7 @@ class Watcher:
     def process_file(self, key: str, force: bool = False, hint: str = "") -> int:
         with self.lock:
             fs = self.state.files.get(key)
-            if not fs:
+            if not fs or not self._within_file_scope(fs["c"], key):
                 return 0
             cfg = config.load_config()
             c = fs["c"]
@@ -246,10 +289,17 @@ class Watcher:
                 st = path.stat()
             except OSError:
                 return 0
+            if c == "codex":
+                old_offset = int(fs.get("o") or 0)
+                review = fs.setdefault("review", {"o": old_offset if old_offset <= st.st_size else 0})
+                if (st.st_size, st.st_mtime) != (review.get("s"), review.get("m")) and time.time() >= review.get("retry", 0):
+                    self.enqueue("codex_review", key)
             if not self._llm_ok(cfg):
                 fs["p"] = True
                 fs["retry"] = time.time() + 60
                 fs["s"], fs["m"] = st.st_size, st.st_mtime
+                if c == "codex":
+                    self.state.save()
                 return 0
             off = int(fs.get("o") or 0)
             if CLIENTS[c]["kind"] == "dsh":
@@ -270,6 +320,11 @@ class Watcher:
             if not force and time.time() - st.st_mtime >= float(self.wcfg(cfg).get("idle_sec") or 45):
                 force = True     # 文件早就不动了（如关着软件时聊的）：最后一轮也算说完了
             turns, safe = adapters.parse(c, chunk, off, meta, path)
+            if self.codex_only_session is not None and (
+                meta.get("session_id") != self.codex_only_session
+                or any(t.session_id != self.codex_only_session for t in turns)
+            ):
+                return 0
             if force and turns and hint and not turns[-1].turn_complete:
                 h = hint.strip()
                 if h and h[-40:] not in turns[-1].assistant_text:
@@ -278,6 +333,43 @@ class Watcher:
             fs["s"], fs["m"] = st.st_size, st.st_mtime
             self.state.save()
             return n
+
+    def _process_codex_review(self, key: str) -> None:
+        with self.lock:
+            fs = self.state.files.get(key)
+            review = fs and fs.get("review")
+            if not review or time.time() < review.get("retry", 0) or not self._within_file_scope("codex", key):
+                return
+            cfg = config.load_config()
+            if fs["c"] != "codex" or "codex" not in self.enabled_clients(cfg):
+                return
+            path = Path(key)
+            try:
+                with path.open("rb") as stream:
+                    info = os.fstat(stream.fileno())
+                    offset = review["o"] if review["o"] <= info.st_size else 0
+                    stream.seek(offset)
+                    data = stream.read(info.st_size - offset)
+                turns, safe = adapters.parse_codex("codex", data, offset, {}, path)
+                interval = int((cfg.get("evolve") or {}).get("nudge_interval", 10))
+                schedule = False
+                for turn in turns:
+                    if not turn.turn_complete:
+                        break
+                    if turn.native_turn_id:
+                        count = codex_review.ingest(turn, cfg)
+                        schedule |= interval > 0 and count >= interval
+                    review["o"] = turn.end
+                review.update(o=safe, s=info.st_size, m=info.st_mtime)
+                review.pop("retry", None)
+            except Exception as exc:
+                review["retry"] = time.time() + 60
+                log_event("codex_review_ingest_error", error=type(exc).__name__)
+            else:
+                if schedule:
+                    codex_review.spawn(only_session=self.codex_only_session)
+            finally:
+                self.state.save()
 
     def _process_turns(self, turns: list[Turn], fs: dict | None, force: bool = False, end_safe: int | None = None,
                        on_done=None) -> int:
@@ -293,25 +385,37 @@ class Watcher:
         if fs is not None:
             fs.pop("stopped", None)
         for t in turns:
-            if not t.turn_complete and not force:
+            native = t.native_phase if codex_capture.enabled() and not t.delegated else ""
+            if not t.turn_complete and (not force or t.delegated or native == "started"):
                 pending = True
                 break
-            if is_trivial(t, min_chars):
+            if native in ("aborted", "started") or is_trivial(t, min_chars):
                 self.status["skipped"] += 1
             else:
                 if job is None:
                     job = jobs.start("watch", f"归纳 {CLIENTS.get(t.client, {}).get('title', t.client)} 的对话")
                 try:
-                    r = extract.process_turn(t, cfg)
+                    key = codex_capture.ordinary_key(t)
+                    r = codex_capture.normal(t, cfg, key) if key else extract.process_turn(t, cfg)
+                    if r is None:  # Another path already captured this completed turn.
+                        r = {}
+                        if fs is not None:
+                            fs["f"] = 0
+                    else:
+                        done += 1
+                        cs = self._cst(t.client)
+                        cs["turns"] += 1
+                        cs["last_turn"] = time.time()
+                        self.status["turns"] += 1
                     for k in totals:
                         totals[k] += r.get(k, 0)
-                    done += 1
                     if fs is not None:
                         fs["f"] = 0
-                    cs = self._cst(t.client)
-                    cs["turns"] += 1
-                    cs["last_turn"] = time.time()
-                    self.status["turns"] += 1
+                except codex_capture.Busy:
+                    if fs is not None:
+                        fs["p"], fs["retry"] = True, time.time() + 60
+                        stopped = True
+                    break
                 except Exception as e:  # noqa: BLE001
                     msg = f"{type(e).__name__}: {e}"[:300]
                     self._cst(t.client)["last_error"] = msg
@@ -350,6 +454,8 @@ class Watcher:
         return done
 
     def process_db(self, key: str, force: bool = False) -> int:
+        if self.codex_only_session is not None:
+            return 0
         with self.lock:
             ds = self.state.dbs.get(key)
             if not ds:
@@ -406,23 +512,28 @@ class Watcher:
                     self.enqueue("db", str(db), force=True, delay=delay)
             return {"ok": True, "queued": "db"}
         sid = str(payload.get("session_id") or payload.get("thread-id") or payload.get("thread_id") or "")
+        if self.codex_only_session is not None and sid and sid != self.codex_only_session:
+            return {"ok": False, "reason": "会话不在本次验收范围"}
         p = None
         tp = payload.get("transcript_path")
         if tp:
             cand = Path(os.path.expandvars(str(tp))).expanduser()
-            if adapters.under_roots(client, ccfg, cand) and cand.exists():
+            if (self._within_file_scope(client, cand) and adapters.under_roots(client, ccfg, cand)
+                    and cand.exists()):
                 p = cand
         if p is None and sid:
             p = adapters.find_session_file(client, ccfg, sid, float(w.get("hot_days") or 3))
         hint = str(payload.get("last_assistant_message") or payload.get("last-assistant-message") or "")
-        if p is not None:
+        if p is not None and self._within_file_scope(client, p):
             key = str(p)
             if key not in self.state.files:
                 self.state.clients.setdefault(client, {"init": time.time()})
                 self.state.files[key] = {"c": client, "o": 0, "s": -1, "m": 0, "meta": {}, "p": False, "f": 0}
                 self.state.save()
-            self.enqueue("file", key, force=True, hint=hint, delay=delay)
+            self.enqueue("file", key, force=True, hint=hint if self.codex_only_session is None else "", delay=delay)
             return {"ok": True, "queued": key}
+        if self.codex_only_session is not None:
+            return {"ok": False, "reason": "本次验收只使用指定会话的日志"}
         msgs = payload.get("input-messages") or payload.get("input_messages")
         prompt = "\n".join(msgs) if isinstance(msgs, list) else str(payload.get("prompt") or "")
         if hint and prompt:      # 读不到记录文件（如 dsh 的压缩日志）：用钩子自带的文字
@@ -433,6 +544,8 @@ class Watcher:
 
     def replay_inbox(self) -> int:
         """服务没开时钩子写进 inbox 的提醒：启动时补上，然后清空。"""
+        if self.codex_only_session is not None:
+            return 0
         p = inbox_path()
         if not p.exists():
             return 0
@@ -473,7 +586,7 @@ class Watcher:
                     continue
                 self.rescan(c, ccfg, w, now)
                 for key, fs in list(self.state.files.items()):
-                    if fs.get("c") != c:
+                    if fs.get("c") != c or not self._within_file_scope(c, key):
                         continue
                     try:
                         st = os.stat(key)

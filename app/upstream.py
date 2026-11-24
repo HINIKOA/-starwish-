@@ -21,6 +21,11 @@ import uuid
 
 import httpx
 
+from . import __version__
+
+OPENCODE_GO_BASE = "https://opencode.ai/inference/go/openai/v1"
+OPENCODE_GO_MODELS = "https://opencode.ai/inference/go/v1/models"
+
 PROTOCOLS = ("openai", "anthropic", "responses")
 NAMES = {"openai": "OpenAI 兼容（Chat Completions）", "anthropic": "Anthropic（Messages）",
          "responses": "OpenAI Responses"}
@@ -77,6 +82,12 @@ def headers(protocol: str, key: str) -> dict:
     elif key:
         h["Authorization"] = f"Bearer {key}"
     return h
+
+
+def opencode_go_headers(base: str, session_id: str | None = None) -> dict[str, str]:
+    if base.rstrip("/") != OPENCODE_GO_BASE:
+        return {}
+    return {"User-Agent": f"StarWish/{__version__}", "x-opencode-session": session_id or uuid.uuid4().hex}
 
 
 # ---------------- 通用小工具 ----------------
@@ -267,7 +278,8 @@ def _to_responses(body: dict) -> dict:
     return out
 
 
-def build(protocol: str, base: str, key: str, body: dict) -> tuple[str, dict, dict]:
+def build(protocol: str, base: str, key: str, body: dict, *,
+          session_id: str | None = None) -> tuple[str, dict, dict]:
     p = norm(protocol)
     if p == "anthropic":
         payload = _to_anthropic(body)
@@ -291,7 +303,7 @@ def build(protocol: str, base: str, key: str, body: dict) -> tuple[str, dict, di
             if eff != "none":
                 payload.pop("temperature", None)   # GPT-5 类推理模型思考时不接受温度
                 payload.pop("top_p", None)
-    return endpoint(p, base), headers(p, key), payload
+    return endpoint(p, base), {**headers(p, key), **opencode_go_headers(base, session_id)}, payload
 
 
 # ---------------- 回应：→ chat.completion ----------------
@@ -573,7 +585,7 @@ def complete(protocol: str, base: str, key: str, body: dict, timeout: float = 12
     dropped = False
     if _effort_of(body) != "default" and _effort_rejected(r):
         body = {k: v for k, v in body.items() if k != "reasoning_effort"}
-        url, h, payload = build(protocol, base, key, body)
+        url, h, payload = build(protocol, base, key, body, session_id=h.get("x-opencode-session"))
         r = httpx.post(url, json=payload, headers=h, timeout=timeout, follow_redirects=True)
         dropped = True
     r.raise_for_status()

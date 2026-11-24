@@ -312,13 +312,16 @@ LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 def is_owner(request: Request) -> bool:
     """主人身份：配置了主人令牌 → 必须带对令牌；没配置 → 只信任本机请求。"""
-    token = (config.load_config().get("core") or {}).get("owner_token") or ""
+    cfg = config.load_config()
+    token = (cfg.get("core") or {}).get("owner_token") or ""
     got = request.headers.get("x-starwish-owner", "")
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer "):
         got = got or auth[7:].strip()
     if token:
-        return bool(got) and hmac.compare_digest(got, token)
+        return bool(got) and hmac.compare_digest(got.encode("utf-8"), token.encode("utf-8"))
+    if cfg.get("secrets_encrypted") and (config.load_raw_config().get("core") or {}).get("owner_token"):
+        return False
     host = request.client.host if request.client else ""
     return host in LOOPBACK
 
@@ -463,17 +466,23 @@ def api_skill_manage(op: SkillOp, request: Request):
 
 
 @app.get("/api/skills/pending")
-def api_skill_pending():
-    return evolve.skills.list_pending()
+def api_skill_pending(request: Request):
+    _need_owner(request)
+    return JSONResponse(evolve.skills.list_pending(), headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/skills/pending/{pid}/approve")
-def api_skill_approve(pid: str):
-    return evolve.skills.decide_pending(pid, True)
+def api_skill_approve(pid: str, request: Request):
+    _need_owner(request)
+    result = evolve.skills.decide_pending(pid, True)
+    if not result.get("success"):
+        return JSONResponse(result, status_code=409)
+    return result
 
 
 @app.post("/api/skills/pending/{pid}/reject")
-def api_skill_reject(pid: str):
+def api_skill_reject(pid: str, request: Request):
+    _need_owner(request)
     return evolve.skills.decide_pending(pid, False)
 
 
@@ -517,6 +526,32 @@ def api_skill_pin(name: str, pinned: bool = True):
 @app.get("/api/evolve/status")
 def api_evolve_status():
     return evolve.review.status()
+
+
+class CodexReviewAcknowledgement(BaseModel):
+    through: int
+
+
+@app.get("/api/evolve/codex-review/recovery")
+def api_codex_review_recoveries(request: Request):
+    from .evolve import codex_review
+
+    _need_owner(request)
+    return JSONResponse(codex_review.recoveries(), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/evolve/codex-review/recovery/{batch}/acknowledge")
+def api_codex_review_acknowledge(batch: str, req: CodexReviewAcknowledgement, request: Request):
+    from .evolve import codex_review
+
+    _need_owner(request)
+    try:
+        count = codex_review.acknowledge(batch, req.through)
+    except KeyError as exc:
+        raise HTTPException(404, "待核对批次不存在或已结案") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"closed_turns": count}
 
 
 @app.post("/api/evolve/review")
@@ -756,7 +791,7 @@ def providers_check(body: dict):
 
 
 @app.put("/api/settings")
-def put_settings(patch: dict):
+def put_settings(patch: dict, request: Request):
     patch = dict(patch or {})
     for k in ("secrets_encrypted", "secrets_salt", "secrets_unlocked"):
         patch.pop(k, None)
@@ -766,6 +801,12 @@ def put_settings(patch: dict):
             v = patch[sec].get(key)
             if v is None or (isinstance(v, str) and v.startswith("****")):
                 patch[sec].pop(key, None)
+    if any(k in patch and not isinstance(patch[k], dict) for k in ("core", "evolve")):
+        raise HTTPException(400, "核心记忆或技能设置格式不正确")
+    if "evolve" in patch or "owner_token" in patch.get("core", {}):
+        _need_owner(request)
+    if "owner_token" in patch.get("core", {}) and not isinstance(patch["core"]["owner_token"], str):
+        raise HTTPException(400, "主人令牌必须是字符串")
     before = semantic.active(config.load_config())
     config.update_config(patch)
     log_event("settings_update", keys=sorted(patch.keys()))
@@ -1165,9 +1206,9 @@ def embed_status():
 
 @app.post("/api/embed/install")
 def embed_install(req: EmbedInstall):
-    if req.kind not in embed_models.LOCAL:
-        raise HTTPException(400, "只有 small / m3 需要下载")
-    jobs = embed_models.install(req.kind, (config.load_config().get("embed") or {}), deps=req.deps)
+    if req.kind != "deps" and req.kind not in embed_models.LOCAL:
+        raise HTTPException(400, "只支持安装运行库（deps）或本地向量模型（small / m3）")
+    jobs = embed_models.install(req.kind, (config.load_config().get("embed") or {}), deps=req.deps or req.kind == "deps")
     log_event("embed_install", kind=req.kind)
     return {"jobs": jobs}
 
@@ -1178,6 +1219,8 @@ def embed_remove(kind: str):
         raise HTTPException(404, "没有这个模型")
     try:
         return {"removed": embed_models.uninstall(kind)}
+    except embed_models.ModelBusyError as ex:
+        raise HTTPException(409, str(ex))
     except ValueError as ex:
         raise HTTPException(400, str(ex))
 
@@ -1512,7 +1555,8 @@ async def api_organize(request: Request, background: bool = True):
 
 @app.get("/api/organize/categories")
 def api_categories():
-    return {"categories": organize.categories(), "last": config.load_state().get("last_organize")}
+    return {"categories": organize.categories(), "presets": organize.PRESET_CATEGORIES,
+            "last": config.load_state().get("last_organize")}
 
 
 @app.post("/api/stars/{sid}/category")

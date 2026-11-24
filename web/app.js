@@ -868,35 +868,143 @@ function panelSettings() { toggleSettings(); }   // v0.8.0：设置改为独立�
 
 // —— 向量模型状态卡 ——
 const EMB_NAME = { small: "内置 bge-small-zh", m3: "BGE-M3", api: "Qwen3-Embedding 接口" };
-async function embedPanel() {
+function embedPanel() {
   const box = $("#embBox"); if (!box) return;
-  const st = await safe(() => api("/api/embed/status")); if (!st || !$("#embBox")) return;
-  const mb = (b) => (b / 1e6).toFixed(1) + "MB";
-  const job = (j) => !j ? "" : j.state === "running" ? ` · 下载中 ${Math.round((100 * j.done) / (j.total || 1))}%` : j.state === "error" ? ` · <span class="warn">下载失败：${esc(j.error)}</span>` : "";
-  const L = st.local, cov = st.coverage, busy = Object.values(st.jobs || {}).some((j) => j.state === "running") || st.backfill.state === "running";
-  box.innerHTML = `
-    <div class="card"><div>正在使用：<b>${st.active ? EMB_NAME[st.active] : "无（只用字面检索）"}</b>${st.note ? ` · <span class="warn">${esc(st.note)}</span>` : ""}</div>
-      <div class="meta">已有向量 ${cov.done}/${cov.total} 颗星${st.backfill.state === "running" ? " · 正在后台补齐…" : ""}${st.deps_ok ? "" : ` · <span class="warn">缺少运行库（onnxruntime / tokenizers / numpy，约 ${st.deps_mb}MB）</span>`}</div></div>
-    <div class="card"><b>① 内置 bge-small-zh int8</b> · 512 维 · ${L.small.installed ? `<span class="okc">已就绪 ${mb(L.small.bytes)}</span>` : `<span class="warn">未找到，需下载 ${L.small.need_mb}MB</span>`}${job(L.small.job)}
-      <div class="meta">常驻默认，完整包自带；中文为主，CPU 上每条约 10 毫秒。</div></div>
-    <div class="card"><b>② BGE-M3 int8</b> · 1024 维 · ${L.m3.installed ? `<span class="okc">已部署 ${mb(L.m3.bytes)}</span>` : `未安装（约 ${L.m3.need_mb}MB）`}${job(L.m3.job)}
-      <div class="meta">中英等 100+ 语言、长文本更强；占内存约 1GB，放在程序目录 models/embed/m3，不进灵魂包。</div></div>
-    <div class="card"><b>③ Qwen3-Embedding 接口</b> · ${st.api.configured ? `<span class="okc">已填写（${esc(st.api.model)}${st.api.dimensions ? " · " + st.api.dimensions + " 维" : ""}）</span>` : "未选择接口模型（在「默认模型」里选）"}${st.api.error ? ` · <span class="warn">${esc(st.api.error)}</span>` : ""}
-      <div class="meta">在「模型服务」添加服务商（如阿里云百炼、硅基流动）并同步模型后，到「默认模型」选向量模型。按量计费，记忆内容会发给接口方。</div></div>
-    <div class="row">
-      ${!st.deps_ok ? '<button id="embDeps">一键安装运行库</button>' : ""}
-      ${!L.small.installed ? '<button id="embSmall">下载内置模型</button>' : ""}
-      ${L.m3.installed ? '<button class="danger" id="embM3Del">删除 BGE-M3</button>' : `<button class="primary" id="embM3">一键部署 BGE-M3（约 ${L.m3.need_mb}MB）</button>`}
-      <button id="embTest">检查向量接口</button><button id="embRe">重新补齐向量</button>
-    </div>`;
-  const inst = (kind) => safe(async () => { await api("/api/embed/install", { method: "POST", body: { kind } }); toast("已在后台开始"); embedPanel(); });
-  if ($("#embDeps")) $("#embDeps").onclick = () => inst("small");
-  if ($("#embSmall")) $("#embSmall").onclick = () => inst("small");
-  if ($("#embM3")) $("#embM3").onclick = () => confirm(`下载 BGE-M3（约 ${L.m3.need_mb}MB）到程序目录？下载完在上面选「②」并保存即可切换。`) && inst("m3");
-  if ($("#embM3Del")) $("#embM3Del").onclick = () => confirm("删除 BGE-M3 模型文件？（向量还留在灵魂包里，重新部署后可直接用）") && safe(async () => { await api("/api/embed/models/m3", { method: "DELETE" }); toast("已删除"); embedPanel(); });
-  $("#embTest").onclick = () => safe(async () => { const r = await api("/api/embed/test", { method: "POST" }); toast(`接口可用：${r.dim} 维 · ${r.ms} 毫秒 · 「羽绒服」与「保暖外套」相似度 ${r.sim}`); embedPanel(); });
-  $("#embRe").onclick = () => safe(async () => { await api("/api/embed/backfill", { method: "POST" }); toast("已在后台补齐"); embedPanel(); });
-  if (busy) setTimeout(embedPanel, 2000);
+  box.innerHTML = `<div class="row"><button id="embRefresh" type="button">刷新模型状态</button>
+      <span class="meta" id="embStatusNote" role="status">正在读取…</span></div>
+    <div class="meta" id="embActionNote" role="status"></div><div id="embDetails"></div>`;
+  const refreshButton = box.querySelector("#embRefresh");
+  const note = box.querySelector("#embStatusNote");
+  const action = box.querySelector("#embActionNote");
+  const details = box.querySelector("#embDetails");
+  let pendingRead, timer, watching = false, submitting = false, clearingM3 = false, lastMarkup;
+
+  function refreshStatus(manual = false) {
+    clearTimeout(timer);
+    if (!box.isConnected) return;
+    if (manual) {
+      refreshButton.disabled = true;
+      refreshButton.textContent = "刷新中…";
+      note.textContent = "正在刷新模型状态…";
+    }
+    if (pendingRead) return pendingRead;
+    pendingRead = api("/api/embed/status", { cache: "no-store" }).then(st => {
+      if (!box.isConnected) return;
+      watching = Object.values(st.jobs || {}).some(j => j.state === "running") || st.backfill.state === "running";
+      render(st);
+      const text = `最近检查：${fmtDate(Date.now() / 1000)}`;
+      if (note.textContent !== text) note.textContent = text;
+    }).catch(e => {
+      if (box.isConnected) note.textContent = `状态读取失败：${e.message}。可点击刷新重试。`;
+    }).finally(() => {
+      pendingRead = null;
+      refreshButton.disabled = false;
+      refreshButton.textContent = "刷新模型状态";
+      if ((watching || submitting) && box.isConnected) timer = setTimeout(refreshStatus, 2000);
+    });
+    return pendingRead;
+  }
+
+  async function install(kind, button) {
+    if (submitting || (kind === "m3" && clearingM3)) return;
+    submitting = true;
+    button.disabled = true;
+    action.textContent = kind === "deps" ? "正在提交运行库安装…" : "正在提交模型下载…";
+    try {
+      const result = await api("/api/embed/install", { method: "POST", body: { kind } });
+      if (!box.isConnected) return;
+      if (pendingRead) await pendingRead;
+      watching = Object.values(result.jobs || {}).some(job => job.state === "running");
+      action.textContent = "";
+      await refreshStatus();
+    } catch (e) {
+      if (box.isConnected) {
+        const olderServer = kind === "deps" && e.status === 400 && e.message.includes("只有 small / m3");
+        action.textContent = olderServer ? "当前服务仍在使用旧版安装接口，请重启星愿后重试。" : `未能提交安装：${e.message}`;
+      }
+    } finally {
+      submitting = false;
+      if (button.isConnected) button.disabled = false;
+    }
+  }
+
+  async function clearM3() {
+    if (submitting || clearingM3) return;
+    if (!confirm("清除 BGE-M3 的模型文件和下载残留？已保存的记忆和向量不会删除。")) return;
+    clearingM3 = true;
+    action.textContent = "正在清除 BGE-M3 部署…";
+    for (const id of ["#embM3", "#embM3Del"]) {
+      const button = details.querySelector(id);
+      if (button) button.disabled = true;
+    }
+    try {
+      const { removed } = await api("/api/embed/models/m3", { method: "DELETE" });
+      action.textContent = removed ? `已清除 BGE-M3 部署（${(removed / 1e6).toFixed(1)}MB）。` : "清除完成。";
+    } catch (e) {
+      action.textContent = `未能清除 BGE-M3：${e.message}`;
+    } finally {
+      clearingM3 = false;
+      lastMarkup = undefined;
+      if (pendingRead) await pendingRead;
+      refreshStatus();
+    }
+  }
+
+  function render(st) {
+    const mb = (b) => (b / 1e6).toFixed(1) + "MB";
+    const job = (j) => !j ? "" : j.state === "running" ? ` · ${j.total ? `下载中 ${Math.min(100, Math.round(100 * j.done / j.total))}%` : "正在准备下载…"}` : j.state === "error" ? ` · <span class="warn">下载失败：${esc(j.error)}</span>` : "";
+    const L = st.local, cov = st.coverage, deps = st.jobs?.deps;
+    const m3Busy = L.m3.job?.state === "running";
+    const m3HasFiles = L.m3.has_files ?? (L.m3.installed || L.m3.bytes > 0);
+    const m3CleanupHint = m3Busy ? "下载中，结束后可清除。" : !m3HasFiles ? "没有可清除的部署文件。" :
+      "只清除 BGE-M3 模型与下载残留，保留记忆和向量。";
+    const depBusy = deps?.state === "running";
+    const depPhase = { queued: "等待安装", installing: "正在安装", verifying: "正在验证" };
+    const depLabel = depBusy ? depPhase[deps.phase] || "正在安装" : st.deps_ok ? "运行库已就绪" : deps?.state === "error" ? "运行库安装未完成" : "缺少运行库";
+    const depModules = Object.entries(st.deps || {}).map(([name, dep]) =>
+      `${esc(name)} ${dep.ok ? `已就绪 ${esc(dep.version)}` : "未就绪"}`).join(" · ");
+    const depMessage = depBusy ? `<div class="meta">${esc(deps.log || depLabel)}</div><progress aria-label="运行库安装进度"></progress>` :
+      deps?.state === "error" ? `<div class="warn">${esc(deps.phase ? deps.error : "上次安装失败，请重试。")}</div>` :
+      deps?.state === "done" && st.deps_ok ? '<div class="meta">已验证运行库可以加载。</div>' : "";
+    const markup = `
+      <div class="card"><div>正在使用：<b>${st.active ? EMB_NAME[st.active] : "无（只用字面检索）"}</b>${st.note ? ` · <span class="warn">${esc(st.note)}</span>` : ""}</div>
+        <div class="meta">已有向量 ${cov.done}/${cov.total} 颗星${st.backfill.state === "running" ? " · 正在后台补齐…" : ""}</div></div>
+      <div class="card"><b>本地运行库</b> · <span class="${depBusy ? "meta" : st.deps_ok ? "okc" : "warn"}">${depLabel}</span>
+        <div class="meta">${depModules}${!st.deps_ok && !depBusy ? ` · 安装约 ${st.deps_mb}MB` : ""}</div>${depMessage}</div>
+      <div class="card"><b>① 内置 bge-small-zh int8</b> · 512 维 · ${L.small.installed ? `<span class="okc">已就绪 ${mb(L.small.bytes)}</span>` : `<span class="warn">未找到，需下载 ${L.small.need_mb}MB</span>`}${job(L.small.job)}
+        <div class="meta">常驻默认，完整包自带；中文为主，CPU 上每条约 10 毫秒。</div></div>
+      <div class="card"><b>② BGE-M3 int8</b> · 1024 维 · ${L.m3.installed ? `<span class="okc">已部署 ${mb(L.m3.bytes)}</span>` : `未安装（约 ${L.m3.need_mb}MB）`}${job(L.m3.job)}
+        ${!L.m3.installed && m3HasFiles && !m3Busy ? '<div class="meta">检测到未完成的部署文件，可继续部署或清除。</div>' : ""}
+        <div class="meta">中英等 100+ 语言、长文本更强；占内存约 1GB，放在程序目录 models/embed/m3，不进灵魂包。</div></div>
+      <div class="card"><b>③ Qwen3-Embedding 接口</b> · ${st.api.configured ? `<span class="okc">已填写（${esc(st.api.model)}${st.api.dimensions ? " · " + st.api.dimensions + " 维" : ""}）</span>` : "未选择接口模型（在「默认模型」里选）"}${st.api.error ? ` · <span class="warn">${esc(st.api.error)}</span>` : ""}
+        <div class="meta">在「模型服务」添加服务商（如阿里云百炼、硅基流动）并同步模型后，到「默认模型」选向量模型。按量计费，记忆内容会发给接口方。</div></div>
+      <div class="row">
+        ${!st.deps_ok || depBusy ? `<button id="embDeps" ${depBusy ? "disabled" : ""}>${depBusy ? depLabel + "…" : deps?.state === "error" ? "重试安装运行库" : "一键安装运行库"}</button>` : ""}
+        ${!L.small.installed ? `<button id="embSmall" ${L.small.job?.state === "running" ? "disabled" : ""}>下载内置模型</button>` : ""}
+        ${L.m3.installed ? '<button id="embM3" disabled>BGE-M3 已部署</button>' : `<button class="primary" id="embM3" ${m3Busy || clearingM3 ? "disabled" : ""}>一键部署 BGE-M3（约 ${L.m3.need_mb}MB）</button>`}
+        <button id="embTest">检查向量接口</button><button id="embRe">重新补齐向量</button>
+      </div>
+      <div class="row">
+        <button class="danger" id="embM3Del" aria-describedby="embM3ClearHint" ${!m3HasFiles || m3Busy || clearingM3 ? "disabled" : ""}>一键清除 BGE-M3 部署</button>
+        <span class="meta" id="embM3ClearHint">${m3CleanupHint}</span>
+      </div>`;
+    if (markup === lastMarkup) return;
+    lastMarkup = markup;
+    details.innerHTML = markup;
+    const bind = (id, handler) => {
+      const button = details.querySelector(id);
+      if (button) button.onclick = () => handler(button);
+    };
+    bind("#embDeps", button => install("deps", button));
+    bind("#embSmall", button => install("small", button));
+    bind("#embM3", button => confirm(`下载 BGE-M3（约 ${L.m3.need_mb}MB）到程序目录？下载完在上面选「②」并保存即可切换。`) && install("m3", button));
+    bind("#embM3Del", clearM3);
+    bind("#embTest", () => safe(async () => { const r = await api("/api/embed/test", { method: "POST" }); toast(`接口可用：${r.dim} 维 · ${r.ms} 毫秒 · 「羽绒服」与「保暖外套」相似度 ${r.sim}`); refreshStatus(); }));
+    bind("#embRe", () => safe(async () => { await api("/api/embed/backfill", { method: "POST" }); toast("已在后台补齐"); refreshStatus(); }));
+  }
+
+  refreshButton.onclick = () => refreshStatus(true);
+  refreshStatus();
 }
 
 // —— 事件日志 ——

@@ -1,3 +1,5 @@
+import { saveProtectedSettings } from "./owner-settings.js";
+
 const EYE_ICON = '<svg class="ico-eye" viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-0.125em"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
 // 星愿记忆 —— 设置（v0.11.0 重做）：整页设置视图（左上「← 返回」），仿 Cherry Studio：
 // 左栏分组导航（基础 / 工具 / 偏好，可搜索）→ 有子页的分区多一栏子导航 → 右侧圆角卡片（标题、细分隔线、左标签右控件、灰色说明）。
@@ -162,7 +164,8 @@ const sel = (path, opts, w = "") => `<select class="sv-in ${w}" data-k="${path}"
 const seg = (path, opts) => `<div class="seg" data-seg="${path}">${opts.map(([v, t]) => `<button data-v="${E(v)}" class="${String(val(path)) === String(v) ? "on" : ""}">${t}</button>`).join("")}</div>`;
 
 async function savePatch(patch) {
-  cfg = await C.api("/api/settings", { method: "PUT", body: patch });
+  const guarded = Object.hasOwn(patch, "evolve") || Object.hasOwn(patch.core || {}, "owner_token");
+  cfg = guarded ? await saveProtectedSettings(C.api, patch) : await C.api("/api/settings", { method: "PUT", body: patch });
   flash("已自动保存");
   if (patch.ui) window.StarTheme?.apply(cfg.ui);
   if (patch.llm || patch.core) window.dispatchEvent(new Event("starwish-agent-config"));
@@ -577,7 +580,7 @@ function pageProfile(m) {
   </form>`;
   m.innerHTML = card("主人", row("关于主人（核心记忆 · 第二段）", `<a class="sv-link" href="/core?from=profile">去核心记忆编辑 ↗</a>`,
       '<span id="profileOwner">正在加载主人信息…</span>') +
-    row("主人令牌", inp("core.owner_token", "secret", "", "w-m"), "远程（不在本机）调用 API / 云服务器同步时用它证明是你；本机访问不需要。")) +
+    row("主人令牌", inp("core.owner_token", "secret", "", "w-m"), "设置后，受保护的操作需要验证令牌；未设置时仅信任本机。")) +
     `<details class="sv-card sv-security" ${locked ? "open" : ""}>
       <summary class="sv-card-h">高级安全 <span class="sv-security-state ${locked ? "warn" : encrypted ? "okc" : "muted"}">${securityState}</span></summary>
       <div class="sv-security-body">
